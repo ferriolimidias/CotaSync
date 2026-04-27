@@ -1,0 +1,11 @@
+__pycache__
+*.py[cod]
+.git
+.env
+*.log
+.venv
+venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+OneDrive

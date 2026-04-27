@@ -1,0 +1,71 @@
+# Orquestração CotaSync: Browserless + Evolution (Postgres/Redis) + app Python.
+# Ajuste variáveis em `.env` antes de subir em produção.
+
+services:
+  browserless:
+    image: ghcr.io/browserless/chromium:latest
+    ports:
+      - "3000:3000"
+    environment:
+      TIMEOUT: "600000"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution
+      POSTGRES_DB: evolution
+    volumes:
+      - evolution_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  evolution-api:
+    image: atendai/evolution-api:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      # URL pública da Evolution (ajuste se usar proxy/domínio).
+      SERVER_URL: http://localhost:8080
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-changeme}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://evolution:evolution@postgres:5432/evolution?schema=public
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/0
+      CACHE_LOCAL_ENABLED: "false"
+    restart: unless-stopped
+
+  cotasync_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - browserless
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      # Dentro da rede Docker o host `localhost` do .env aponta para o próprio container;
+      # sobrescrevemos para alcançar o serviço Browserless.
+      BROWSERLESS_URL: ws://browserless:3000
+    restart: unless-stopped
+
+volumes:
+  evolution_postgres_data:

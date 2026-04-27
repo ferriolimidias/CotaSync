@@ -1,0 +1,12 @@
+# CotaSync — dependências principais
+fastapi
+uvicorn[standard]
+streamlit
+playwright
+langchain
+langchain-openai
+pydantic
+apscheduler
+python-dotenv
+requests
+audio-recorder-streamlit
