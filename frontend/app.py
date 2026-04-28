@@ -37,6 +37,7 @@ from backend.agente import processar_mensagem  # noqa: E402
 _EVIDENCIA = "print_teste.png"
 _UI_MAP_PATH = _ROOT / "ui_map.json"
 _WHITELIST_PATH = _ROOT / "usuarios_autorizados.json"
+_ERP_CONFIG_PATH = _ROOT / "erp_config.json"
 
 try:
     API_BASE_URL = st.secrets["API_BASE_URL"]
@@ -137,8 +138,8 @@ with st.sidebar:
     st.caption("Status do sistema: 🟢 Online")
     menu_selecionado = option_menu(
         menu_title="Menu Principal",
-        options=["Chat & Ações", "Agendamentos e Filas", "Catálogo", "Robô ao Vivo", "Configurações"],
-        icons=["chat-dots", "calendar2-check", "book", "display", "gear"],
+        options=["Chat & Ações", "Agendamentos e Filas", "Logs do Sistema", "Configurações"],
+        icons=["chat-dots", "calendar2-check", "terminal", "gear"],
         default_index=0,
         styles={
             "container": {"padding": "0!important", "background-color": "#0f172a"},
@@ -183,6 +184,46 @@ if menu_selecionado == "Chat & Ações":
                 conteudo = str(msg.get("content", ""))
                 if _EVIDENCIA in conteudo and os.path.exists(str(caminho_evidencia)):
                     st.image(str(caminho_evidencia), caption="Evidencia do Sistema")
+
+    # --- INÍCIO: MENU DE EXECUÇÃO RÁPIDA (FAST-TRACK) ---
+    st.divider()
+    st.caption("⚡ Execução Rápida de Ações Aprendidas")
+    
+    # Carrega a memória para ver o que o robô já sabe
+    import json
+    import os
+    
+    acoes_conhecidas = {}
+    if os.path.exists("ui_map.json"):
+        try:
+            with open("ui_map.json", "r", encoding="utf-8") as f:
+                memoria = json.load(f)
+                acoes_conhecidas = memoria.get("acoes_conhecidas", {})
+        except:
+            pass
+
+    if acoes_conhecidas:
+        col1, col2 = st.columns([3, 1])
+        
+        # Cria um mapeamento: "Nome Amigável" -> "chave_da_acao"
+        opcoes_amigaveis = {dados.get("nome_amigavel", chave): chave for chave, dados in acoes_conhecidas.items()}
+        
+        with col1:
+            acao_selecionada_nome = st.selectbox(
+                "Selecione uma ação para disparar:", 
+                options=list(opcoes_amigaveis.keys()),
+                label_visibility="collapsed"
+            )
+            
+        with col2:
+            if st.button("🚀 Disparar Ação", use_container_width=True):
+                chave_acao = opcoes_amigaveis[acao_selecionada_nome]
+                # Injeta a ação diretamente no chat do usuário
+                st.session_state.messages.append({"role": "user", "content": chave_acao})
+                st.rerun()
+    else:
+        st.info("💡 O sistema ainda não aprendeu nenhuma rotina. Escreva 'Quero te ensinar uma rotina' no chat para começar!")
+    # --- FIM: MENU DE EXECUÇÃO RÁPIDA ---
 
     prompt = st.chat_input("Digite sua mensagem operacional...", key="chat_operacional")
     if prompt:
@@ -248,38 +289,14 @@ elif menu_selecionado == "Agendamentos e Filas":
     st.markdown("**Logs recentes**")
     st.code(st.session_state.cron_log_text.strip() + "\n")
 
-elif menu_selecionado == "Catálogo":
-    st.markdown("##### Catálogo de ações conhecidas")
-    busca = st.text_input(
-        "Buscar rotina...",
-        placeholder="ex.: consulta, boleto, login",
-        key="busca_catalogo",
-    )
-
-    if not _UI_MAP_PATH.is_file():
-        st.warning("Arquivo `ui_map.json` nao encontrado na raiz do projeto.")
-    elif not nomes_acoes:
-        st.info("Nenhuma acao aprendida ainda. Ensine o robo pelo chat.")
-    else:
-        consulta = (busca or "").strip().lower()
-        filtradas = [nome for nome in nomes_acoes if not consulta or consulta in nome.lower()]
-        if not filtradas:
-            st.caption("Nenhum resultado para a busca atual.")
-        for nome in filtradas:
-            with st.expander(f"**{nome}**", expanded=False):
-                st.json(acoes_conhecidas.get(nome) if acoes_conhecidas.get(nome) is not None else {})
-
-elif menu_selecionado == "Robô ao Vivo":
-    st.markdown("##### Robô ao Vivo - Intervenção")
-    st.info(
-        "💡 **Dica de Intervenção:** Abaixo está a 'televisão' do robô. Quando uma automação "
-        "roda, a janela aparece aqui. Para acessar o seu ERP manualmente e logar, utilize a "
-        "interface do depurador abaixo."
-    )
-    st.components.v1.iframe(
-        src="http://84.46.253.236:3000/debugger?token=ferrioli_super_secreto_123",
-        height=800,
-        scrolling=True,
+elif menu_selecionado == "Logs do Sistema":
+    st.markdown("##### Logs do Sistema")
+    st.info("🔒 Área Restrita: Operação invisível em background.")
+    st.code(
+        "[10:00:05] CotaSync iniciado...\n"
+        "[10:00:08] Motor Browserless conectado.\n"
+        "[10:00:10] Aguardando comandos no canal operacional.\n"
+        "[10:00:13] Fila de automações em estado ocioso."
     )
 
 elif menu_selecionado == "Configurações":
@@ -356,3 +373,42 @@ elif menu_selecionado == "Configurações":
     with col_disconnect:
         if st.button("❌ Desconectar", use_container_width=True):
             st.info("Simulacao: sessao WhatsApp marcada para desconexao.")
+
+    st.divider()
+    st.subheader("Credenciais do Sistema Externo (ERP)")
+
+    def _carregar_erp_config() -> dict:
+        try:
+            if not _ERP_CONFIG_PATH.is_file():
+                return {"url_sistema": "", "usuario": "", "senha": ""}
+            data = json.loads(_ERP_CONFIG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {"url_sistema": "", "usuario": "", "senha": ""}
+            return {
+                "url_sistema": str(data.get("url_sistema", "")),
+                "usuario": str(data.get("usuario", "")),
+                "senha": str(data.get("senha", "")),
+            }
+        except (json.JSONDecodeError, OSError):
+            return {"url_sistema": "", "usuario": "", "senha": ""}
+
+    dados_erp = _carregar_erp_config()
+    with st.form("erp_config_form"):
+        url_sistema = st.text_input("URL do Sistema", value=dados_erp["url_sistema"])
+        usuario_erp = st.text_input("Usuário", value=dados_erp["usuario"])
+        senha_erp = st.text_input("Senha", value=dados_erp["senha"], type="password")
+        salvar_erp = st.form_submit_button("Salvar Credenciais ERP", use_container_width=True)
+        if salvar_erp:
+            try:
+                payload = {
+                    "url_sistema": url_sistema.strip(),
+                    "usuario": usuario_erp.strip(),
+                    "senha": senha_erp,
+                }
+                _ERP_CONFIG_PATH.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                st.success("Credenciais do ERP salvas com sucesso.")
+            except OSError as exc:
+                st.error(f"Nao foi possivel salvar `erp_config.json`: {exc}")

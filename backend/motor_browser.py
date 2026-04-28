@@ -7,6 +7,7 @@ O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
@@ -138,3 +139,20 @@ async def exemplo_navegacao(url: str = "https://example.com") -> str:
     finally:
         await browser.close()
         await pw.stop()
+
+
+async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
+    """Simula a IA acessando o ERP e descobrindo os botões baseada na instrução humana."""
+    await asyncio.sleep(3)  # Simula o tempo da IA mapeando a tela
+
+    # Gera uma "receita" no padrão estrito da arquitetura
+    passos_aprendidos = {
+        "nome_amigavel": nome_acao.replace("_", " ").title(),
+        "descricao": f"Ação baseada na instrução: {instrucao_humana[:30]}...",
+        "url_inicial": "Lida do erp_config.json",
+        "passos_playwright": [
+            {"tipo": "preencher", "seletor": "#campo_busca_simulado", "variavel": "input_usuario"},
+            {"tipo": "clicar", "seletor": "#btn_confirmar_simulado"},
+        ],
+    }
+    return passos_aprendidos
