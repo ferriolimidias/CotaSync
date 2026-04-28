@@ -8,7 +8,6 @@ O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
 from __future__ import annotations
 
 import os
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -79,10 +78,12 @@ async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
             finally:
                 if browser is not None:
                     await browser.close()
-    except Exception:
+    except Exception as e:
+        # Log no terminal (uvicorn / streamlit) para diagnóstico rápido.
+        print(f"Erro no Playwright: {e}")
         return {
             "status": "erro",
-            "texto_extraido": traceback.format_exc(),
+            "texto_extraido": f"Erro técnico: {str(e)}",
             "caminho_imagem": "",
         }
 
