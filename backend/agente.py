@@ -1,7 +1,7 @@
 """
 Cérebro do CotaSync: agente LangChain com ChatOpenAI e tools operacionais.
 
-Próximas iterações: conectar ao FastAPI/Streamlit e enriquecer o prompt com contexto omnichannel.
+Integração Streamlit: use `processar_mensagem` (assíncrona) ou `asyncio.run(...)` no app.
 """
 
 from __future__ import annotations
@@ -12,7 +12,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
@@ -36,16 +37,35 @@ async def consultar_cadastro_erp(documento: str) -> str:
 
 
 def _criar_llm() -> ChatOpenAI:
-    # ChatOpenAI lê OPENAI_API_KEY do ambiente automaticamente se não passarmos api_key.
+    # gpt-4o-mini: rápido e econômico; temperatura 0 para respostas estáveis em operação.
     return ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        model="gpt-4o-mini",
         temperature=0,
+        api_key=os.getenv("OPENAI_API_KEY") or None,
     )
+
+
+def _historico_dicts_para_mensagens(historico: list[Any]) -> list[BaseMessage]:
+    """
+    Converte o histórico vindo do Streamlit (`role` + `content`) em mensagens LangChain.
+    Ignora entradas sem role reconhecida.
+    """
+    mensagens: list[BaseMessage] = []
+    for item in historico or []:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content", "")
+        if role == "user":
+            mensagens.append(HumanMessage(content=str(content)))
+        elif role == "assistant":
+            mensagens.append(AIMessage(content=str(content)))
+    return mensagens
 
 
 def criar_agente_executor() -> AgentExecutor:
     """
-    Monta o agente com tools e um prompt mínimo para chamadas estruturadas (tool calling).
+    Monta o agente com tools e prompt compatível com `create_tool_calling_agent`.
     """
     llm = _criar_llm()
     tools = [consultar_cadastro_erp]
@@ -58,9 +78,9 @@ def criar_agente_executor() -> AgentExecutor:
                 "Use as ferramentas quando precisar de dados de sistemas externos. "
                 "Seja objetivo e cite o documento consultado quando aplicável.",
             ),
-            ("placeholder", "{chat_history}"),
+            MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
-            ("placeholder", "{agent_scratchpad}"),
+            MessagesPlaceholder("agent_scratchpad"),
         ]
     )
 
@@ -73,24 +93,51 @@ def criar_agente_executor() -> AgentExecutor:
     )
 
 
+async def processar_mensagem(mensagem_usuario: str, historico: list | None = None) -> str:
+    """
+    Ponto principal de entrada do chat: executa o agente e devolve só o texto final.
+
+    Args:
+        mensagem_usuario: Texto atual digitado (ou injetado pela UI).
+        historico: Lista de dicts `{"role": "user"|"assistant", "content": "..."}` com
+            mensagens anteriores (não incluir a mensagem atual).
+
+    Returns:
+        Resposta natural da IA (após tools, se houver).
+    """
+    historico = historico if historico is not None else []
+    chat_history = _historico_dicts_para_mensagens(historico)
+    executor = criar_agente_executor()
+    resultado = await executor.ainvoke(
+        {
+            "input": mensagem_usuario,
+            "chat_history": chat_history,
+        }
+    )
+    return str(resultado.get("output", "")).strip()
+
+
+def _normalizar_chat_history_para_executor(chat_history: list[Any] | None) -> list[Any]:
+    """Aceita dicts estilo Streamlit ou mensagens LangChain já instanciadas."""
+    raw = chat_history or []
+    if not raw:
+        return []
+    if isinstance(raw[0], dict):
+        return _historico_dicts_para_mensagens(raw)
+    return raw
+
+
 async def executar_agente(
     mensagem_usuario: str,
     chat_history: list[Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Executa uma rodada do agente (assíncrono) — ponto de integração com API e WhatsApp.
-
-    Args:
-        mensagem_usuario: Texto da mensagem atual.
-        chat_history: Histórico no formato aceito pelo prompt (lista de tuplas/mensagens).
-
-    Returns:
-        Dicionário com a saída do AgentExecutor (ex.: chave 'output').
+    Variante que retorna o dict completo do AgentExecutor (útil para API / logs).
     """
     executor = criar_agente_executor()
     return await executor.ainvoke(
         {
             "input": mensagem_usuario,
-            "chat_history": chat_history or [],
+            "chat_history": _normalizar_chat_history_para_executor(chat_history),
         }
     )

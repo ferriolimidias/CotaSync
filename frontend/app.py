@@ -1,13 +1,19 @@
 """
-Interface híbrida Streamlit do CotaSync — chat operacional + ações rápidas.
+Interface híbrida Streamlit do CotaSync — chat ligado ao agente LangChain (`processar_mensagem`).
 
-Próxima iteração: consumir `http://localhost:8000` (FastAPI) para eco do agente e webhooks.
+Execução local: rode a partir da raiz do projeto, ex.:
+  streamlit run frontend/app.py
 """
 
 from __future__ import annotations
 
+import asyncio
+import sys
+from pathlib import Path
+
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
+from dotenv import load_dotenv
 
 st.set_page_config(
     page_title="CotaSync - Assistente Operacional",
@@ -15,18 +21,43 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Carrega OPENAI_API_KEY e demais variáveis antes de importar o backend.
+load_dotenv()
+
+# Permite `from backend.agente import ...` ao rodar Streamlit sem Docker (raiz no PYTHONPATH).
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from backend.agente import processar_mensagem  # noqa: E402
+
 try:
     API_BASE_URL = st.secrets["API_BASE_URL"]
 except Exception:
     API_BASE_URL = "http://localhost:8000"
 
 st.title("CotaSync - Assistente Operacional")
+st.caption(f"API FastAPI (próximas iterações): `{API_BASE_URL}`")
 
-# --- Estado da sessão (chat) ---
-if "mensagens" not in st.session_state:
-    st.session_state.mensagens = [
-        {"role": "assistant", "content": "Olá! Sou o assistente operacional. Como posso ajudar hoje?"}
-    ]
+# --- Estado da sessão (chat): `messages` alinhado ao pedido da Fase 2 ---
+if "messages" not in st.session_state:
+    if "mensagens" in st.session_state:
+        st.session_state.messages = st.session_state.pop("mensagens")
+    else:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Olá! Sou o assistente operacional. Como posso ajudar hoje?"}
+        ]
+
+# Após ação rápida com rerun: processa a última mensagem do usuário na rodada seguinte.
+if st.session_state.pop("_pending_agent", False):
+    ultima = st.session_state.messages[-1]
+    historico_anterior = st.session_state.messages[:-1]
+    with st.spinner("Analisando ERP..."):
+        resposta = asyncio.run(
+            processar_mensagem(ultima["content"], historico_anterior)
+        )
+    st.session_state.messages.append({"role": "assistant", "content": resposta})
+    st.rerun()
 
 
 def _agendamentos_simulados() -> list[dict[str, str]]:
@@ -42,20 +73,18 @@ with st.sidebar:
     st.header("Ações rápidas")
     cnpj = st.text_input("CNPJ", placeholder="00.000.000/0001-00", key="cnpj_input")
     if st.button("Consultar cadastro", type="primary"):
-        doc = (cnpj or "").strip() or "(não informado)"
-        st.session_state.mensagens.append(
-            {"role": "user", "content": f"Consultar cadastro para o documento: {doc}"}
-        )
-        st.session_state.mensagens.append(
-            {
-                "role": "assistant",
-                "content": (
-                    "Ação registrada na interface. Na próxima iteração isso chamará o "
-                    "endpoint do agente (`consultar_cadastro_erp`) no backend."
-                ),
-            }
-        )
-        st.rerun()
+        doc = (cnpj or "").strip()
+        if doc:
+            st.session_state.messages.append(
+                {
+                    "role": "user",
+                    "content": f"Consulte o cadastro do documento: {doc}",
+                }
+            )
+            st.session_state._pending_agent = True
+            st.rerun()
+        else:
+            st.warning("Preencha o CNPJ para consultar o cadastro.")
 
     st.divider()
     st.subheader("Agendamentos")
@@ -66,22 +95,17 @@ with st.sidebar:
 
 # --- Chat principal ---
 st.subheader("Conversa")
-for msg in st.session_state.mensagens:
+for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 prompt = st.chat_input("Digite sua mensagem operacional…")
 if prompt:
-    st.session_state.mensagens.append({"role": "user", "content": prompt})
-    st.session_state.mensagens.append(
-        {
-            "role": "assistant",
-            "content": (
-                f"Recebi: «{prompt}». "
-                f"Integração com o backend em `{API_BASE_URL}` será ligada nas próximas iterações."
-            ),
-        }
-    )
+    historico_antes = list(st.session_state.messages)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.spinner("Analisando ERP..."):
+        resposta_chat = asyncio.run(processar_mensagem(prompt, historico_antes))
+    st.session_state.messages.append({"role": "assistant", "content": resposta_chat})
     st.rerun()
 
 # --- Comando de voz (placeholder com biblioteca real) ---
