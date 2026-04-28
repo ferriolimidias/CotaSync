@@ -8,6 +8,7 @@ Execução local: rode a partir da raiz do projeto, ex.:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -95,9 +96,16 @@ with st.sidebar:
 
 # --- Chat principal ---
 st.subheader("Conversa")
+_EVIDENCIA = "print_teste.png"
+_caminho_evidencia = _ROOT / _EVIDENCIA
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
+        if msg.get("role") == "assistant":
+            conteudo = str(msg.get("content", ""))
+            if _EVIDENCIA in conteudo and os.path.exists(str(_caminho_evidencia)):
+                st.image(str(_caminho_evidencia), caption="Evidência do Sistema")
 
 prompt = st.chat_input("Digite sua mensagem operacional…")
 if prompt:

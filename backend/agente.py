@@ -6,7 +6,6 @@ Integração Streamlit: use `processar_mensagem` (assíncrona) ou `asyncio.run(.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any
 
@@ -18,6 +17,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+
+from backend.motor_browser import consultar_erp_real
 
 load_dotenv()
 
@@ -31,11 +32,19 @@ async def consultar_cadastro_erp(documento: str) -> str:
         documento: CNPJ ou CPF apenas com dígitos ou formatado.
 
     Returns:
-        Resumo textual do cadastro (mock até integração real).
+        Resumo textual (navegação real + evidência em ficheiro) para o LLM.
     """
-    # Mock operacional: simula latência de sistema legado / rede.
-    await asyncio.sleep(2)
-    return "Status: Ativo, Cotas: 2"
+    resultado = await consultar_erp_real(documento)
+    if resultado.get("status") != "sucesso":
+        return (
+            "Falha na automação web. Detalhes: "
+            f"{resultado.get('texto_extraido', 'erro desconhecido')}"
+        )
+    texto = resultado.get("texto_extraido", "")
+    caminho = resultado.get("caminho_imagem", "")
+    return (
+        f"A busca retornou: {texto}. Print da evidência salvo em: {caminho}"
+    )
 
 
 def _criar_llm() -> ChatOpenAI:

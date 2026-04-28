@@ -8,12 +8,83 @@ O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
 from __future__ import annotations
 
 import os
+import traceback
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from playwright.async_api import Browser, async_playwright
 
 load_dotenv()
+
+# Nome do ficheiro de evidência na raiz do projeto (alinhado ao Streamlit e à tool do agente).
+NOME_ARQUIVO_EVIDENCIA = "print_teste.png"
+
+
+def _raiz_projeto() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _ws_browserless() -> str:
+    """
+    URL WebSocket do Browserless. No Docker Compose usamos `ws://browserless:3000`;
+    em desenvolvimento local, `BROWSERLESS_URL=ws://localhost:3000` no `.env`.
+    """
+    ws_url = os.getenv("BROWSERLESS_URL", "ws://localhost:3000").strip()
+    if not ws_url.startswith("ws"):
+        ws_url = ws_url.replace("http://", "ws://").replace("https://", "wss://")
+    return ws_url
+
+
+async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
+    """
+    Navegação real de validação: Wikipedia PT + busca + screenshot na raiz do projeto.
+
+    Nota: o parâmetro é tratado como texto de busca (ex.: CNPJ) para o campo da wiki.
+    """
+    raiz = _raiz_projeto()
+    caminho_imagem = raiz / NOME_ARQUIVO_EVIDENCIA
+    ws_url = _ws_browserless()
+    browser: Browser | None = None
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(ws_url)
+            try:
+                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                page = await context.new_page()
+                await page.set_default_timeout(90_000)
+
+                await page.goto(
+                    "https://pt.wikipedia.org/wiki/Consórcio",
+                    wait_until="domcontentloaded",
+                )
+                await page.wait_for_selector('input[name="search"]', state="visible")
+                await page.fill('input[name="search"]', cnpj)
+                await page.keyboard.press("Enter")
+                # A Wikipédia mantém ligações longas; `networkidle` pode não ocorrer de forma fiável.
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=45_000)
+                except Exception:
+                    await page.wait_for_load_state("domcontentloaded")
+
+                await page.screenshot(path=str(caminho_imagem), full_page=False)
+                titulo = await page.title()
+
+                return {
+                    "status": "sucesso",
+                    "texto_extraido": titulo,
+                    "caminho_imagem": NOME_ARQUIVO_EVIDENCIA,
+                }
+            finally:
+                if browser is not None:
+                    await browser.close()
+    except Exception:
+        return {
+            "status": "erro",
+            "texto_extraido": traceback.format_exc(),
+            "caminho_imagem": "",
+        }
 
 
 async def obter_browser_browserless() -> tuple[Any, Browser]:
@@ -24,10 +95,7 @@ async def obter_browser_browserless() -> tuple[Any, Browser]:
         Tupla (playwright_instance, browser) para que o chamador possa fazer
         `await playwright.stop()` após uso, se necessário.
     """
-    ws_url = os.getenv("BROWSERLESS_URL", "ws://localhost:3000").strip()
-    if not ws_url.startswith("ws"):
-        # Alguns deployments usam http; Browserless costuma aceitar ws explícito.
-        ws_url = ws_url.replace("http://", "ws://").replace("https://", "wss://")
+    ws_url = _ws_browserless()
 
     playwright = await async_playwright().start()
     browser = await playwright.chromium.connect_over_cdp(ws_url)
