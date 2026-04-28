@@ -190,23 +190,26 @@ if menu_selecionado == "Chat & Ações":
     st.caption("⚡ Execução Rápida de Ações Aprendidas")
     
     # Carrega a memória para ver o que o robô já sabe
-    import json
-    import os
-    
-    acoes_conhecidas = {}
-    if os.path.exists("ui_map.json"):
+    acoes_fast_track = {}
+    if _UI_MAP_PATH.is_file():
         try:
-            with open("ui_map.json", "r", encoding="utf-8") as f:
+            with _UI_MAP_PATH.open("r", encoding="utf-8") as f:
                 memoria = json.load(f)
-                acoes_conhecidas = memoria.get("acoes_conhecidas", {})
-        except:
+                acoes_fast_track = memoria.get("acoes_conhecidas", {})
+        except Exception:
             pass
 
-    if acoes_conhecidas:
+    if acoes_fast_track:
         col1, col2 = st.columns([3, 1])
         
         # Cria um mapeamento: "Nome Amigável" -> "chave_da_acao"
-        opcoes_amigaveis = {dados.get("nome_amigavel", chave): chave for chave, dados in acoes_conhecidas.items()}
+        opcoes_amigaveis = {
+            dados.get("nome_amigavel", chave): chave
+            for chave, dados in acoes_fast_track.items()
+            if isinstance(dados, dict)
+        }
+        if not opcoes_amigaveis:
+            opcoes_amigaveis = {chave: chave for chave in acoes_fast_track.keys()}
         
         with col1:
             acao_selecionada_nome = st.selectbox(
@@ -220,6 +223,7 @@ if menu_selecionado == "Chat & Ações":
                 chave_acao = opcoes_amigaveis[acao_selecionada_nome]
                 # Injeta a ação diretamente no chat do usuário
                 st.session_state.messages.append({"role": "user", "content": chave_acao})
+                st.session_state._pending_agent = True
                 st.rerun()
     else:
         st.info("💡 O sistema ainda não aprendeu nenhuma rotina. Escreva 'Quero te ensinar uma rotina' no chat para começar!")

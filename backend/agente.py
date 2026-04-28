@@ -60,7 +60,7 @@ def _gerar_nome_acao(ui_map: dict) -> str:
         acoes = {}
     indice = 1
     while True:
-        nome = f"acao_nova_{indice:02d}"
+        nome = f"nova_rotina_{indice}"
         if nome not in acoes:
             return nome
         indice += 1
@@ -166,7 +166,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
     if estado == "ESPERANDO_ENSINO":
         sessao["estado"] = "APRENDENDO"
-        nome_acao = str(sessao.get("acao_pendente") or "acao_nova_01")
+        nome_acao = str(sessao.get("acao_pendente") or "nova_rotina_1")
         novos_passos = await acionar_ia_cartografa(nome_acao, mensagem_usuario)
         ui_map = carregar_ui_map()
         ui_map.setdefault("acoes_conhecidas", {})
@@ -183,13 +183,22 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
         sessao["estado"] = "NORMAL"
         sessao["acao_pendente"] = None
-        return "Pronto, chefe! Aprendi o caminho e salvei na minha memória. A ação já está disponível!"
+        return (
+            "Pronto, chefe! Aprendi o caminho e guardei na minha memória. "
+            "A ação já está disponível no menu de Execução Rápida!"
+        )
 
-    if estado == "NORMAL" and ("ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada):
+    if estado == "NORMAL":
         ui_map = carregar_ui_map()
-        sessao["estado"] = "ESPERANDO_ENSINO"
-        sessao["acao_pendente"] = _gerar_nome_acao(ui_map)
-        return "Ainda não aprendi essa tarefa. Pode me explicar o passo a passo de onde eu clico no sistema?"
+        acoes = ui_map.get("acoes_conhecidas", {})
+        mensagem_limpa = str(mensagem_usuario or "").strip()
+        if isinstance(acoes, dict) and mensagem_limpa in acoes:
+            return f"Executando '{mensagem_limpa}' em alta velocidade a partir da memória..."
+
+        if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
+            sessao["estado"] = "ESPERANDO_ENSINO"
+            sessao["acao_pendente"] = _gerar_nome_acao(ui_map)
+            return "Ainda não aprendi essa tarefa. Pode me explicar o passo a passo de onde eu clico no sistema?"
 
     chat_history = _historico_dicts_para_mensagens(historico)
     executor = criar_agente_executor()
