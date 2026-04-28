@@ -153,15 +153,19 @@ async def exemplo_navegacao(url: str = "https://example.com") -> str:
 
 
 async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
-    """Simula a IA acessando o ERP e descobrindo os botões baseada na instrução humana."""
+    """Acessa o ERP, tenta login automático e gera receita de mapeamento."""
     raiz = _raiz_projeto()
     erp_config_path = raiz / "erp_config.json"
     url_sistema = "https://google.com"
+    usuario = ""
+    senha = ""
     try:
         if erp_config_path.is_file():
             config = json.loads(erp_config_path.read_text(encoding="utf-8"))
             if isinstance(config, dict):
                 url_sistema = str(config.get("url_sistema") or url_sistema).strip() or url_sistema
+                usuario = str(config.get("usuario") or "").strip()
+                senha = str(config.get("senha") or "")
     except (json.JSONDecodeError, OSError):
         pass
 
@@ -175,11 +179,108 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
             browser = await p.chromium.connect_over_cdp("ws://browserless:3000")
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
+            _LOGGER.info("[LOGIN] Abrindo página inicial do ERP...")
             await page.goto(url_sistema, wait_until="networkidle")
-            await page.screenshot(path=str(screenshot_path), full_page=False)
-            _LOGGER.info(f"[CARTÓGRAFO] Screenshot inicial salvo em: {screenshot_path.name}")
+            _LOGGER.info(f"[LOGIN] Página carregada em: {page.url}")
+
+            has_password = await page.locator("input[type='password'], #pass").count() > 0
+            has_login_field = (
+                await page.locator(
+                    "input[name='login'], input[name='username'], input[name='usuario'], #user"
+                ).count()
+                > 0
+            )
+            login_detectado = has_password or has_login_field
+            if has_password or has_login_field:
+                _LOGGER.info(
+                    "[CARTÓGRAFO] Página de login detectada. Realizando login automático com credenciais configuradas..."
+                )
+                _LOGGER.info("[LOGIN] Tentando autenticação automática...")
+                try:
+                    usuario_sel = (
+                        "#user, input[name='login'], input[name='username'], input[name='usuario'], "
+                        "input[type='email'], input[type='text']"
+                    )
+                    senha_sel = "#pass, input[type='password']"
+                    if await page.locator(usuario_sel).count() > 0:
+                        await page.locator(usuario_sel).first.fill(usuario)
+                        _LOGGER.info("[LOGIN] Campo de usuário preenchido.")
+                    else:
+                        _LOGGER.info("[ERRO] Campo de usuário não encontrado.")
+
+                    if await page.locator(senha_sel).count() > 0:
+                        await page.locator(senha_sel).first.fill(senha)
+                        _LOGGER.info("[LOGIN] Campo de senha preenchido.")
+                    else:
+                        _LOGGER.info("[ERRO] Campo de senha não encontrado.")
+
+                    botao_login = ""
+                    if await page.locator("#login-button").count() > 0:
+                        botao_login = "#login-button"
+                    elif await page.locator("button[type='submit']").count() > 0:
+                        botao_login = "button[type='submit']"
+                    elif await page.locator("button").count() > 0:
+                        botao_login = "button"
+                    else:
+                        _LOGGER.info("[ERRO] Botão de login não encontrado na página.")
+                        return {
+                            "status": "erro",
+                            "motivo": "Botão de login não encontrado na página.",
+                        }
+
+                    _LOGGER.info(f"[LOGIN] Clicando em '{botao_login}' para autenticar.")
+                    await page.click(botao_login)
+                    try:
+                        await page.wait_for_navigation(wait_until="networkidle", timeout=15000)
+                    except Exception:
+                        _LOGGER.info("[LOGIN] Sem navegação explícita após clique; validando estado da tela.")
+
+                    url_inicial_norm = url_sistema.rstrip("/")
+                    url_atual_norm = page.url.rstrip("/")
+                    ainda_tem_senha = await page.locator("input[type='password'], #pass").count() > 0
+                    area_logada_detectada = (
+                        await page.locator(
+                            "nav, #menu, .menu, [id*='menu'], [class*='menu'], "
+                            "[data-testid*='menu'], [aria-label*='menu'], [id*='user'], [class*='user']"
+                        ).count()
+                        > 0
+                    )
+                    login_sucesso = (url_atual_norm != url_inicial_norm) or area_logada_detectada
+                    if (not login_sucesso) or ainda_tem_senha:
+                        _LOGGER.info(
+                            f"[ERRO] Login falhou ou página não redirecionou. URL atual: {page.url}"
+                        )
+                        return {
+                            "status": "erro",
+                            "motivo": (
+                                "Login falhou ou página não redirecionou; credenciais inválidas, "
+                                "CAPTCHA ou fluxo desconhecido."
+                            ),
+                        }
+
+                    _LOGGER.info(f"[LOGIN] Autenticação bem-sucedida. Iniciando busca por: {instrucao_humana}")
+                except Exception as exc:
+                    _LOGGER.info(f"[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat. ({exc})")
+                    return {
+                        "status": "erro",
+                        "motivo": f"Falha no login automático: {exc}",
+                    }
+
+            # Só salva screenshot em cenário consistente: login bem-sucedido (quando havia login)
+            # ou navegação sem tela de autenticação.
+            if login_detectado:
+                await page.screenshot(path=str(screenshot_path), full_page=False)
+                _LOGGER.info(f"[CARTÓGRAFO] Screenshot pós-login salvo em: {screenshot_path.name}")
+            else:
+                await page.screenshot(path=str(screenshot_path), full_page=False)
+                _LOGGER.info(f"[CARTÓGRAFO] Screenshot inicial salvo em: {screenshot_path.name}")
     except Exception as exc:
         _LOGGER.info(f"[CARTÓGRAFO] Falha ao mapear ação '{nome_acao}': {exc}")
+        _LOGGER.info("[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat.")
+        return {
+            "status": "erro",
+            "motivo": f"Falha ao aceder ao sistema: {exc}",
+        }
     finally:
         if browser is not None:
             await browser.close()
@@ -195,4 +296,7 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
             {"tipo": "clicar", "seletor": "#btn_confirmar_simulado"},
         ],
     }
-    return passos_aprendidos
+    return {
+        "status": "sucesso",
+        "passos_aprendidos": passos_aprendidos,
+    }

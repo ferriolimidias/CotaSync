@@ -195,7 +195,43 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         sessao["estado"] = "APRENDENDO"
         nome_acao = str(sessao.get("acao_pendente") or "nova_rotina_1")
         _LOGGER.info(f"[HITL] Estado APRENDENDO iniciado para ação: {nome_acao}")
-        novos_passos = await acionar_ia_cartografa(nome_acao, mensagem_usuario)
+        resultado_mapeamento = await acionar_ia_cartografa(nome_acao, mensagem_usuario)
+        status_mapeamento = (
+            str(resultado_mapeamento.get("status", "")).lower()
+            if isinstance(resultado_mapeamento, dict)
+            else "erro"
+        )
+        if status_mapeamento != "sucesso":
+            sessao["estado"] = "ESPERANDO_ENSINO"
+            motivo = (
+                str(resultado_mapeamento.get("motivo", "Falha não identificada."))
+                if isinstance(resultado_mapeamento, dict)
+                else "Falha não identificada."
+            )
+            _LOGGER.info(f"[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat. Motivo: {motivo}")
+            return (
+                "Chefe, tentei entrar no sistema com as credenciais cadastradas, mas parece que os dados "
+                "estão incorretos ou o sistema pediu um CAPTCHA/Código que eu não consigo ver. "
+                "Pode verificar as configurações ou me ajudar a passar dessa tela no 'Logs do Sistema'?"
+            )
+
+        novos_passos = (
+            resultado_mapeamento.get("passos_aprendidos")
+            if isinstance(resultado_mapeamento, dict)
+            else None
+        )
+        if not isinstance(novos_passos, dict) or "passos_playwright" not in novos_passos:
+            sessao["estado"] = "ESPERANDO_ENSINO"
+            _LOGGER.info(
+                "[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat. "
+                "Motivo: retorno de mapeamento sem passos_playwright."
+            )
+            return (
+                "Chefe, tentei entrar no sistema com as credenciais cadastradas, mas parece que os dados "
+                "estão incorretos ou o sistema pediu um CAPTCHA/Código que eu não consigo ver. "
+                "Pode verificar as configurações ou me ajudar a passar dessa tela no 'Logs do Sistema'?"
+            )
+
         ui_map = carregar_ui_map()
         ui_map.setdefault("acoes_conhecidas", {})
         ui_map["acoes_conhecidas"][nome_acao] = novos_passos
