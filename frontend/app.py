@@ -18,6 +18,7 @@ from pathlib import Path
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
 from dotenv import load_dotenv
+from streamlit_option_menu import option_menu
 
 st.set_page_config(
     page_title="CotaSync — Painel Operacional",
@@ -134,12 +135,31 @@ with st.sidebar:
     st.title("CotaSync")
     st.caption("Operacao inteligente em tempo real")
     st.caption("Status do sistema: 🟢 Online")
-    menu_selecionado = st.radio(
-        "Menu Principal",
-        ["💬 Chat & Ações", "⏰ Agendamentos e Filas", "📚 Catálogo", "🖥️ Robô ao Vivo", "⚙️ Configurações"],
+    menu_selecionado = option_menu(
+        menu_title="Menu Principal",
+        options=["Chat & Ações", "Agendamentos e Filas", "Catálogo", "Robô ao Vivo", "Configurações"],
+        icons=["chat-dots", "calendar2-check", "book", "display", "gear"],
+        default_index=0,
+        styles={
+            "container": {"padding": "0!important", "background-color": "#0f172a"},
+            "icon": {"color": "#93c5fd", "font-size": "16px"},
+            "nav-link": {
+                "font-size": "14px",
+                "text-align": "left",
+                "margin": "4px 0",
+                "--hover-color": "#1e293b",
+                "border-radius": "8px",
+                "color": "#e2e8f0",
+            },
+            "nav-link-selected": {
+                "background-color": "#2563eb",
+                "color": "#ffffff",
+                "font-weight": "600",
+            },
+        },
     )
 
-if menu_selecionado == "💬 Chat & Ações":
+if menu_selecionado == "Chat & Ações":
     st.subheader("Conversa com o Agente")
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
 
@@ -184,7 +204,7 @@ if menu_selecionado == "💬 Chat & Ações":
             st.audio(audio_bytes, format="audio/wav")
             st.info("Audio gravado. Proximo passo: transcrever e enviar ao modelo.")
 
-elif menu_selecionado == "⏰ Agendamentos e Filas":
+elif menu_selecionado == "Agendamentos e Filas":
     st.markdown("##### Gestão de rotinas e processamento em lote")
     st.caption(
         "Painel visual de demonstracao. O agendador real (APScheduler) roda no backend."
@@ -228,7 +248,7 @@ elif menu_selecionado == "⏰ Agendamentos e Filas":
     st.markdown("**Logs recentes**")
     st.code(st.session_state.cron_log_text.strip() + "\n")
 
-elif menu_selecionado == "📚 Catálogo":
+elif menu_selecionado == "Catálogo":
     st.markdown("##### Catálogo de ações conhecidas")
     busca = st.text_input(
         "Buscar rotina...",
@@ -249,21 +269,17 @@ elif menu_selecionado == "📚 Catálogo":
             with st.expander(f"**{nome}**", expanded=False):
                 st.json(acoes_conhecidas.get(nome) if acoes_conhecidas.get(nome) is not None else {})
 
-elif menu_selecionado == "🖥️ Robô ao Vivo":
+elif menu_selecionado == "Robô ao Vivo":
     st.markdown("##### Robô ao Vivo - Intervenção")
     st.info(
-        "Use esta tela para intervir no navegador do robo, resolver CAPTCHAs ou fazer "
-        "login manual caso a sessao do ERP expire. O robo reaproveitara a sessao."
+        "💡 **Dica de Intervenção:** Abaixo está a 'televisão' do robô. Quando uma automação "
+        "roda, a janela aparece aqui. Para acessar o seu ERP manualmente e logar, clique na "
+        "opção **'Live Debug'** (ou similar) dentro deste painel abaixo e digite o site do "
+        "seu sistema."
     )
-    host_vnc = st.text_input(
-        "Host Browserless (VNC)",
-        value=os.getenv("BROWSERLESS_VNC_URL", "http://localhost:3000"),
-        help="Exemplo para VPS: http://IP_DA_VPS:3000",
-        key="browserless_vnc_url",
-    )
-    st.components.v1.iframe(src=host_vnc, height=600, scrolling=True)
+    st.components.v1.iframe(src="http://84.46.253.236:3000", height=800, scrolling=True)
 
-elif menu_selecionado == "⚙️ Configurações":
+elif menu_selecionado == "Configurações":
     st.markdown("##### Segurança WhatsApp *(whitelist)*")
     st.caption(
         "Numeros autorizados a acionar o webhook Evolution. "
