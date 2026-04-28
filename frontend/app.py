@@ -280,7 +280,7 @@ if menu_selecionado == "Chat & Ações":
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
 
     caminho_evidencia = _ROOT / _EVIDENCIA
-    for msg in st.session_state.messages:
+    for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if "arquivos" in msg and msg["arquivos"]:
@@ -295,7 +295,7 @@ if menu_selecionado == "Chat & Ações":
                                 data=conteudo_arquivo,
                                 file_name=nome_arquivo,
                                 mime="application/octet-stream",
-                                key=f"download_{msg['role']}_{nome_arquivo}_{hash(str(caminho_arq))}",
+                                key=f"dl_btn_msg_{i}_{nome_arquivo}",
                             )
                     except OSError:
                         continue
