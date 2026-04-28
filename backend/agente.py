@@ -22,7 +22,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-from backend.motor_browser import acionar_ia_cartografa, consultar_erp_real
+from backend.motor_browser import acionar_ia_cartografa, consultar_erp_real, executar_acao_rapida
 
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
@@ -259,7 +259,17 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         mensagem_limpa = str(mensagem_usuario or "").strip()
         if isinstance(acoes, dict) and mensagem_limpa in acoes:
             _LOGGER.info(f"[FAST-TRACK] Disparo direto da ação: {mensagem_limpa}")
-            return f"Executando '{mensagem_limpa}' em alta velocidade a partir da memória..."
+            acao = acoes.get(mensagem_limpa, {})
+            passos = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
+            resultado_execucao = await executar_acao_rapida(mensagem_limpa, passos)
+            if str(resultado_execucao.get("status", "")).lower() == "sucesso":
+                caminho = str(resultado_execucao.get("caminho_evidencia_padrao", "print_teste.png"))
+                return (
+                    "✅ Execução concluída! Repeti os passos da memória com sucesso. "
+                    f"Aqui está a evidência: {caminho}"
+                )
+            motivo = str(resultado_execucao.get("motivo", "Falha não identificada."))
+            return f"❌ A execução rápida falhou: {motivo}"
 
         if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
             nome_base = await gerar_nome_acao(mensagem_usuario)
