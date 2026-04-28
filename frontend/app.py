@@ -134,18 +134,12 @@ with st.sidebar:
     st.title("CotaSync")
     st.caption("Operacao inteligente em tempo real")
     st.caption("Status do sistema: 🟢 Online")
+    menu_selecionado = st.radio(
+        "Menu Principal",
+        ["💬 Chat & Ações", "⏰ Agendamentos e Filas", "📚 Catálogo", "🖥️ Robô ao Vivo", "⚙️ Configurações"],
+    )
 
-tab_chat, tab_agendamentos, tab_catalogo, tab_robo, tab_config = st.tabs(
-    [
-        "💬 Chat & Ações",
-        "⏰ Agendamentos e Filas",
-        "📚 Catálogo",
-        "🖥️ Robô ao Vivo",
-        "⚙️ Configurações",
-    ]
-)
-
-with tab_chat:
+if menu_selecionado == "💬 Chat & Ações":
     st.subheader("Conversa com o Agente")
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
 
@@ -190,7 +184,7 @@ with tab_chat:
             st.audio(audio_bytes, format="audio/wav")
             st.info("Audio gravado. Proximo passo: transcrever e enviar ao modelo.")
 
-with tab_agendamentos:
+elif menu_selecionado == "⏰ Agendamentos e Filas":
     st.markdown("##### Gestão de rotinas e processamento em lote")
     st.caption(
         "Painel visual de demonstracao. O agendador real (APScheduler) roda no backend."
@@ -234,7 +228,7 @@ with tab_agendamentos:
     st.markdown("**Logs recentes**")
     st.code(st.session_state.cron_log_text.strip() + "\n")
 
-with tab_catalogo:
+elif menu_selecionado == "📚 Catálogo":
     st.markdown("##### Catálogo de ações conhecidas")
     busca = st.text_input(
         "Buscar rotina...",
@@ -255,7 +249,7 @@ with tab_catalogo:
             with st.expander(f"**{nome}**", expanded=False):
                 st.json(acoes_conhecidas.get(nome) if acoes_conhecidas.get(nome) is not None else {})
 
-with tab_robo:
+elif menu_selecionado == "🖥️ Robô ao Vivo":
     st.markdown("##### Robô ao Vivo - Intervenção")
     st.info(
         "Use esta tela para intervir no navegador do robo, resolver CAPTCHAs ou fazer "
@@ -269,7 +263,7 @@ with tab_robo:
     )
     st.components.v1.iframe(src=host_vnc, height=600, scrolling=True)
 
-with tab_config:
+elif menu_selecionado == "⚙️ Configurações":
     st.markdown("##### Segurança WhatsApp *(whitelist)*")
     st.caption(
         "Numeros autorizados a acionar o webhook Evolution. "
