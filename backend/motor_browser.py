@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -171,6 +172,14 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
 
     nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
     screenshot_path = raiz / f"mapeamento_{nome_arquivo}.png"
+    passos_reais: list[dict[str, str]] = []
+
+    # Parser simples de intenção para transformar frase em termos clicáveis.
+    termos_brutos = re.split(r"\b(?:e depois|depois|então|entao|e)\b", instrucao_humana, flags=re.IGNORECASE)
+    termos = [re.sub(r"[^a-zA-Z0-9À-ÿ_\- ]+", "", t).strip() for t in termos_brutos]
+    termos = [t for t in termos if t]
+    if not termos:
+        return {"status": "erro", "motivo": "Nenhum passo identificável na instrução fornecida."}
 
     browser: Browser | None = None
     _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
@@ -274,6 +283,43 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
             else:
                 await page.screenshot(path=str(screenshot_path), full_page=False)
                 _LOGGER.info(f"[CARTÓGRAFO] Screenshot inicial salvo em: {screenshot_path.name}")
+
+            for termo in termos:
+                _LOGGER.info(f"[CARTÓGRAFO] Procurando elemento para termo: '{termo}'")
+                alvo = None
+                try:
+                    by_text = page.get_by_text(termo, exact=False)
+                    if await by_text.count() > 0:
+                        alvo = by_text.first
+                    else:
+                        by_button = page.get_by_role("button", name=termo)
+                        if await by_button.count() > 0:
+                            alvo = by_button.first
+                except Exception:
+                    alvo = None
+
+                if alvo is None:
+                    _LOGGER.warning(f"[CARTÓGRAFO] Não consegui encontrar o botão '{termo}'.")
+                    return {
+                        "status": "erro",
+                        "motivo": f"Nao consegui encontrar o elemento '{termo}' durante o aprendizado.",
+                    }
+
+                try:
+                    await alvo.click()
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        await page.wait_for_timeout(2000)
+                    passo = {"tipo": "clicar", "seletor": f"text={termo}", "valor": termo}
+                    passos_reais.append(passo)
+                    _LOGGER.info(f"[CARTÓGRAFO] Elemento '{termo}' encontrado e clicado.")
+                except Exception as exc:
+                    _LOGGER.warning(f"[CARTÓGRAFO] Falha ao clicar em '{termo}': {exc}")
+                    return {
+                        "status": "erro",
+                        "motivo": f"Elemento '{termo}' encontrado, mas o clique falhou: {exc}",
+                    }
     except Exception as exc:
         _LOGGER.info(f"[CARTÓGRAFO] Falha ao mapear ação '{nome_acao}': {exc}")
         _LOGGER.info("[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat.")
@@ -291,10 +337,7 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
         "nome_amigavel": nome_curto,
         "descricao": f"Ação aprendida: {instrucao_humana[:30]}...",
         "url_inicial": "Lida do erp_config.json",
-        "passos_playwright": [
-            {"tipo": "preencher", "seletor": "#campo_busca_simulado", "variavel": "input_usuario"},
-            {"tipo": "clicar", "seletor": "#btn_confirmar_simulado"},
-        ],
+        "passos_playwright": passos_reais,
     }
     return {
         "status": "sucesso",

@@ -40,6 +40,7 @@ _UI_MAP_PATH = _ROOT / "ui_map.json"
 _WHITELIST_PATH = _ROOT / "usuarios_autorizados.json"
 _ERP_CONFIG_PATH = _ROOT / "erp_config.json"
 _LOG_PATH = _ROOT / "logs" / "operation.log"
+_CHAT_HISTORY_PATH = _ROOT / "data" / "chat_history.json"
 
 try:
     API_BASE_URL = st.secrets["API_BASE_URL"]
@@ -90,6 +91,43 @@ def _listar_mapeamentos() -> list[Path]:
         return []
 
 
+def _normalizar_nome_arquivo(texto: str) -> str:
+    return re.sub(r"[^\w\-]+", "_", str(texto or "").strip(), flags=re.UNICODE).strip("_")
+
+
+def _screenshot_por_acao(chave_acao: str) -> Path:
+    return _ROOT / f"mapeamento_{_normalizar_nome_arquivo(chave_acao)}.png"
+
+
+def carregar_historico_disco() -> list[dict]:
+    try:
+        if not _CHAT_HISTORY_PATH.is_file():
+            return []
+        conteudo = json.loads(_CHAT_HISTORY_PATH.read_text(encoding="utf-8"))
+        if not isinstance(conteudo, list):
+            return []
+        mensagens_validas: list[dict] = []
+        for item in conteudo:
+            if isinstance(item, dict) and item.get("role") and item.get("content") is not None:
+                mensagens_validas.append(
+                    {"role": str(item.get("role")), "content": str(item.get("content", ""))}
+                )
+        return mensagens_validas
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def salvar_historico_disco(mensagens: list[dict]) -> None:
+    try:
+        _CHAT_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CHAT_HISTORY_PATH.write_text(
+            json.dumps(mensagens, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _carregar_whitelist() -> dict:
     try:
         if not _WHITELIST_PATH.is_file():
@@ -116,7 +154,10 @@ def _gravar_whitelist(obj: dict) -> bool:
 
 
 if "messages" not in st.session_state:
-    if "mensagens" in st.session_state:
+    historico_disco = carregar_historico_disco()
+    if historico_disco:
+        st.session_state.messages = historico_disco
+    elif "mensagens" in st.session_state:
         st.session_state.messages = st.session_state.pop("mensagens")
     else:
         st.session_state.messages = [
@@ -137,6 +178,7 @@ nomes_acoes = sorted(acoes_conhecidas.keys())
 # Permite injetar comando no chat por botao dinamico.
 if comando_rapido := st.session_state.pop("_queued_chat_prompt", None):
     st.session_state.messages.append({"role": "user", "content": comando_rapido})
+    salvar_historico_disco(st.session_state.messages)
     st.session_state._pending_agent = True
 
 # Processamento assincrono unico do agente.
@@ -146,6 +188,7 @@ if st.session_state.pop("_pending_agent", False):
     with st.spinner("Analisando ERP..."):
         resposta = asyncio.run(processar_mensagem(ultima["content"], historico_anterior))
     st.session_state.messages.append({"role": "assistant", "content": resposta})
+    salvar_historico_disco(st.session_state.messages)
     st.rerun()
 
 
@@ -241,19 +284,63 @@ if menu_selecionado == "Chat & Ações":
                 chave_acao = opcoes_amigaveis[acao_selecionada_nome]
                 # Injeta a ação diretamente no chat do usuário
                 st.session_state.messages.append({"role": "user", "content": chave_acao})
+                salvar_historico_disco(st.session_state.messages)
                 st.session_state._pending_agent = True
                 st.rerun()
     else:
         st.info("💡 O sistema ainda não aprendeu nenhuma rotina. Escreva 'Quero te ensinar uma rotina' no chat para começar!")
     # --- FIM: MENU DE EXECUÇÃO RÁPIDA ---
 
+    with st.expander("🗂️ Dossiê de Aprendizados (Replay Visual)", expanded=False):
+        memoria_replay = _obter_acoes_conhecidas(_carregar_ui_map())
+        if not memoria_replay:
+            st.caption("Ainda não há rotinas aprendidas para exibir o replay.")
+        else:
+            for chave_acao, dados_acao in memoria_replay.items():
+                if not isinstance(dados_acao, dict):
+                    continue
+                nome_amigavel = str(dados_acao.get("nome_amigavel", chave_acao))
+                descricao = str(dados_acao.get("descricao", "Sem descrição"))
+                passos = dados_acao.get("passos_playwright", [])
+                if not isinstance(passos, list):
+                    passos = []
+
+                st.markdown(f"### {nome_amigavel}")
+                st.caption(descricao)
+
+                if passos:
+                    timeline_linhas: list[str] = []
+                    for passo in passos:
+                        if not isinstance(passo, dict):
+                            continue
+                        tipo = str(passo.get("tipo", "ação")).lower()
+                        seletor = str(passo.get("seletor", "sem seletor"))
+                        valor = str(passo.get("valor", passo.get("variavel", ""))).strip()
+                        if tipo == "clicar":
+                            timeline_linhas.append(f"🖱️ Clique em: `{valor or seletor}`")
+                        elif tipo == "preencher":
+                            timeline_linhas.append(f"⌨️ Preencher: `{seletor}` com `{valor or 'valor dinâmico'}`")
+                        else:
+                            timeline_linhas.append(f"➡️ {tipo.title()}: `{valor or seletor}`")
+
+                    st.markdown(" ➔ ".join(timeline_linhas) if timeline_linhas else "Sem passos válidos no replay.")
+                else:
+                    st.info("Esta rotina ainda não possui passos técnicos registrados.")
+
+                caminho_print = _screenshot_por_acao(chave_acao)
+                if caminho_print.is_file():
+                    st.image(str(caminho_print), caption=f"Evidência: {nome_amigavel}", use_container_width=True)
+                st.divider()
+
     prompt = st.chat_input("Digite sua mensagem operacional...", key="chat_operacional")
     if prompt:
         historico_antes = list(st.session_state.messages)
         st.session_state.messages.append({"role": "user", "content": prompt})
+        salvar_historico_disco(st.session_state.messages)
         with st.spinner("Analisando ERP..."):
             resposta_chat = asyncio.run(processar_mensagem(prompt, historico_antes))
         st.session_state.messages.append({"role": "assistant", "content": resposta_chat})
+        salvar_historico_disco(st.session_state.messages)
         st.rerun()
 
     with st.expander("Comando de voz (experimental)", expanded=False):

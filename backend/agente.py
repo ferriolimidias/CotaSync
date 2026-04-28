@@ -247,9 +247,10 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
         sessao["estado"] = "NORMAL"
         sessao["acao_pendente"] = None
+        total_passos = len(novos_passos.get("passos_playwright", [])) if isinstance(novos_passos, dict) else 0
         return (
-            "Pronto, chefe! Aprendi o caminho e guardei na minha memória. "
-            "A ação já está disponível no menu de Execução Rápida!"
+            f"Aprendi {total_passos} passos para a rotina '{nome_acao}'. "
+            "Já guardei os comandos técnicos no meu banco de dados."
         )
 
     if estado == "NORMAL":
