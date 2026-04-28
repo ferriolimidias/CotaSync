@@ -202,8 +202,8 @@ with st.sidebar:
     st.caption("Status do sistema: 🟢 Online")
     menu_selecionado = option_menu(
         menu_title="Menu Principal",
-        options=["Chat & Ações", "Agendamentos e Filas", "Logs do Sistema", "Configurações"],
-        icons=["chat-dots", "calendar2-check", "terminal", "gear"],
+        options=["Chat & Ações", "Agendamentos e Filas", "Catálogo de Ações", "Logs do Sistema", "Configurações"],
+        icons=["chat-dots", "calendar2-check", "book", "terminal", "gear"],
         default_index=0,
         styles={
             "container": {"padding": "0!important", "background-color": "#0f172a"},
@@ -223,26 +223,47 @@ with st.sidebar:
             },
         },
     )
+    st.divider()
+    st.markdown("#### ⚡ Execução Rápida")
+    acoes_sidebar = _obter_acoes_conhecidas(_carregar_ui_map())
+    if acoes_sidebar:
+        opcoes_sidebar = {
+            dados.get("nome_amigavel", chave): chave
+            for chave, dados in acoes_sidebar.items()
+            if isinstance(dados, dict)
+        }
+        if not opcoes_sidebar:
+            opcoes_sidebar = {chave: chave for chave in acoes_sidebar.keys()}
+        acao_sidebar_nome = st.selectbox(
+            "Selecione uma ação para disparar:",
+            options=list(opcoes_sidebar.keys()),
+            key="acao_sidebar_select",
+            label_visibility="collapsed",
+        )
+        if st.button("🚀 Disparar Ação", use_container_width=True, key="acao_sidebar_btn"):
+            chave_acao = opcoes_sidebar[acao_sidebar_nome]
+            st.session_state.messages.append({"role": "user", "content": chave_acao})
+            salvar_historico_disco(st.session_state.messages)
+            st.session_state._pending_agent = True
+            st.rerun()
+    else:
+        st.caption("Sem ações aprendidas no momento.")
+
+    with st.expander("🎤 Comando de voz", expanded=False):
+        st.caption("Gravacao no browser; STT e envio ao agente em iteracao futura.")
+        audio_bytes_sidebar = audio_recorder(
+            text="Gravar / parar",
+            recording_color="#e74c3c",
+            neutral_color="#34495e",
+            key="audio_recorder_sidebar",
+        )
+        if audio_bytes_sidebar:
+            st.audio(audio_bytes_sidebar, format="audio/wav")
+            st.info("Audio gravado. Proximo passo: transcrever e enviar ao modelo.")
 
 if menu_selecionado == "Chat & Ações":
     st.subheader("Conversa com o Agente")
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
-
-    ui_map_chat = _carregar_ui_map()
-    acoes_chat = _obter_acoes_conhecidas(ui_map_chat)
-    nomes_chat = sorted(acoes_chat.keys())
-
-    if nomes_chat:
-        st.markdown("#### Ações Rápidas Dinâmicas")
-        colunas = st.columns(min(len(nomes_chat), 4))
-        for idx, nome_acao in enumerate(nomes_chat):
-            coluna = colunas[idx % len(colunas)]
-            with coluna:
-                if st.button(nome_acao, key=f"acao_dinamica_{idx}", use_container_width=True):
-                    st.session_state._queued_chat_prompt = f"Quero executar: {nome_acao}"
-                    st.rerun()
-    else:
-        st.info("Nenhuma acao dinamica disponivel ainda. Ensine novas rotinas pelo chat.")
 
     caminho_evidencia = _ROOT / _EVIDENCIA
     for msg in st.session_state.messages:
@@ -252,85 +273,6 @@ if menu_selecionado == "Chat & Ações":
                 conteudo = str(msg.get("content", ""))
                 if _EVIDENCIA in conteudo and os.path.exists(str(caminho_evidencia)):
                     st.image(str(caminho_evidencia), caption="Evidencia do Sistema")
-
-    # --- INÍCIO: MENU DE EXECUÇÃO RÁPIDA (FAST-TRACK) ---
-    st.divider()
-    st.caption("⚡ Execução Rápida de Ações Aprendidas")
-    
-    # Carrega a memória para ver o que o robô já sabe
-    acoes_fast_track = _obter_acoes_conhecidas(_carregar_ui_map())
-
-    if acoes_fast_track:
-        col1, col2 = st.columns([3, 1])
-        
-        # Cria um mapeamento: "Nome Amigável" -> "chave_da_acao"
-        opcoes_amigaveis = {
-            dados.get("nome_amigavel", chave): chave
-            for chave, dados in acoes_fast_track.items()
-            if isinstance(dados, dict)
-        }
-        if not opcoes_amigaveis:
-            opcoes_amigaveis = {chave: chave for chave in acoes_fast_track.keys()}
-        
-        with col1:
-            acao_selecionada_nome = st.selectbox(
-                "Selecione uma ação para disparar:", 
-                options=list(opcoes_amigaveis.keys()),
-                label_visibility="collapsed"
-            )
-            
-        with col2:
-            if st.button("🚀 Disparar Ação", use_container_width=True):
-                chave_acao = opcoes_amigaveis[acao_selecionada_nome]
-                # Injeta a ação diretamente no chat do usuário
-                st.session_state.messages.append({"role": "user", "content": chave_acao})
-                salvar_historico_disco(st.session_state.messages)
-                st.session_state._pending_agent = True
-                st.rerun()
-    else:
-        st.info("💡 O sistema ainda não aprendeu nenhuma rotina. Escreva 'Quero te ensinar uma rotina' no chat para começar!")
-    # --- FIM: MENU DE EXECUÇÃO RÁPIDA ---
-
-    with st.expander("🗂️ Dossiê de Aprendizados (Replay Visual)", expanded=False):
-        memoria_replay = _obter_acoes_conhecidas(_carregar_ui_map())
-        if not memoria_replay:
-            st.caption("Ainda não há rotinas aprendidas para exibir o replay.")
-        else:
-            for chave_acao, dados_acao in memoria_replay.items():
-                if not isinstance(dados_acao, dict):
-                    continue
-                nome_amigavel = str(dados_acao.get("nome_amigavel", chave_acao))
-                descricao = str(dados_acao.get("descricao", "Sem descrição"))
-                passos = dados_acao.get("passos_playwright", [])
-                if not isinstance(passos, list):
-                    passos = []
-
-                st.markdown(f"### {nome_amigavel}")
-                st.caption(descricao)
-
-                if passos:
-                    timeline_linhas: list[str] = []
-                    for passo in passos:
-                        if not isinstance(passo, dict):
-                            continue
-                        tipo = str(passo.get("tipo", "ação")).lower()
-                        seletor = str(passo.get("seletor", "sem seletor"))
-                        valor = str(passo.get("valor", passo.get("variavel", ""))).strip()
-                        if tipo == "clicar":
-                            timeline_linhas.append(f"🖱️ Clique em: `{valor or seletor}`")
-                        elif tipo == "preencher":
-                            timeline_linhas.append(f"⌨️ Preencher: `{seletor}` com `{valor or 'valor dinâmico'}`")
-                        else:
-                            timeline_linhas.append(f"➡️ {tipo.title()}: `{valor or seletor}`")
-
-                    st.markdown(" ➔ ".join(timeline_linhas) if timeline_linhas else "Sem passos válidos no replay.")
-                else:
-                    st.info("Esta rotina ainda não possui passos técnicos registrados.")
-
-                caminho_print = _screenshot_por_acao(chave_acao)
-                if caminho_print.is_file():
-                    st.image(str(caminho_print), caption=f"Evidência: {nome_amigavel}", use_container_width=True)
-                st.divider()
 
     prompt = st.chat_input("Digite sua mensagem operacional...", key="chat_operacional")
     if prompt:
@@ -342,17 +284,6 @@ if menu_selecionado == "Chat & Ações":
         st.session_state.messages.append({"role": "assistant", "content": resposta_chat})
         salvar_historico_disco(st.session_state.messages)
         st.rerun()
-
-    with st.expander("Comando de voz (experimental)", expanded=False):
-        st.caption("Gravacao no browser; STT e envio ao agente em iteracao futura.")
-        audio_bytes = audio_recorder(
-            text="Gravar / parar",
-            recording_color="#e74c3c",
-            neutral_color="#34495e",
-        )
-        if audio_bytes:
-            st.audio(audio_bytes, format="audio/wav")
-            st.info("Audio gravado. Proximo passo: transcrever e enviar ao modelo.")
 
 elif menu_selecionado == "Agendamentos e Filas":
     st.markdown("##### Gestão de rotinas e processamento em lote")
@@ -397,6 +328,45 @@ elif menu_selecionado == "Agendamentos e Filas":
 
     st.markdown("**Logs recentes**")
     st.code(st.session_state.cron_log_text.strip() + "\n")
+
+elif menu_selecionado == "Catálogo de Ações":
+    st.markdown("##### 📚 Catálogo de Ações")
+    memoria_replay = _obter_acoes_conhecidas(_carregar_ui_map())
+    if not memoria_replay:
+        st.info("Ainda não há rotinas aprendidas para exibir.")
+    else:
+        for chave_acao, dados_acao in memoria_replay.items():
+            if not isinstance(dados_acao, dict):
+                continue
+            nome_amigavel = str(dados_acao.get("nome_amigavel", chave_acao))
+            descricao = str(dados_acao.get("descricao", "Sem descrição"))
+            passos = dados_acao.get("passos_playwright", [])
+            if not isinstance(passos, list):
+                passos = []
+
+            with st.expander(f"🧠 {nome_amigavel}", expanded=False):
+                st.caption(descricao)
+                if passos:
+                    timeline_linhas: list[str] = []
+                    for passo in passos:
+                        if not isinstance(passo, dict):
+                            continue
+                        tipo = str(passo.get("tipo", "ação")).lower()
+                        seletor = str(passo.get("seletor", "sem seletor"))
+                        valor = str(passo.get("valor", passo.get("variavel", ""))).strip()
+                        if tipo == "clicar":
+                            timeline_linhas.append(f"🖱️ Clique em: `{valor or seletor}`")
+                        elif tipo == "preencher":
+                            timeline_linhas.append(f"⌨️ Preencher: `{seletor}` com `{valor or 'valor dinâmico'}`")
+                        else:
+                            timeline_linhas.append(f"➡️ {tipo.title()}: `{valor or seletor}`")
+                    st.markdown(" ➔ ".join(timeline_linhas) if timeline_linhas else "Sem passos válidos no replay.")
+                else:
+                    st.info("Esta rotina ainda não possui passos técnicos registrados.")
+
+                caminho_print = _screenshot_por_acao(chave_acao)
+                if caminho_print.is_file():
+                    st.image(str(caminho_print), caption=f"Evidência: {nome_amigavel}", use_container_width=True)
 
 elif menu_selecionado == "Logs do Sistema":
     st.markdown("##### Logs do Sistema")

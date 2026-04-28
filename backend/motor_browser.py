@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 from playwright.async_api import Browser, async_playwright
 
 load_dotenv()
@@ -31,6 +33,12 @@ if not _LOGGER.handlers:
     file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     _LOGGER.addHandler(file_handler)
     _LOGGER.propagate = False
+
+
+class PassoCartografo(BaseModel):
+    tipo: str = Field(description="Tipo da ação, ex.: clicar")
+    seletor: str = Field(description="Seletor CSS preciso do elemento")
+    valor: str = Field(default="", description="Texto amigável do elemento escolhido")
 
 
 def _raiz_projeto() -> Path:
@@ -172,14 +180,6 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
 
     nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
     screenshot_path = raiz / f"mapeamento_{nome_arquivo}.png"
-    passos_reais: list[dict[str, str]] = []
-
-    # Parser simples de intenção para transformar frase em termos clicáveis.
-    termos_brutos = re.split(r"\b(?:e depois|depois|então|entao|e)\b", instrucao_humana, flags=re.IGNORECASE)
-    termos = [re.sub(r"[^a-zA-Z0-9À-ÿ_\- ]+", "", t).strip() for t in termos_brutos]
-    termos = [t for t in termos if t]
-    if not termos:
-        return {"status": "erro", "motivo": "Nenhum passo identificável na instrução fornecida."}
 
     browser: Browser | None = None
     _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
@@ -284,42 +284,81 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                 await page.screenshot(path=str(screenshot_path), full_page=False)
                 _LOGGER.info(f"[CARTÓGRAFO] Screenshot inicial salvo em: {screenshot_path.name}")
 
-            for termo in termos:
-                _LOGGER.info(f"[CARTÓGRAFO] Procurando elemento para termo: '{termo}'")
-                alvo = None
+            _LOGGER.info("[CARTÓGRAFO] Extraindo mapa semântico do DOM interativo visível...")
+            mapa_dom = await page.evaluate(
+                """
+                () => {
+                  const interativos = Array.from(
+                    document.querySelectorAll("button, a, input, [role='button'], [onclick], [tabindex]")
+                  );
+                  const visiveis = interativos.filter((el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return (
+                      style &&
+                      style.visibility !== "hidden" &&
+                      style.display !== "none" &&
+                      rect.width > 0 &&
+                      rect.height > 0
+                    );
+                  });
+                  return visiveis.slice(0, 100).map((el) => ({
+                    tag: (el.tagName || "").toLowerCase(),
+                    texto: (el.innerText || el.textContent || "").trim().slice(0, 120),
+                    id: (el.id || "").trim(),
+                    name: (el.getAttribute("name") || "").trim(),
+                    href: (el.getAttribute("href") || "").trim()
+                  }));
+                }
+                """
+            )
+            if not isinstance(mapa_dom, list) or not mapa_dom:
+                return {"status": "erro", "motivo": "Nao consegui extrair elementos interativos da pagina atual."}
+
+            _LOGGER.info("[CARTÓGRAFO] Mapa do DOM extraído. Solicitando decisão semântica da IA...")
+            llm = ChatOpenAI(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                temperature=0,
+                api_key=os.getenv("OPENAI_API_KEY") or None,
+            )
+            llm_estruturado = llm.with_structured_output(PassoCartografo)
+            prompt = (
+                f"Instrução do Utilizador: '{instrucao_humana}'\n\n"
+                f"Aqui está o mapa de elementos interativos da página atual: {json.dumps(mapa_dom, ensure_ascii=False)}\n\n"
+                "Sua tarefa: Analisar a instrução e o mapa da página. Determine qual é o elemento exato "
+                "que o utilizador quer interagir."
+            )
+            try:
+                passo_ia = await llm_estruturado.ainvoke(prompt)
+            except Exception as exc:
+                return {"status": "erro", "motivo": f"Falha na análise semântica da IA: {exc}"}
+
+            tipo_acao = str(getattr(passo_ia, "tipo", "clicar") or "clicar").strip().lower()
+            seletor_ia = str(getattr(passo_ia, "seletor", "") or "").strip()
+            valor_ia = str(getattr(passo_ia, "valor", "") or "").strip()
+            if not seletor_ia:
+                return {"status": "erro", "motivo": "A IA não retornou um seletor válido para execução."}
+
+            _LOGGER.info(f"[CARTÓGRAFO] IA sugeriu seletor '{seletor_ia}' para a ação '{tipo_acao}'.")
+            try:
+                if tipo_acao == "clicar":
+                    await page.click(seletor_ia)
+                else:
+                    return {"status": "erro", "motivo": f"Tipo de ação não suportado para execução: {tipo_acao}"}
+
                 try:
-                    by_text = page.get_by_text(termo, exact=False)
-                    if await by_text.count() > 0:
-                        alvo = by_text.first
-                    else:
-                        by_button = page.get_by_role("button", name=termo)
-                        if await by_button.count() > 0:
-                            alvo = by_button.first
+                    await page.wait_for_load_state("networkidle", timeout=7000)
                 except Exception:
-                    alvo = None
+                    await page.wait_for_timeout(2000)
+                _LOGGER.info(f"[CARTÓGRAFO] Clique executado com sucesso no seletor IA: {seletor_ia}")
+            except Exception as exc:
+                _LOGGER.info(f"[ERRO] A IA analisou a tela, mas o seletor sugerido falhou. Seletor: {seletor_ia}")
+                return {
+                    "status": "erro",
+                    "motivo": f"A IA analisou a tela, mas o seletor sugerido falhou. Detalhe técnico: {exc}",
+                }
 
-                if alvo is None:
-                    _LOGGER.warning(f"[CARTÓGRAFO] Não consegui encontrar o botão '{termo}'.")
-                    return {
-                        "status": "erro",
-                        "motivo": f"Nao consegui encontrar o elemento '{termo}' durante o aprendizado.",
-                    }
-
-                try:
-                    await alvo.click()
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
-                    except Exception:
-                        await page.wait_for_timeout(2000)
-                    passo = {"tipo": "clicar", "seletor": f"text={termo}", "valor": termo}
-                    passos_reais.append(passo)
-                    _LOGGER.info(f"[CARTÓGRAFO] Elemento '{termo}' encontrado e clicado.")
-                except Exception as exc:
-                    _LOGGER.warning(f"[CARTÓGRAFO] Falha ao clicar em '{termo}': {exc}")
-                    return {
-                        "status": "erro",
-                        "motivo": f"Elemento '{termo}' encontrado, mas o clique falhou: {exc}",
-                    }
+            passos_reais = [{"tipo": "clicar", "seletor": seletor_ia, "valor": valor_ia or seletor_ia}]
     except Exception as exc:
         _LOGGER.info(f"[CARTÓGRAFO] Falha ao mapear ação '{nome_acao}': {exc}")
         _LOGGER.info("[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat.")
