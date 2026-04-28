@@ -361,7 +361,10 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                     "INSTRUÇÕES DO AGENTE:\n"
                     "1. Analise o DOM. Se ocorreu um erro no passo anterior, tente uma estratégia ou seletor diferente.\n"
                     "2. Ações permitidas: 'clicar', 'preencher', 'teclar', 'extrair_texto', 'download_pdf', 'concluido'.\n"
-                    "3. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
+                    "3. REGRA CRÍTICA DE DOWNLOAD: Se o objetivo envolve 'baixar', 'download', 'PDF', 'fatura' ou "
+                    "'boleto', e você encontrar o botão correspondente, VOCÊ É OBRIGADO a usar a ação 'download_pdf'. "
+                    "NUNCA use 'clicar' para baixar ficheiros.\n"
+                    "4. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
                 )
                 try:
                     decisao_ia = await llm_estruturado.ainvoke(prompt)
@@ -393,6 +396,7 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                             await page.wait_for_load_state("networkidle", timeout=5000)
                         except Exception:
                             await page.wait_for_timeout(800)
+                        await asyncio.sleep(1.5)
                     elif tipo == "preencher":
                         await page.fill(seletor, valor)
                         await page.wait_for_timeout(500)
@@ -402,8 +406,9 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                             await page.wait_for_load_state("networkidle", timeout=3000)
                         except Exception:
                             await page.wait_for_timeout(800)
+                        await asyncio.sleep(1.5)
                     elif tipo == "extrair_texto":
-                        texto = await page.locator(seletor).first.inner_text()
+                        texto = await page.locator(seletor).first.inner_text(timeout=5000)
                         dados_extraidos[seletor] = texto
                         _LOGGER.info(f"[EXTRAÇÃO] Dado extraído: {texto}")
                     elif tipo == "download_pdf":

@@ -302,7 +302,7 @@ if menu_selecionado == "Chat & Ações":
             if msg.get("role") == "assistant":
                 conteudo = str(msg.get("content", ""))
                 if _EVIDENCIA in conteudo and os.path.exists(str(caminho_evidencia)):
-                    st.image(str(caminho_evidencia), caption="Evidencia do Sistema")
+                    st.image(str(caminho_evidencia), caption="Evidencia do Sistema", use_container_width=True)
                 evidencia_msg = str(msg.get("evidencia", "") or "")
                 if evidencia_msg:
                     try:
