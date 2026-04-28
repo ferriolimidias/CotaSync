@@ -99,6 +99,20 @@ def _screenshot_por_acao(chave_acao: str) -> Path:
     return _ROOT / f"mapeamento_{_normalizar_nome_arquivo(chave_acao)}.png"
 
 
+def _normalizar_resposta_assistente(resposta: object) -> dict:
+    if isinstance(resposta, dict):
+        content = str(resposta.get("content", ""))
+        arquivos = resposta.get("arquivos", [])
+        evidencia = str(resposta.get("evidencia", "") or "")
+        if not isinstance(arquivos, list):
+            arquivos = []
+        payload = {"role": "assistant", "content": content, "arquivos": arquivos}
+        if evidencia:
+            payload["evidencia"] = evidencia
+        return payload
+    return {"role": "assistant", "content": str(resposta)}
+
+
 def carregar_historico_disco() -> list[dict]:
     try:
         if not _CHAT_HISTORY_PATH.is_file():
@@ -187,7 +201,7 @@ if st.session_state.pop("_pending_agent", False):
     historico_anterior = st.session_state.messages[:-1]
     with st.spinner("Analisando ERP..."):
         resposta = asyncio.run(processar_mensagem(ultima["content"], historico_anterior))
-    st.session_state.messages.append({"role": "assistant", "content": resposta})
+    st.session_state.messages.append(_normalizar_resposta_assistente(resposta))
     salvar_historico_disco(st.session_state.messages)
     st.rerun()
 
@@ -269,10 +283,44 @@ if menu_selecionado == "Chat & Ações":
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if "arquivos" in msg and msg["arquivos"]:
+                for caminho_arq in msg["arquivos"]:
+                    try:
+                        caminho_abs = _ROOT / str(caminho_arq)
+                        if caminho_abs.is_file():
+                            nome_arquivo = caminho_abs.name
+                            conteudo_arquivo = caminho_abs.read_bytes()
+                            st.download_button(
+                                label=f"📥 Baixar {nome_arquivo}",
+                                data=conteudo_arquivo,
+                                file_name=nome_arquivo,
+                                mime="application/octet-stream",
+                                key=f"download_{msg['role']}_{nome_arquivo}_{hash(str(caminho_arq))}",
+                            )
+                    except OSError:
+                        continue
             if msg.get("role") == "assistant":
                 conteudo = str(msg.get("content", ""))
                 if _EVIDENCIA in conteudo and os.path.exists(str(caminho_evidencia)):
                     st.image(str(caminho_evidencia), caption="Evidencia do Sistema")
+                evidencia_msg = str(msg.get("evidencia", "") or "")
+                if evidencia_msg:
+                    try:
+                        caminho_evidencia_msg = _ROOT / evidencia_msg
+                        if caminho_evidencia_msg.is_file() and caminho_evidencia_msg.suffix.lower() in {
+                            ".png",
+                            ".jpg",
+                            ".jpeg",
+                            ".webp",
+                            ".gif",
+                        }:
+                            st.image(
+                                str(caminho_evidencia_msg),
+                                caption=f"Evidência: {caminho_evidencia_msg.name}",
+                                use_container_width=True,
+                            )
+                    except OSError:
+                        pass
 
     prompt = st.chat_input("Digite sua mensagem operacional...", key="chat_operacional")
     if prompt:
@@ -281,7 +329,7 @@ if menu_selecionado == "Chat & Ações":
         salvar_historico_disco(st.session_state.messages)
         with st.spinner("Analisando ERP..."):
             resposta_chat = asyncio.run(processar_mensagem(prompt, historico_antes))
-        st.session_state.messages.append({"role": "assistant", "content": resposta_chat})
+        st.session_state.messages.append(_normalizar_resposta_assistente(resposta_chat))
         salvar_historico_disco(st.session_state.messages)
         st.rerun()
 

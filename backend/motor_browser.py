@@ -12,7 +12,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -36,9 +36,12 @@ if not _LOGGER.handlers:
 
 
 class PassoCartografo(BaseModel):
-    tipo: str = Field(description="Tipo da ação, ex.: clicar")
-    seletor: str = Field(description="Seletor CSS preciso do elemento")
-    valor: str = Field(default="", description="Texto amigável do elemento escolhido")
+    raciocinio: str = Field(description="Explicação curta do próximo passo.")
+    tipo: Literal["clicar", "preencher", "teclar", "extrair_texto", "download_pdf", "concluido"] = Field(
+        description="Tipo da ação a executar."
+    )
+    seletor: str = Field(default="", description="Seletor CSS preciso do elemento.")
+    valor: str = Field(default="", description="Valor opcional para preencher ou referência textual.")
 
 
 def _carregar_erp_config() -> tuple[str, str, str]:
@@ -122,6 +125,58 @@ async def _login_automatico(page: Any, url_sistema: str, usuario: str, senha: st
 
     _LOGGER.info("[LOGIN] Autenticação bem-sucedida.")
     return True, "Login concluído."
+
+
+async def _extrair_mapa_dom(page: Any, limite: int = 80) -> list[dict[str, str]]:
+    mapa_dom = await page.evaluate(
+        """
+        (limite) => {
+          const elementos = Array.from(
+            document.querySelectorAll("button, a, input, textarea, select, [role='button'], [onclick], [tabindex]")
+          );
+          const visiveis = elementos.filter((el) => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return (
+              style &&
+              style.visibility !== "hidden" &&
+              style.display !== "none" &&
+              rect.width > 0 &&
+              rect.height > 0
+            );
+          });
+          const limpos = visiveis.map((el) => ({
+            tag: (el.tagName || "").toLowerCase(),
+            texto: (el.innerText || el.textContent || "").trim().slice(0, 120),
+            id: (el.id || "").trim(),
+            name: (el.getAttribute("name") || "").trim(),
+            href: (el.getAttribute("href") || "").trim(),
+            placeholder: (el.getAttribute("placeholder") || "").trim(),
+          }));
+          return limpos.slice(0, limite);
+        }
+        """,
+        limite,
+    )
+    if not isinstance(mapa_dom, list):
+        return []
+    resultado: list[dict[str, str]] = []
+    for item in mapa_dom:
+        if not isinstance(item, dict):
+            continue
+        if not (item.get("texto") or item.get("id") or item.get("name") or item.get("placeholder")):
+            continue
+        resultado.append(
+            {
+                "tag": str(item.get("tag", "")),
+                "texto": str(item.get("texto", "")),
+                "id": str(item.get("id", "")),
+                "name": str(item.get("name", "")),
+                "href": str(item.get("href", "")),
+                "placeholder": str(item.get("placeholder", "")),
+            }
+        )
+    return resultado[:limite]
 
 
 def _raiz_projeto() -> Path:
@@ -245,12 +300,14 @@ async def exemplo_navegacao(url: str = "https://example.com") -> str:
 
 
 async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
-    """Acessa o ERP, tenta login automático e gera receita de mapeamento."""
+    """Acessa o ERP, faz login e aprende via loop semântico iterativo (Reason + Act)."""
     raiz = _raiz_projeto()
     url_sistema, usuario, senha = _carregar_erp_config()
-
     nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
     screenshot_path = raiz / f"mapeamento_{nome_arquivo}.png"
+    passos_aprendidos: list[dict[str, str]] = []
+    dados_extraidos: dict[str, str] = {}
+    erros_recentes: list[str] = []
 
     browser: Browser | None = None
     _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
@@ -263,108 +320,134 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
             if not login_ok:
                 return {"status": "erro", "motivo": login_msg}
             _LOGGER.info(f"[LOGIN] {login_msg} Iniciando busca por: {instrucao_humana}")
-            await page.screenshot(path=str(screenshot_path), full_page=False)
-            _LOGGER.info(f"[CARTÓGRAFO] Screenshot pós-login salvo em: {screenshot_path.name}")
 
-            _LOGGER.info("[CARTÓGRAFO] Extraindo mapa semântico do DOM interativo visível...")
-            mapa_dom = await page.evaluate(
-                """
-                () => {
-                  const interativos = Array.from(
-                    document.querySelectorAll("button, a, input, [role='button'], [onclick], [tabindex]")
-                  );
-                  const visiveis = interativos.filter((el) => {
-                    const style = window.getComputedStyle(el);
-                    const rect = el.getBoundingClientRect();
-                    return (
-                      style &&
-                      style.visibility !== "hidden" &&
-                      style.display !== "none" &&
-                      rect.width > 0 &&
-                      rect.height > 0
-                    );
-                  });
-                  return visiveis.slice(0, 100).map((el) => ({
-                    tag: (el.tagName || "").toLowerCase(),
-                    texto: (el.innerText || el.textContent || "").trim().slice(0, 120),
-                    id: (el.id || "").trim(),
-                    name: (el.getAttribute("name") || "").trim(),
-                    href: (el.getAttribute("href") || "").trim()
-                  }));
-                }
-                """
-            )
-            if not isinstance(mapa_dom, list) or not mapa_dom:
-                return {"status": "erro", "motivo": "Nao consegui extrair elementos interativos da pagina atual."}
-            mapa_dom = [item for item in mapa_dom if isinstance(item, dict) and (item.get("texto") or item.get("id") or item.get("name"))][:80]
-
-            _LOGGER.info("[CARTÓGRAFO] Mapa do DOM extraído. Solicitando decisão semântica da IA...")
             llm = ChatOpenAI(
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
                 temperature=0,
                 api_key=os.getenv("OPENAI_API_KEY") or None,
             )
             llm_estruturado = llm.with_structured_output(PassoCartografo)
-            prompt = (
-                f"Instrução do Utilizador: '{instrucao_humana}'\n\n"
-                f"Aqui está o mapa de elementos interativos da página atual: {json.dumps(mapa_dom, ensure_ascii=False)}\n\n"
-                "Sua tarefa: Analisar a instrução e o mapa da página. Determine qual é o elemento exato "
-                "que o utilizador quer interagir."
-            )
-            try:
-                passo_ia = await llm_estruturado.ainvoke(prompt)
-            except Exception as exc:
-                return {"status": "erro", "motivo": f"Falha na análise semântica da IA: {exc}"}
 
-            tipo_acao = str(getattr(passo_ia, "tipo", "clicar") or "clicar").strip().lower()
-            seletor_ia = str(getattr(passo_ia, "seletor", "") or "").strip()
-            valor_ia = str(getattr(passo_ia, "valor", "") or "").strip()
-            if not seletor_ia:
-                return {"status": "erro", "motivo": "A IA não retornou um seletor válido para execução."}
+            for iteracao in range(10):
+                mapa_dom = await _extrair_mapa_dom(page, limite=80)
+                if not mapa_dom:
+                    return {"status": "erro", "motivo": "Nao consegui extrair elementos interativos da tela atual."}
 
-            _LOGGER.info(f"[IA SEMÂNTICA] Seletor escolhido pelo LLM: {seletor_ia}")
-            _LOGGER.info(f"[CARTÓGRAFO] IA sugeriu seletor '{seletor_ia}' para a ação '{tipo_acao}'.")
-            try:
-                if tipo_acao == "clicar":
-                    await page.click(seletor_ia)
-                else:
-                    return {"status": "erro", "motivo": f"Tipo de ação não suportado para execução: {tipo_acao}"}
+                prompt = (
+                    f"Objetivo final: {instrucao_humana}\n"
+                    f"Passos já dados com sucesso: {json.dumps(passos_aprendidos, ensure_ascii=False)}\n"
+                    f"Dados já extraídos: {json.dumps(dados_extraidos, ensure_ascii=False)}\n"
+                    f"ERROS RECENTES (Evite repetir estas ações): {json.dumps(erros_recentes, ensure_ascii=False)}\n"
+                    f"DOM atual: {json.dumps(mapa_dom, ensure_ascii=False)}\n\n"
+                    "INSTRUÇÕES DO AGENTE:\n"
+                    "1. Analise o DOM. Se ocorreu um erro no passo anterior, tente uma estratégia ou seletor diferente.\n"
+                    "2. Ações permitidas: 'clicar', 'preencher', 'teclar', 'extrair_texto', 'download_pdf', 'concluido'.\n"
+                    "3. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
+                )
+                try:
+                    decisao_ia = await llm_estruturado.ainvoke(prompt)
+                except Exception as exc:
+                    return {"status": "erro", "motivo": f"Falha na análise semântica da IA: {exc}"}
+
+                tipo = str(getattr(decisao_ia, "tipo", "") or "").strip().lower()
+                seletor = str(getattr(decisao_ia, "seletor", "") or "").strip()
+                valor = str(getattr(decisao_ia, "valor", "") or "").strip()
+                raciocinio = str(getattr(decisao_ia, "raciocinio", "") or "").strip()
+                _LOGGER.info(
+                    f"[IA SEMÂNTICA] Iteração {iteracao + 1} | Raciocínio: {raciocinio} | "
+                    f"Decisão: {tipo} no seletor {seletor}"
+                )
+
+                if tipo == "concluido":
+                    _LOGGER.info("[IA SEMÂNTICA] Objetivo marcado como concluído.")
+                    break
+
+                if tipo in {"clicar", "preencher", "extrair_texto", "download_pdf"} and not seletor:
+                    return {"status": "erro", "motivo": "A IA não retornou seletor válido para o próximo passo."}
+                if tipo in {"preencher", "teclar"} and not valor:
+                    return {"status": "erro", "motivo": f"A IA não retornou valor para ação '{tipo}'."}
 
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=7000)
-                except Exception:
-                    await page.wait_for_timeout(2000)
-                _LOGGER.info(f"[CARTÓGRAFO] Clique executado com sucesso no seletor IA: {seletor_ia}")
-            except Exception as exc:
-                _LOGGER.info(f"[ERRO] A IA analisou a tela, mas o seletor sugerido falhou. Seletor: {seletor_ia}")
+                    if tipo == "clicar":
+                        await page.click(seletor)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=5000)
+                        except Exception:
+                            await page.wait_for_timeout(800)
+                    elif tipo == "preencher":
+                        await page.fill(seletor, valor)
+                        await page.wait_for_timeout(500)
+                    elif tipo == "teclar":
+                        await page.keyboard.press(valor)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=3000)
+                        except Exception:
+                            await page.wait_for_timeout(800)
+                    elif tipo == "extrair_texto":
+                        texto = await page.locator(seletor).first.inner_text()
+                        dados_extraidos[seletor] = texto
+                        _LOGGER.info(f"[EXTRAÇÃO] Dado extraído: {texto}")
+                    elif tipo == "download_pdf":
+                        downloads_dir = raiz / "downloads"
+                        downloads_dir.mkdir(parents=True, exist_ok=True)
+                        async with page.expect_download(timeout=15000) as download_info:
+                            await page.click(seletor)
+                        download = await download_info.value
+                        caminho_arquivo = downloads_dir / download.suggested_filename
+                        await download.save_as(str(caminho_arquivo))
+                        chave = f"arquivo_{seletor}"
+                        dados_extraidos[chave] = str(caminho_arquivo.relative_to(raiz))
+                        _LOGGER.info(f"[DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
+                    else:
+                        return {"status": "erro", "motivo": f"Tipo de ação não suportado: {tipo}"}
+
+                    erros_recentes.clear()
+                    passos_aprendidos.append({"tipo": tipo, "seletor": seletor, "valor": valor})
+                except Exception as exc:
+                    msg_erro = (
+                        f"Falha ao executar '{tipo}' no seletor '{seletor}'. "
+                        f"Erro técnico: {str(exc)}"
+                    )
+                    _LOGGER.warning(f"[AGENTE AUTO-CORREÇÃO] {msg_erro}")
+                    erros_recentes.append(msg_erro)
+                    erros_recentes = erros_recentes[-3:]
+                    continue
+
+            if not passos_aprendidos:
+                return {"status": "erro", "motivo": "Nenhum passo executável foi aprendido durante o loop semântico."}
+
+            # Trava de qualidade: evita gravar aprendizado sem ação concreta ou sem extração pedida.
+            passos_concretos = [
+                passo
+                for passo in passos_aprendidos
+                if isinstance(passo, dict)
+                and str(passo.get("tipo", "")).lower() in {"clicar", "preencher", "teclar", "download_pdf"}
+            ]
+            instrucao_norm = str(instrucao_humana or "").lower()
+            exige_extracao = any(chave in instrucao_norm for chave in ["pegar", "extrair", "ler", "buscar", "baixar"])
+            if not passos_concretos or (exige_extracao and not dados_extraidos):
                 return {
                     "status": "erro",
-                    "motivo": f"A IA analisou a tela, mas o seletor sugerido falhou. Detalhe técnico: {exc}",
+                    "motivo": (
+                        "O agente tentou navegar, mas não conseguiu realizar ações concretas ou não encontrou os "
+                        "dados solicitados. A rotina não foi gravada para evitar falsos positivos."
+                    ),
                 }
 
-            passos_reais = [{"tipo": "clicar", "seletor": seletor_ia, "valor": valor_ia or seletor_ia}]
+            await page.screenshot(path=str(screenshot_path), full_page=False)
+            _LOGGER.info(f"[CARTÓGRAFO] Screenshot pós-aprendizado salvo em: {screenshot_path.name}")
     except Exception as exc:
         _LOGGER.info(f"[CARTÓGRAFO] Falha ao mapear ação '{nome_acao}': {exc}")
         _LOGGER.info("[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat.")
-        return {
-            "status": "erro",
-            "motivo": f"Falha ao aceder ao sistema: {exc}",
-        }
+        return {"status": "erro", "motivo": f"Falha ao aceder ao sistema: {exc}"}
     finally:
         if browser is not None:
             await browser.close()
 
-    # Gera uma "receita" no padrão estrito da arquitetura com um nome curto e claro
-    nome_curto = nome_acao.replace("_", " ").title()
-    passos_aprendidos = {
-        "nome_amigavel": nome_curto,
-        "descricao": f"Ação aprendida: {instrucao_humana[:30]}...",
-        "url_inicial": "Lida do erp_config.json",
-        "passos_playwright": passos_reais,
-    }
     return {
         "status": "sucesso",
-        "passos_aprendidos": passos_aprendidos,
+        "passos_playwright": passos_aprendidos,
+        "dados_extraidos": dados_extraidos,
     }
 
 
@@ -380,6 +463,7 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
     nome_arquivo = re.sub(r"[^\w\-]+", "_", str(nome_acao or "acao"), flags=re.UNICODE).strip("_")
     caminho_execucao = raiz / f"execucao_{nome_arquivo}.png"
     caminho_evidencia_padrao = raiz / NOME_ARQUIVO_EVIDENCIA
+    arquivos_baixados: list[str] = []
 
     browser: Browser | None = None
     _LOGGER.info(f"[FAST-TRACK] Iniciando execução rápida da ação: {nome_acao}")
@@ -399,22 +483,52 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
                     continue
                 tipo = str(passo.get("tipo", "")).lower()
                 seletor = str(passo.get("seletor", "")).strip()
-                if tipo != "clicar" or not seletor:
-                    continue
-                _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: clique em {seletor}")
-                await page.click(seletor)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=5000)
-                except Exception:
-                    await page.wait_for_timeout(1000)
+                valor = str(passo.get("valor", "")).strip()
+                if tipo == "clicar":
+                    if not seletor:
+                        continue
+                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: clique em {seletor}")
+                    await page.click(seletor)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=5000)
+                    except Exception:
+                        await page.wait_for_timeout(1000)
+                elif tipo == "preencher":
+                    if not seletor:
+                        continue
+                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: preencher {seletor}")
+                    await page.fill(seletor, valor)
+                    await page.wait_for_timeout(500)
+                elif tipo == "teclar":
+                    if not valor:
+                        continue
+                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: teclar {valor}")
+                    await page.keyboard.press(valor)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except Exception:
+                        await page.wait_for_timeout(600)
+                elif tipo == "download_pdf":
+                    if not seletor:
+                        continue
+                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: download via {seletor}")
+                    downloads_dir = raiz / "downloads"
+                    downloads_dir.mkdir(parents=True, exist_ok=True)
+                    async with page.expect_download(timeout=15000) as download_info:
+                        await page.click(seletor)
+                    download = await download_info.value
+                    caminho_arquivo = downloads_dir / download.suggested_filename
+                    await download.save_as(str(caminho_arquivo))
+                    _LOGGER.info(f"[FAST-TRACK][DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
+                    arquivos_baixados.append(str(caminho_arquivo.relative_to(raiz)))
 
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
             return {
                 "status": "sucesso",
-                "caminho_imagem": caminho_execucao.name,
-                "caminho_evidencia_padrao": NOME_ARQUIVO_EVIDENCIA,
+                "evidencia": caminho_execucao.name,
+                "arquivos_baixados": arquivos_baixados,
             }
     except Exception as exc:
         _LOGGER.info(f"[ERRO] Falha na execução rápida '{nome_acao}': {exc}")

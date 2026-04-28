@@ -174,7 +174,7 @@ def criar_agente_executor() -> AgentExecutor:
     )
 
 
-async def processar_mensagem(mensagem_usuario: str, historico: list | None = None) -> str:
+async def processar_mensagem(mensagem_usuario: str, historico: list | None = None) -> Any:
     """
     Ponto principal de entrada do chat: executa o agente e devolve só o texto final.
 
@@ -193,7 +193,15 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
     if estado == "ESPERANDO_ENSINO":
         sessao["estado"] = "APRENDENDO"
-        nome_acao = str(sessao.get("acao_pendente") or "nova_rotina_1")
+        ui_map_atual = carregar_ui_map()
+        acoes_existentes = ui_map_atual.get("acoes_conhecidas", {})
+        nome_base = await gerar_nome_acao(mensagem_usuario)
+        nome_acao = nome_base
+        contador = 2
+        while isinstance(acoes_existentes, dict) and nome_acao in acoes_existentes:
+            nome_acao = f"{nome_base} {contador}"
+            contador += 1
+        sessao["acao_pendente"] = nome_acao
         _LOGGER.info(f"[HITL] Estado APRENDENDO iniciado para ação: {nome_acao}")
         resultado_mapeamento = await acionar_ia_cartografa(nome_acao, mensagem_usuario)
         status_mapeamento = (
@@ -215,12 +223,8 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
                 "Pode verificar as configurações ou me ajudar a passar dessa tela no 'Logs do Sistema'?"
             )
 
-        novos_passos = (
-            resultado_mapeamento.get("passos_aprendidos")
-            if isinstance(resultado_mapeamento, dict)
-            else None
-        )
-        if not isinstance(novos_passos, dict) or "passos_playwright" not in novos_passos:
+        passos_reais = resultado_mapeamento.get("passos_playwright") if isinstance(resultado_mapeamento, dict) else None
+        if not isinstance(passos_reais, list) or not passos_reais:
             sessao["estado"] = "ESPERANDO_ENSINO"
             _LOGGER.info(
                 "[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat. "
@@ -234,7 +238,12 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
         ui_map = carregar_ui_map()
         ui_map.setdefault("acoes_conhecidas", {})
-        ui_map["acoes_conhecidas"][nome_acao] = novos_passos
+        ui_map["acoes_conhecidas"][nome_acao] = {
+            "nome_amigavel": nome_acao,
+            "descricao": f"Ação aprendida: {mensagem_usuario[:80]}...",
+            "url_inicial": "Lida do erp_config.json",
+            "passos_playwright": passos_reais,
+        }
         try:
             salvar_ui_map(ui_map)
         except OSError:
@@ -247,11 +256,30 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
         sessao["estado"] = "NORMAL"
         sessao["acao_pendente"] = None
-        total_passos = len(novos_passos.get("passos_playwright", [])) if isinstance(novos_passos, dict) else 0
-        return (
+        total_passos = len(passos_reais)
+        dados_extraidos = (
+            resultado_mapeamento.get("dados_extraidos", {})
+            if isinstance(resultado_mapeamento, dict)
+            else {}
+        )
+        resposta_base = (
             f"Aprendi {total_passos} passos para a rotina '{nome_acao}'. "
             "Já guardei os comandos técnicos no meu banco de dados."
         )
+        if isinstance(dados_extraidos, dict) and dados_extraidos:
+            arquivos_aprendizado = [
+                str(valor)
+                for valor in dados_extraidos.values()
+                if isinstance(valor, str) and valor.startswith("downloads/")
+            ]
+            return {
+                "content": (
+                    f"Aprendi a rotina '{nome_acao}'. Além disso, extraí as seguintes informações do sistema: "
+                    f"{dados_extraidos}"
+                ),
+                "arquivos": arquivos_aprendizado,
+            }
+        return resposta_base
 
     if estado == "NORMAL":
         ui_map = carregar_ui_map()
@@ -263,24 +291,20 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
             passos = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
             resultado_execucao = await executar_acao_rapida(mensagem_limpa, passos)
             if str(resultado_execucao.get("status", "")).lower() == "sucesso":
-                caminho = str(resultado_execucao.get("caminho_evidencia_padrao", "print_teste.png"))
-                return (
-                    "✅ Execução concluída! Repeti os passos da memória com sucesso. "
-                    f"Aqui está a evidência: {caminho}"
-                )
+                arquivos_baixados = resultado_execucao.get("arquivos_baixados", [])
+                evidencia = str(resultado_execucao.get("evidencia", ""))
+                return {
+                    "content": "✅ Execução concluída com sucesso! Evidência visual e arquivos extraídos abaixo:",
+                    "evidencia": evidencia,
+                    "arquivos": arquivos_baixados if isinstance(arquivos_baixados, list) else [],
+                }
             motivo = str(resultado_execucao.get("motivo", "Falha não identificada."))
             return f"❌ A execução rápida falhou: {motivo}"
 
         if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
-            nome_base = await gerar_nome_acao(mensagem_usuario)
-            nome_acao = nome_base
-            contador = 2
-            while isinstance(acoes, dict) and nome_acao in acoes:
-                nome_acao = f"{nome_base} {contador}"
-                contador += 1
             sessao["estado"] = "ESPERANDO_ENSINO"
-            sessao["acao_pendente"] = nome_acao
-            _LOGGER.info(f"[HITL] Estado ESPERANDO_ENSINO para ação: {nome_acao}")
+            sessao["acao_pendente"] = "nova_acao"
+            _LOGGER.info("[HITL] Estado ESPERANDO_ENSINO para ação pendente genérica.")
             return "Ainda não aprendi essa tarefa. Pode me explicar o passo a passo de onde eu clico no sistema?"
 
     chat_history = _historico_dicts_para_mensagens(historico)
