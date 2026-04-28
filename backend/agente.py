@@ -11,7 +11,9 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+# LangChain 1.x: AgentExecutor e create_tool_calling_agent estão em `langchain-classic`
+# (o pacote de compatibilidade; o top-level `langchain` deixou de reexportá-los).
+from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool

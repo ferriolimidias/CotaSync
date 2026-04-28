@@ -4,6 +4,8 @@ uvicorn[standard]
 streamlit
 playwright
 langchain
+langchain-classic
+langchain-core
 langchain-openai
 pydantic
 apscheduler
