@@ -273,11 +273,14 @@ elif menu_selecionado == "Robô ao Vivo":
     st.markdown("##### Robô ao Vivo - Intervenção")
     st.info(
         "💡 **Dica de Intervenção:** Abaixo está a 'televisão' do robô. Quando uma automação "
-        "roda, a janela aparece aqui. Para acessar o seu ERP manualmente e logar, clique na "
-        "opção **'Live Debug'** (ou similar) dentro deste painel abaixo e digite o site do "
-        "seu sistema."
+        "roda, a janela aparece aqui. Para acessar o seu ERP manualmente e logar, utilize a "
+        "interface do depurador abaixo."
     )
-    st.components.v1.iframe(src="http://84.46.253.236:3000", height=800, scrolling=True)
+    st.components.v1.iframe(
+        src="http://84.46.253.236:3000/debugger?token=ferrioli_super_secreto_123",
+        height=800,
+        scrolling=True,
+    )
 
 elif menu_selecionado == "Configurações":
     st.markdown("##### Segurança WhatsApp *(whitelist)*")
