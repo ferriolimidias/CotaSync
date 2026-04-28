@@ -7,6 +7,7 @@ O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -104,24 +105,39 @@ async def _login_automatico(page: Any, url_sistema: str, usuario: str, senha: st
     _LOGGER.info(f"[LOGIN] Clicando em '{botao_login}' para autenticar.")
     await page.click(botao_login)
     try:
-        await page.wait_for_navigation(wait_until="networkidle", timeout=15000)
+        await page.wait_for_load_state("networkidle", timeout=5000)
     except Exception:
-        _LOGGER.info("[LOGIN] Sem navegação explícita após clique; validando estado da tela.")
+        _LOGGER.info("[LOGIN] Network idle não confirmado; continuando validação visual do DOM.")
+    await asyncio.sleep(2)
 
-    url_inicial_norm = url_sistema.rstrip("/")
-    url_atual_norm = page.url.rstrip("/")
-    ainda_tem_senha = await page.locator("input[type='password'], #pass").count() > 0
-    area_logada_detectada = (
-        await page.locator(
-            "nav, #menu, .menu, [id*='menu'], [class*='menu'], [data-testid*='menu'], [aria-label*='menu'], [id*='user'], [class*='user']"
-        ).count()
-        > 0
-    )
-    login_sucesso = (url_atual_norm != url_inicial_norm) or area_logada_detectada
-    if (not login_sucesso) or ainda_tem_senha:
-        msg = f"Login falhou ou página não redirecionou. URL atual: {page.url}"
-        _LOGGER.info(f"[ERRO] {msg}")
-        return False, msg
+    try:
+        login_ainda_visivel = await page.is_visible(botao_login)
+    except Exception:
+        login_ainda_visivel = False
+
+    if login_ainda_visivel:
+        textos_erro = await page.evaluate(
+            """() => {
+                const elementos = Array.from(document.querySelectorAll('div, span, p'));
+                const erros = elementos.filter(el => {
+                    const texto = (el.innerText || '').toLowerCase();
+                    const estilo = window.getComputedStyle(el);
+                    const classe = typeof el.className === 'string' ? el.className.toLowerCase() : '';
+                    return (texto.includes('erro') ||
+                            texto.includes('incorreto') ||
+                            texto.includes('inválido') ||
+                            texto.includes('invalido')) &&
+                           (estilo.color === 'rgb(255, 0, 0)' || classe.includes('red') || classe.includes('error'));
+                });
+                return erros.length > 0 ? erros[0].innerText : "Mensagem de erro não identificada no DOM.";
+            }"""
+        )
+        msg_falha = (
+            "Login falhou. A tela de login ainda está visível. "
+            f"Possível erro do sistema: {textos_erro}"
+        )
+        _LOGGER.warning(f"[ERRO] {msg_falha}")
+        raise Exception(msg_falha)
 
     _LOGGER.info("[LOGIN] Autenticação bem-sucedida.")
     return True, "Login concluído."
@@ -316,7 +332,10 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
             browser = await p.chromium.connect_over_cdp("ws://browserless:3000")
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
-            login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
+            try:
+                login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
+            except Exception as exc:
+                return {"status": "erro", "motivo": str(exc)}
             if not login_ok:
                 return {"status": "erro", "motivo": login_msg}
             _LOGGER.info(f"[LOGIN] {login_msg} Iniciando busca por: {instrucao_humana}")
@@ -473,7 +492,10 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
 
-            login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
+            try:
+                login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
+            except Exception as exc:
+                return {"status": "erro", "motivo": str(exc)}
             if not login_ok:
                 return {"status": "erro", "motivo": login_msg}
             _LOGGER.info(f"[FAST-TRACK] {login_msg}")
