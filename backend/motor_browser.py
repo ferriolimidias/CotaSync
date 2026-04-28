@@ -7,7 +7,8 @@ O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
 
 from __future__ import annotations
 
-import asyncio
+import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,16 @@ load_dotenv()
 
 # Nome do ficheiro de evidência na raiz do projeto (alinhado ao Streamlit e à tool do agente).
 NOME_ARQUIVO_EVIDENCIA = "print_teste.png"
+_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_LOG_FILE = _LOG_DIR / "operation.log"
+_LOGGER = logging.getLogger("cotasync")
+if not _LOGGER.handlers:
+    _LOGGER.setLevel(logging.INFO)
+    file_handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    _LOGGER.addHandler(file_handler)
+    _LOGGER.propagate = False
 
 
 def _raiz_projeto() -> Path:
@@ -81,7 +92,7 @@ async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
                     await browser.close()
     except Exception as e:
         # Log no terminal (uvicorn / streamlit) para diagnóstico rápido.
-        print(f"Erro no Playwright: {e}")
+        _LOGGER.info(f"[PLAYWRIGHT] Erro no Playwright: {e}")
         return {
             "status": "erro",
             "texto_extraido": f"Erro técnico: {str(e)}",
@@ -143,7 +154,35 @@ async def exemplo_navegacao(url: str = "https://example.com") -> str:
 
 async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
     """Simula a IA acessando o ERP e descobrindo os botões baseada na instrução humana."""
-    await asyncio.sleep(3)  # Simula o tempo da IA mapeando a tela
+    raiz = _raiz_projeto()
+    erp_config_path = raiz / "erp_config.json"
+    url_sistema = "https://google.com"
+    try:
+        if erp_config_path.is_file():
+            config = json.loads(erp_config_path.read_text(encoding="utf-8"))
+            if isinstance(config, dict):
+                url_sistema = str(config.get("url_sistema") or url_sistema).strip() or url_sistema
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    screenshot_path = raiz / f"mapeamento_{nome_arquivo}.png"
+
+    browser: Browser | None = None
+    _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp("ws://browserless:3000")
+            context = browser.contexts[0] if browser.contexts else await browser.new_context()
+            page = await context.new_page()
+            await page.goto(url_sistema, wait_until="networkidle")
+            await page.screenshot(path=str(screenshot_path), full_page=False)
+            _LOGGER.info(f"[CARTÓGRAFO] Screenshot inicial salvo em: {screenshot_path.name}")
+    except Exception as exc:
+        _LOGGER.info(f"[CARTÓGRAFO] Falha ao mapear ação '{nome_acao}': {exc}")
+    finally:
+        if browser is not None:
+            await browser.close()
 
     # Gera uma "receita" no padrão estrito da arquitetura com um nome curto e claro
     nome_curto = nome_acao.replace("_", " ").title()

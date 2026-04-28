@@ -7,7 +7,9 @@ Integração Streamlit: use `processar_mensagem` (assíncrona) ou `asyncio.run(.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,16 @@ from backend.motor_browser import acionar_ia_cartografa, consultar_erp_real
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
 _UI_MAP_PATH = _ROOT / "ui_map.json"
+_LOG_DIR = _ROOT / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_LOG_FILE = _LOG_DIR / "operation.log"
+_LOGGER = logging.getLogger("cotasync")
+if not _LOGGER.handlers:
+    _LOGGER.setLevel(logging.INFO)
+    file_handler = logging.FileHandler(_LOG_FILE, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    _LOGGER.addHandler(file_handler)
+    _LOGGER.propagate = False
 sessoes_usuarios = {"admin": {"estado": "NORMAL", "acao_pendente": None}}
 
 
@@ -54,16 +66,31 @@ def salvar_ui_map(dados: dict) -> None:
     )
 
 
-def _gerar_nome_acao(ui_map: dict) -> str:
-    acoes = ui_map.get("acoes_conhecidas", {})
-    if not isinstance(acoes, dict):
-        acoes = {}
-    indice = 1
-    while True:
-        nome = f"nova_rotina_{indice}"
-        if nome not in acoes:
-            return nome
-        indice += 1
+async def gerar_nome_acao(instrucao: str) -> str:
+    """
+    Gera um nome curto e semântico para a ação aprendida.
+    Retorna no máximo 4 palavras, sem aspas.
+    """
+    llm = _criar_llm()
+    prompt = (
+        "Resuma a instrução abaixo em um nome de ação curto e claro, com no máximo 4 palavras, "
+        "sem aspas, sem pontuação final e sem explicações.\n\n"
+        f"Instrução: {instrucao}"
+    )
+    try:
+        resposta = await llm.ainvoke(prompt)
+        nome = str(getattr(resposta, "content", "") or "").strip()
+    except Exception:
+        nome = ""
+
+    if not nome:
+        nome = "Nova Rotina"
+    nome = nome.replace('"', "").replace("'", "").replace("\n", " ").strip()
+    nome = re.sub(r"\s+", " ", nome)
+    palavras = nome.split()
+    if len(palavras) > 4:
+        nome = " ".join(palavras[:4])
+    return nome
 
 
 @tool
@@ -167,6 +194,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
     if estado == "ESPERANDO_ENSINO":
         sessao["estado"] = "APRENDENDO"
         nome_acao = str(sessao.get("acao_pendente") or "nova_rotina_1")
+        _LOGGER.info(f"[HITL] Estado APRENDENDO iniciado para ação: {nome_acao}")
         novos_passos = await acionar_ia_cartografa(nome_acao, mensagem_usuario)
         ui_map = carregar_ui_map()
         ui_map.setdefault("acoes_conhecidas", {})
@@ -193,11 +221,19 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         acoes = ui_map.get("acoes_conhecidas", {})
         mensagem_limpa = str(mensagem_usuario or "").strip()
         if isinstance(acoes, dict) and mensagem_limpa in acoes:
+            _LOGGER.info(f"[FAST-TRACK] Disparo direto da ação: {mensagem_limpa}")
             return f"Executando '{mensagem_limpa}' em alta velocidade a partir da memória..."
 
         if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
+            nome_base = await gerar_nome_acao(mensagem_usuario)
+            nome_acao = nome_base
+            contador = 2
+            while isinstance(acoes, dict) and nome_acao in acoes:
+                nome_acao = f"{nome_base} {contador}"
+                contador += 1
             sessao["estado"] = "ESPERANDO_ENSINO"
-            sessao["acao_pendente"] = _gerar_nome_acao(ui_map)
+            sessao["acao_pendente"] = nome_acao
+            _LOGGER.info(f"[HITL] Estado ESPERANDO_ENSINO para ação: {nome_acao}")
             return "Ainda não aprendi essa tarefa. Pode me explicar o passo a passo de onde eu clico no sistema?"
 
     chat_history = _historico_dicts_para_mensagens(historico)

@@ -14,6 +14,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from time import sleep
 
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
@@ -38,6 +39,7 @@ _EVIDENCIA = "print_teste.png"
 _UI_MAP_PATH = _ROOT / "ui_map.json"
 _WHITELIST_PATH = _ROOT / "usuarios_autorizados.json"
 _ERP_CONFIG_PATH = _ROOT / "erp_config.json"
+_LOG_PATH = _ROOT / "logs" / "operation.log"
 
 try:
     API_BASE_URL = st.secrets["API_BASE_URL"]
@@ -67,6 +69,25 @@ def _carregar_ui_map() -> dict:
 def _obter_acoes_conhecidas(ui_map: dict) -> dict:
     acoes = ui_map.get("acoes_conhecidas", {})
     return acoes if isinstance(acoes, dict) else {}
+
+
+def _ler_ultimas_linhas_log(limite: int = 50) -> str:
+    try:
+        if not _LOG_PATH.is_file():
+            return "Arquivo de log ainda nao encontrado."
+        linhas = _LOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if not linhas:
+            return "Log vazio."
+        return "\n".join(linhas[-limite:])
+    except OSError as exc:
+        return f"Falha ao ler logs: {exc}"
+
+
+def _listar_mapeamentos() -> list[Path]:
+    try:
+        return sorted(_ROOT.glob("mapeamento_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
 
 
 def _carregar_whitelist() -> dict:
@@ -164,10 +185,14 @@ if menu_selecionado == "Chat & Ações":
     st.subheader("Conversa com o Agente")
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
 
-    if nomes_acoes:
+    ui_map_chat = _carregar_ui_map()
+    acoes_chat = _obter_acoes_conhecidas(ui_map_chat)
+    nomes_chat = sorted(acoes_chat.keys())
+
+    if nomes_chat:
         st.markdown("#### Ações Rápidas Dinâmicas")
-        colunas = st.columns(min(len(nomes_acoes), 4))
-        for idx, nome_acao in enumerate(nomes_acoes):
+        colunas = st.columns(min(len(nomes_chat), 4))
+        for idx, nome_acao in enumerate(nomes_chat):
             coluna = colunas[idx % len(colunas)]
             with coluna:
                 if st.button(nome_acao, key=f"acao_dinamica_{idx}", use_container_width=True):
@@ -190,14 +215,7 @@ if menu_selecionado == "Chat & Ações":
     st.caption("⚡ Execução Rápida de Ações Aprendidas")
     
     # Carrega a memória para ver o que o robô já sabe
-    acoes_fast_track = {}
-    if _UI_MAP_PATH.is_file():
-        try:
-            with _UI_MAP_PATH.open("r", encoding="utf-8") as f:
-                memoria = json.load(f)
-                acoes_fast_track = memoria.get("acoes_conhecidas", {})
-        except Exception:
-            pass
+    acoes_fast_track = _obter_acoes_conhecidas(_carregar_ui_map())
 
     if acoes_fast_track:
         col1, col2 = st.columns([3, 1])
@@ -296,12 +314,53 @@ elif menu_selecionado == "Agendamentos e Filas":
 elif menu_selecionado == "Logs do Sistema":
     st.markdown("##### Logs do Sistema")
     st.info("🔒 Área Restrita: Operação invisível em background.")
-    st.code(
-        "[10:00:05] CotaSync iniciado...\n"
-        "[10:00:08] Motor Browserless conectado.\n"
-        "[10:00:10] Aguardando comandos no canal operacional.\n"
-        "[10:00:13] Fila de automações em estado ocioso."
-    )
+    _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _LOG_PATH.touch(exist_ok=True)
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        auto_atualizar = st.toggle("Atualizacao automatica", value=True, key="logs_auto_toggle")
+    with c2:
+        if st.button("🗑️ Limpar Logs", use_container_width=True, key="clear_logs_btn"):
+            try:
+                _LOG_PATH.write_text("", encoding="utf-8")
+                st.success("Logs limpos.")
+            except OSError as exc:
+                st.error(f"Falha ao limpar logs: {exc}")
+
+    placeholder_logs = st.empty()
+
+    def _render_logs() -> None:
+        placeholder_logs.code(_ler_ultimas_linhas_log(50))
+
+    if auto_atualizar and hasattr(st, "fragment"):
+        @st.fragment(run_every="2s")
+        def _stream_logs_fragment() -> None:
+            _render_logs()
+
+        _stream_logs_fragment()
+    elif auto_atualizar:
+        for _ in range(2):
+            _render_logs()
+            sleep(0.3)
+    else:
+        _render_logs()
+
+    st.divider()
+    st.markdown("#### 🖼️ Galeria de Aprendizados")
+    if st.button("Atualizar Galeria", key="refresh_gallery_btn"):
+        st.rerun()
+
+    imagens = _listar_mapeamentos()
+    if not imagens:
+        st.info("Nenhum mapeamento encontrado ainda.")
+    else:
+        cols = st.columns(3)
+        for idx, imagem in enumerate(imagens):
+            nome_acao = imagem.stem.replace("mapeamento_", "").replace("_", " ").strip()
+            with cols[idx % 3]:
+                st.image(str(imagem), caption=nome_acao, use_container_width=True)
+                st.caption(f"Ação: {nome_acao}")
 
 elif menu_selecionado == "Configurações":
     st.markdown("##### Segurança WhatsApp *(whitelist)*")
