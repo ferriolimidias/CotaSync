@@ -614,45 +614,23 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
             if not login_ok:
                 return {"status": "erro", "motivo": login_msg}
             _LOGGER.info(f"[FAST-TRACK] {login_msg}")
-
-            for idx, passo in enumerate(passos, start=1):
+            dados_variaveis: dict[str, str] = {}
+            for passo in passos:
                 if not isinstance(passo, dict):
                     continue
-                tipo = str(passo.get("tipo", "")).lower()
                 seletor = str(passo.get("seletor", "")).strip()
-                valor = str(passo.get("valor", "")).strip()
-                if tipo == "clicar":
-                    if not seletor:
-                        continue
-                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: clique em {seletor}")
-                    await page.click(seletor)
+                tipo_acao = str(passo.get("tipo", "")).strip().lower()
+
+                logging.info(f"[FAST-TRACK] Executando passo: {tipo_acao} em {seletor}")
+
+                if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
                     try:
-                        await page.wait_for_load_state("networkidle", timeout=5000)
+                        await page.locator(seletor).first.wait_for(state="visible", timeout=15000)
                     except Exception:
-                        await page.wait_for_timeout(1000)
-                elif tipo == "preencher":
-                    if not seletor:
-                        continue
-                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: preencher {seletor}")
-                    await page.fill(seletor, valor)
-                    await page.wait_for_timeout(500)
-                elif tipo == "teclar":
-                    if not valor:
-                        continue
-                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: teclar {valor}")
-                    await page.keyboard.press(valor)
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=3000)
-                    except Exception:
-                        await page.wait_for_timeout(600)
-                elif tipo == "download_pdf":
-                    if not seletor:
-                        continue
-                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: download via {seletor}")
-                    os.makedirs("downloads", exist_ok=True)
-                    downloads_dir = raiz / "downloads"
-                    downloads_dir.mkdir(parents=True, exist_ok=True)
-                    async with page.expect_download(timeout=60000) as download_info:
+                        logging.debug(f"[FAST-TRACK] Timeout de visibilidade para {seletor}. Tentando fallback...")
+
+                try:
+                    if tipo_acao == "clicar":
                         elementos = page.locator(seletor)
                         quantidade = await elementos.count()
                         sucesso_clique = False
@@ -665,35 +643,74 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
 
                         if not sucesso_clique:
                             await elementos.first.click(timeout=5000, force=True)
-                    download = await download_info.value
-                    caminho_arquivo = downloads_dir / download.suggested_filename
-                    await download.save_as(str(caminho_arquivo))
-                    _LOGGER.info(f"[FAST-TRACK][DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
-                    arquivos_baixados.append(str(caminho_arquivo.relative_to(raiz)))
-                elif tipo == "extrair_texto":
-                    if not seletor:
-                        continue
-                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: extrair texto de {seletor}")
-                    try:
+
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=3000)
+                        except Exception:
+                            pass
+
+                    elif tipo_acao == "preencher":
+                        valor = str(dados_variaveis.get(str(passo.get("variavel", "")), passo.get("valor", "")))
+                        elementos = page.locator(seletor)
+                        quantidade = await elementos.count()
+                        sucesso_preencher = False
+
+                        for i in range(quantidade):
+                            if await elementos.nth(i).is_visible():
+                                await elementos.nth(i).fill(valor, timeout=5000)
+                                sucesso_preencher = True
+                                break
+
+                        if not sucesso_preencher:
+                            await elementos.first.fill(valor, timeout=5000, force=True)
+
+                    elif tipo_acao == "teclar":
+                        await page.keyboard.press(str(passo.get("valor", "")))
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=3000)
+                        except Exception:
+                            pass
+
+                    elif tipo_acao == "extrair_texto":
                         elemento = page.locator(seletor).first
                         tag_name = await elemento.evaluate("el => el.tagName.toLowerCase()")
+
                         if tag_name in ["input", "textarea"]:
                             texto = await elemento.input_value(timeout=5000)
                             if not texto:
                                 texto = await elemento.get_attribute("value", timeout=5000) or ""
                         else:
                             texto = await elemento.inner_text(timeout=5000)
-                        dados_extraidos[seletor] = texto
-                    except Exception as exc:
-                        _LOGGER.warning(
-                            f"Fast-Track não conseguiu extrair texto no seletor {seletor}: {exc}"
-                        )
 
-            try:
-                await page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
-            await asyncio.sleep(2)
+                        dados_extraidos[seletor] = texto
+
+                    elif tipo_acao == "download_pdf":
+                        os.makedirs("downloads", exist_ok=True)
+                        async with page.expect_download(timeout=60000) as download_info:
+                            elementos = page.locator(seletor)
+                            quantidade = await elementos.count()
+                            sucesso_clique_dl = False
+
+                            for i in range(quantidade):
+                                if await elementos.nth(i).is_visible():
+                                    await elementos.nth(i).click(timeout=5000)
+                                    sucesso_clique_dl = True
+                                    break
+
+                            if not sucesso_clique_dl:
+                                await elementos.first.click(timeout=5000, force=True)
+
+                        download = await download_info.value
+                        caminho_arquivo = f"downloads/{download.suggested_filename}"
+                        await download.save_as(caminho_arquivo)
+                        arquivos_baixados.append(caminho_arquivo)
+
+                except Exception as e:
+                    raise Exception(
+                        f"Falha técnica no Fast-Track ao executar {tipo_acao} em {seletor}: {str(e)}"
+                    ) from e
+
+            await asyncio.sleep(1)
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
