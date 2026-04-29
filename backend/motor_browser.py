@@ -357,6 +357,7 @@ async def acionar_ia_cartografa(
     passos_aprendidos: list[dict[str, str]] = []
     dados_extraidos: dict[str, str] = {}
     erros_recentes: list[str] = []
+    seletores_banidos: set[str] = set()
 
     browser: Browser | None = None
     _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
@@ -403,16 +404,29 @@ async def acionar_ia_cartografa(
                     "TODAS as ações solicitadas na instrução final. Se o utilizador pediu para preencher, extrair um "
                     "texto E baixar um ficheiro, você DEVE realizar essas 3 ações em iterações diferentes. Só use "
                     "'concluido' quando tiver a certeza absoluta de que NADA faltou.\n"
-                    "5. REGRA DE EXTRAÇÃO (SEM ALUCINAÇÃO): Nunca invente ou adivinhe IDs (como '#telefone-contato'). "
-                    "Leia o mapa do DOM fornecido. Se procurar um telefone, procure IDs reais presentes no mapa "
-                    "(ex: 'telefone-alvo') ou classes relevantes. Se o elemento não existir no DOM atual, mude de "
-                    "estratégia ou use 'concluido'.\n"
+                    "5. REGRA DE EXTRAÇÃO (UNIVERSAL): NUNCA invente ou adivinhe seletores (como '#telefone' ou "
+                    "'#valor'). Para extrair qualquer informação, analise os 'textos' presentes no DOM fornecido. "
+                    "Se o elemento alvo não possuir um 'id' óbvio, utilize o seletor de texto nativo do Playwright "
+                    "apontando para o valor visual que deseja capturar. A sintaxe é: text=O Texto Exato Aqui. "
+                    "Exemplo: se procura um telefone e vê no DOM o texto '(11) 98765-4321', use o seletor "
+                    "'text=(11) 98765-4321'. Use a inteligência para deduzir qual texto na tela corresponde à "
+                    "informação solicitada.\n"
                     "6. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
                 )
                 try:
                     decisao_ia = await llm_estruturado.ainvoke(prompt)
                 except Exception as exc:
                     return {"status": "erro", "motivo": f"Falha na análise semântica da IA: {exc}"}
+
+                if decisao_ia.tipo != "concluido" and decisao_ia.seletor:
+                    if decisao_ia.seletor in seletores_banidos:
+                        msg = (
+                            f"AÇÃO BLOQUEADA: O seletor '{decisao_ia.seletor}' já falhou e está BANIDO nesta sessão. "
+                            "Leia o DOM com atenção e use um ID real ou a busca por texto exato 'text=Valor'."
+                        )
+                        logging.warning(f"[ANTI-LOOP] Tentativa de usar seletor banido: {decisao_ia.seletor}")
+                        erros_recentes.append(msg)
+                        continue
 
                 tipo = str(getattr(decisao_ia, "tipo", "") or "").strip().lower()
                 seletor = str(getattr(decisao_ia, "seletor", "") or "").strip()
@@ -429,8 +443,7 @@ async def acionar_ia_cartografa(
                 
                 # --- ESCUDO ANTI-TEIMOSIA (Bloqueio em Python) ---
                 if decisao_ia.tipo != "concluido" and decisao_ia.seletor:
-                    ja_falhou = any(decisao_ia.seletor in erro for erro in erros_recentes)
-                    if ja_falhou:
+                    if decisao_ia.seletor in seletores_banidos:
                         msg_bloqueio = (
                             f"AÇÃO BLOQUEADA PELO SISTEMA: O seletor '{decisao_ia.seletor}' já falhou nesta sessão. "
                             "É ESTRITAMENTE PROIBIDO repeti-lo. Olhe o mapa do DOM atual e escolha um 'id' ou 'class' "
@@ -446,8 +459,8 @@ async def acionar_ia_cartografa(
                     return {"status": "erro", "motivo": f"A IA não retornou valor para ação '{tipo}'."}
 
                 try:
-                    if tipo == "clicar":
-                        await page.click(seletor, timeout=5000)
+                    if decisao_ia.tipo == "clicar":
+                        await page.click(decisao_ia.seletor, timeout=5000)
                         await page.wait_for_load_state("networkidle", timeout=3000)
                         await asyncio.sleep(2)
                     elif tipo == "preencher":
@@ -485,6 +498,8 @@ async def acionar_ia_cartografa(
                         f"Falha ao executar '{tipo}' no seletor '{seletor}'. "
                         f"Erro técnico: {str(exc)}"
                     )
+                    if decisao_ia.seletor:
+                        seletores_banidos.add(decisao_ia.seletor)
                     _LOGGER.warning(f"[AGENTE AUTO-CORREÇÃO] {msg_erro}")
                     erros_recentes.append(msg_erro)
                     erros_recentes = erros_recentes[-3:]
