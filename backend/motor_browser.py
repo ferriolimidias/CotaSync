@@ -497,10 +497,22 @@ async def acionar_ia_cartografa(
                         dados_extraidos[seletor] = texto
                         logging.info(f"[EXTRAÇÃO] Dado extraído: {texto}")
                     elif tipo == "download_pdf":
+                        os.makedirs("downloads", exist_ok=True)
                         downloads_dir = raiz / "downloads"
                         downloads_dir.mkdir(parents=True, exist_ok=True)
-                        async with page.expect_download(timeout=15000) as download_info:
-                            await page.click(seletor)
+                        async with page.expect_download(timeout=60000) as download_info:
+                            elementos = page.locator(seletor)
+                            quantidade = await elementos.count()
+                            sucesso_clique = False
+
+                            for i in range(quantidade):
+                                if await elementos.nth(i).is_visible():
+                                    await elementos.nth(i).click(timeout=5000)
+                                    sucesso_clique = True
+                                    break
+
+                            if not sucesso_clique:
+                                await elementos.first.click(timeout=5000, force=True)
                         download = await download_info.value
                         caminho_arquivo = downloads_dir / download.suggested_filename
                         await download.save_as(str(caminho_arquivo))
@@ -627,10 +639,22 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
                     if not seletor:
                         continue
                     _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: download via {seletor}")
+                    os.makedirs("downloads", exist_ok=True)
                     downloads_dir = raiz / "downloads"
                     downloads_dir.mkdir(parents=True, exist_ok=True)
-                    async with page.expect_download(timeout=15000) as download_info:
-                        await page.click(seletor)
+                    async with page.expect_download(timeout=60000) as download_info:
+                        elementos = page.locator(seletor)
+                        quantidade = await elementos.count()
+                        sucesso_clique = False
+
+                        for i in range(quantidade):
+                            if await elementos.nth(i).is_visible():
+                                await elementos.nth(i).click(timeout=5000)
+                                sucesso_clique = True
+                                break
+
+                        if not sucesso_clique:
+                            await elementos.first.click(timeout=5000, force=True)
                     download = await download_info.value
                     caminho_arquivo = downloads_dir / download.suggested_filename
                     await download.save_as(str(caminho_arquivo))
