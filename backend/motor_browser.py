@@ -368,7 +368,11 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                     "TODAS as ações solicitadas na instrução final. Se o utilizador pediu para preencher, extrair um "
                     "texto E baixar um ficheiro, você DEVE realizar essas 3 ações em iterações diferentes. Só use "
                     "'concluido' quando tiver a certeza absoluta de que NADA faltou.\n"
-                    "5. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
+                    "5. REGRA DE EXTRAÇÃO (SEM ALUCINAÇÃO): Nunca invente ou adivinhe IDs (como '#telefone-contato'). "
+                    "Leia o mapa do DOM fornecido. Se procurar um telefone, procure IDs reais presentes no mapa "
+                    "(ex: 'telefone-alvo') ou classes relevantes. Se o elemento não existir no DOM atual, mude de "
+                    "estratégia ou use 'concluido'.\n"
+                    "6. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
                 )
                 try:
                     decisao_ia = await llm_estruturado.ainvoke(prompt)
@@ -384,9 +388,22 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                     f"Decisão: {tipo} no seletor {seletor}"
                 )
 
-                if tipo == "concluido":
+                if decisao_ia.tipo == "concluido":
                     _LOGGER.info("[IA SEMÂNTICA] Objetivo marcado como concluído.")
                     break
+                
+                # --- ESCUDO ANTI-TEIMOSIA (Bloqueio em Python) ---
+                if decisao_ia.tipo != "concluido" and decisao_ia.seletor:
+                    ja_falhou = any(decisao_ia.seletor in erro for erro in erros_recentes)
+                    if ja_falhou:
+                        msg_bloqueio = (
+                            f"AÇÃO BLOQUEADA PELO SISTEMA: O seletor '{decisao_ia.seletor}' já falhou nesta sessão. "
+                            "É ESTRITAMENTE PROIBIDO repeti-lo. Olhe o mapa do DOM atual e escolha um 'id' ou 'class' "
+                            "real que esteja na lista, ou use 'concluido'."
+                        )
+                        logging.warning(f"[ANTI-LOOP] Bloqueada tentativa de repetir: {decisao_ia.seletor}")
+                        erros_recentes.append(msg_bloqueio)
+                        continue
 
                 if tipo in {"clicar", "preencher", "extrair_texto", "download_pdf"} and not seletor:
                     return {"status": "erro", "motivo": "A IA não retornou seletor válido para o próximo passo."}
@@ -395,12 +412,9 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
 
                 try:
                     if tipo == "clicar":
-                        await page.click(seletor)
-                        try:
-                            await page.wait_for_load_state("networkidle", timeout=5000)
-                        except Exception:
-                            await page.wait_for_timeout(800)
-                        await asyncio.sleep(1.5)
+                        await page.click(seletor, timeout=5000)
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                        await asyncio.sleep(2)
                     elif tipo == "preencher":
                         await page.fill(seletor, valor)
                         await page.wait_for_timeout(500)
