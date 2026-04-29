@@ -404,13 +404,11 @@ async def acionar_ia_cartografa(
                     "TODAS as ações solicitadas na instrução final. Se o utilizador pediu para preencher, extrair um "
                     "texto E baixar um ficheiro, você DEVE realizar essas 3 ações em iterações diferentes. Só use "
                     "'concluido' quando tiver a certeza absoluta de que NADA faltou.\n"
-                    "5. REGRA DE EXTRAÇÃO (UNIVERSAL): NUNCA invente ou adivinhe seletores (como '#telefone' ou "
-                    "'#valor'). Para extrair qualquer informação, analise os 'textos' presentes no DOM fornecido. "
-                    "Se o elemento alvo não possuir um 'id' óbvio, utilize o seletor de texto nativo do Playwright "
-                    "apontando para o valor visual que deseja capturar. A sintaxe é: text=O Texto Exato Aqui. "
-                    "Exemplo: se procura um telefone e vê no DOM o texto '(11) 98765-4321', use o seletor "
-                    "'text=(11) 98765-4321'. Use a inteligência para deduzir qual texto na tela corresponde à "
-                    "informação solicitada.\n"
+                    "5. REGRA DE EXTRAÇÃO (FOCAR NO VALOR): Diferencie Rótulos (Labels) de Valores Reais. NUNCA "
+                    "utilize 'extrair_texto' no título do campo. Procure sempre o VALOR que o preenche. Exemplo: Se "
+                    "procura um Status e vê no DOM 'Situação da Cota' (rótulo) e 'Ativa' (valor), o seu seletor DEVE "
+                    "apontar para o valor (ex: 'text=Ativa' ou o seu ID). Seja perspicaz para apontar o seletor "
+                    "nativo do Playwright para o dado numérico ou textual real que o utilizador deseja.\n"
                     "6. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
                 )
                 try:
@@ -427,6 +425,18 @@ async def acionar_ia_cartografa(
                         logging.warning(f"[ANTI-LOOP] Tentativa de usar seletor banido: {decisao_ia.seletor}")
                         erros_recentes.append(msg)
                         continue
+
+                # --- ESCUDO ANTI-LOOP DE EXTRAÇÃO REPETIDA ---
+                if decisao_ia.tipo == "extrair_texto" and decisao_ia.seletor in dados_extraidos:
+                    msg = (
+                        f"AÇÃO BLOQUEADA: O seletor '{decisao_ia.seletor}' já foi extraído com sucesso nesta sessão "
+                        f"(Valor obtido: '{dados_extraidos[decisao_ia.seletor]}'). Se a tarefa continua pendente, "
+                        "significa que você extraiu a informação inútil (ex: extraiu o título do campo em vez do "
+                        "dado real). Leia o DOM e escolha OUTRO seletor que contenha o VALOR verdadeiro."
+                    )
+                    logging.warning(f"[ANTI-LOOP EXTRAÇÃO] Tentativa repetida bloqueada: {decisao_ia.seletor}")
+                    erros_recentes.append(msg)
+                    continue
 
                 tipo = str(getattr(decisao_ia, "tipo", "") or "").strip().lower()
                 seletor = str(getattr(decisao_ia, "seletor", "") or "").strip()
