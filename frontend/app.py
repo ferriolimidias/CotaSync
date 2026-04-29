@@ -385,11 +385,23 @@ elif menu_selecionado == "Agendamentos e Filas":
 
 elif menu_selecionado == "Catálogo de Ações":
     st.markdown("##### 📚 Catálogo de Ações")
-    memoria_replay = _obter_acoes_conhecidas(_carregar_ui_map())
-    if not memoria_replay:
+    try:
+        if not _UI_MAP_PATH.is_file():
+            memoria = {"acoes_conhecidas": {}}
+        else:
+            bruto = _UI_MAP_PATH.read_text(encoding="utf-8").strip()
+            memoria = json.loads(bruto) if bruto else {"acoes_conhecidas": {}}
+            if not isinstance(memoria, dict):
+                memoria = {"acoes_conhecidas": {}}
+    except (json.JSONDecodeError, OSError) as exc:
+        st.warning(f"Falha ao ler `ui_map.json`: {exc}")
+        memoria = {"acoes_conhecidas": {}}
+
+    acoes_memoria = memoria.get("acoes_conhecidas", {})
+    if not isinstance(acoes_memoria, dict) or not acoes_memoria:
         st.info("Ainda não há rotinas aprendidas para exibir.")
     else:
-        for chave_acao, dados_acao in memoria_replay.items():
+        for chave_acao, dados_acao in list(acoes_memoria.items()):
             if not isinstance(dados_acao, dict):
                 continue
             nome_amigavel = str(dados_acao.get("nome_amigavel", chave_acao))
@@ -399,7 +411,25 @@ elif menu_selecionado == "Catálogo de Ações":
                 passos = []
 
             with st.expander(f"🧠 {nome_amigavel}", expanded=False):
-                st.caption(descricao)
+                col_info, col_btn = st.columns([4, 1])
+                with col_info:
+                    st.caption(descricao)
+                with col_btn:
+                    if st.button("🗑️ Excluir", key=f"del_{chave_acao}"):
+                        try:
+                            if isinstance(memoria.get("acoes_conhecidas"), dict):
+                                del memoria["acoes_conhecidas"][chave_acao]
+                            _UI_MAP_PATH.write_text(
+                                json.dumps(memoria, ensure_ascii=False, indent=4) + "\n",
+                                encoding="utf-8",
+                            )
+                            if hasattr(st, "toast"):
+                                st.toast(f"Ação '{nome_amigavel}' removida com sucesso.")
+                            else:
+                                st.success(f"Ação '{nome_amigavel}' removida com sucesso.")
+                            st.rerun()
+                        except (KeyError, OSError, TypeError) as exc:
+                            st.error(f"Não foi possível excluir a ação: {exc}")
                 if passos:
                     timeline_linhas: list[str] = []
                     for passo in passos:
