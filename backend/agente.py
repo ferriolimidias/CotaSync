@@ -21,8 +21,14 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-from backend.motor_browser import acionar_ia_cartografa, consultar_erp_real, executar_acao_rapida
+from backend.motor_browser import (
+    acionar_ia_cartografa,
+    consultar_erp_real,
+    executar_acao_rapida,
+    gerar_plano_acao,
+)
 
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
@@ -37,7 +43,14 @@ if not _LOGGER.handlers:
     file_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     _LOGGER.addHandler(file_handler)
     _LOGGER.propagate = False
-sessoes_usuarios = {"admin": {"estado": "NORMAL", "acao_pendente": None}}
+sessoes_usuarios = {
+    "admin": {
+        "estado": "NORMAL",
+        "acao_pendente": None,
+        "checklist_pendente": [],
+        "instrucao_original": "",
+    }
+}
 
 
 def carregar_ui_map() -> dict:
@@ -187,37 +200,56 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         Resposta natural da IA (após tools, se houver).
     """
     historico = historico if historico is not None else []
-    sessao = sessoes_usuarios.setdefault("admin", {"estado": "NORMAL", "acao_pendente": None})
+    user_id = "admin"
+    sessao = sessoes_usuarios.setdefault(
+        user_id,
+        {
+            "estado": "NORMAL",
+            "acao_pendente": None,
+            "checklist_pendente": [],
+            "instrucao_original": "",
+        },
+    )
     estado = str(sessao.get("estado", "NORMAL"))
     mensagem_normalizada = str(mensagem_usuario or "").lower()
 
-    if estado == "ESPERANDO_ENSINO":
-        sessao["estado"] = "APRENDENDO"
+    def _montar_resposta(texto: str, extras: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"texto": str(texto), "estado": str(sessoes_usuarios[user_id].get("estado", "NORMAL"))}
+        if isinstance(extras, dict):
+            payload.update(extras)
+        return payload
+
+    async def _executar_fluxo_aprendizado(sessao_atual: dict, instrucao_execucao: str) -> dict[str, Any]:
+        sessao_atual["estado"] = "APRENDENDO"
         ui_map_atual = carregar_ui_map()
         acoes_existentes = ui_map_atual.get("acoes_conhecidas", {})
-        nome_base = await gerar_nome_acao(mensagem_usuario)
+        nome_base = await gerar_nome_acao(sessao_atual.get("instrucao_original", instrucao_execucao))
         nome_acao = nome_base
         contador = 2
         while isinstance(acoes_existentes, dict) and nome_acao in acoes_existentes:
             nome_acao = f"{nome_base} {contador}"
             contador += 1
-        sessao["acao_pendente"] = nome_acao
+        sessao_atual["acao_pendente"] = nome_acao
         _LOGGER.info(f"[HITL] Estado APRENDENDO iniciado para ação: {nome_acao}")
-        resultado_mapeamento = await acionar_ia_cartografa(nome_acao, mensagem_usuario)
+        resultado_mapeamento = await acionar_ia_cartografa(
+            nome_acao,
+            instrucao_execucao,
+            checklist_aprovada=sessao_atual.get("checklist_pendente", []),
+        )
         status_mapeamento = (
             str(resultado_mapeamento.get("status", "")).lower()
             if isinstance(resultado_mapeamento, dict)
             else "erro"
         )
         if status_mapeamento != "sucesso":
-            sessao["estado"] = "ESPERANDO_ENSINO"
+            sessao_atual["estado"] = "ESPERANDO_ENSINO"
             motivo = (
                 str(resultado_mapeamento.get("motivo", "Falha não identificada."))
                 if isinstance(resultado_mapeamento, dict)
                 else "Falha não identificada."
             )
             _LOGGER.info(f"[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat. Motivo: {motivo}")
-            return (
+            return _montar_resposta(
                 "Chefe, tentei entrar no sistema com as credenciais cadastradas, mas parece que os dados "
                 "estão incorretos ou o sistema pediu um CAPTCHA/Código que eu não consigo ver. "
                 "Pode verificar as configurações ou me ajudar a passar dessa tela no 'Logs do Sistema'?"
@@ -225,12 +257,12 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
         passos_reais = resultado_mapeamento.get("passos_playwright") if isinstance(resultado_mapeamento, dict) else None
         if not isinstance(passos_reais, list) or not passos_reais:
-            sessao["estado"] = "ESPERANDO_ENSINO"
+            sessao_atual["estado"] = "ESPERANDO_ENSINO"
             _LOGGER.info(
                 "[ERRO] Obstáculo encontrado. Solicitando intervenção humana no chat. "
                 "Motivo: retorno de mapeamento sem passos_playwright."
             )
-            return (
+            return _montar_resposta(
                 "Chefe, tentei entrar no sistema com as credenciais cadastradas, mas parece que os dados "
                 "estão incorretos ou o sistema pediu um CAPTCHA/Código que eu não consigo ver. "
                 "Pode verificar as configurações ou me ajudar a passar dessa tela no 'Logs do Sistema'?"
@@ -240,22 +272,26 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         ui_map.setdefault("acoes_conhecidas", {})
         ui_map["acoes_conhecidas"][nome_acao] = {
             "nome_amigavel": nome_acao,
-            "descricao": f"Ação aprendida: {mensagem_usuario[:80]}...",
+            "descricao": f"Ação aprendida: {str(sessao_atual.get('instrucao_original', instrucao_execucao))[:80]}...",
             "url_inicial": "Lida do erp_config.json",
             "passos_playwright": passos_reais,
         }
         try:
             salvar_ui_map(ui_map)
         except OSError:
-            sessao["estado"] = "NORMAL"
-            sessao["acao_pendente"] = None
-            return (
+            sessao_atual["estado"] = "NORMAL"
+            sessao_atual["acao_pendente"] = None
+            sessao_atual["checklist_pendente"] = []
+            sessao_atual["instrucao_original"] = ""
+            return _montar_resposta(
                 "Entendi o passo a passo, mas nao consegui salvar no ui_map.json agora. "
                 "Pode tentar novamente em instantes?"
             )
 
-        sessao["estado"] = "NORMAL"
-        sessao["acao_pendente"] = None
+        sessao_atual["estado"] = "NORMAL"
+        sessao_atual["acao_pendente"] = None
+        sessao_atual["checklist_pendente"] = []
+        sessao_atual["instrucao_original"] = ""
         total_passos = len(passos_reais)
         dados_extraidos = (
             resultado_mapeamento.get("dados_extraidos", {})
@@ -272,14 +308,57 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
                 for valor in dados_extraidos.values()
                 if isinstance(valor, str) and valor.startswith("downloads/")
             ]
-            return {
-                "content": (
+            return _montar_resposta(
+                (
                     f"Aprendi a rotina '{nome_acao}'. Além disso, extraí as seguintes informações do sistema: "
                     f"{dados_extraidos}"
                 ),
-                "arquivos": arquivos_aprendizado,
-            }
-        return resposta_base
+                {"arquivos": arquivos_aprendizado, "dados_extraidos": dados_extraidos},
+            )
+        return _montar_resposta(resposta_base)
+
+    if estado == "ESPERANDO_ENSINO":
+        plano = await gerar_plano_acao(mensagem_usuario)
+        plano = plano if isinstance(plano, list) and plano else [mensagem_usuario]
+        sessoes_usuarios[user_id]["checklist_pendente"] = [str(tarefa) for tarefa in plano]
+        sessoes_usuarios[user_id]["instrucao_original"] = mensagem_usuario
+        sessoes_usuarios[user_id]["estado"] = "ESPERANDO_APROVACAO_PLANO"
+        plano_formatado = "\n".join([f"{i + 1}. {tarefa}" for i, tarefa in enumerate(plano)])
+        return _montar_resposta(
+            f"📋 **Plano de Ação Criado:**\n{plano_formatado}\n\n"
+            "Posso prosseguir com esta execução ou deseja corrigir algum passo?"
+        )
+
+    if estado == "ESPERANDO_APROVACAO_PLANO":
+        class AvaliacaoPlano(BaseModel):
+            aprovado: bool = Field(
+                description=(
+                    "True se o utilizador aprovou ou concordou (ex: ok, pode, sim, isso). "
+                    "False se pediu correção."
+                )
+            )
+
+        llm = _criar_llm()
+        avaliador = llm.with_structured_output(AvaliacaoPlano)
+        avaliacao = await avaliador.ainvoke(
+            f"O utilizador avaliou o plano assim: '{mensagem_usuario}'. "
+            "Ele está a aprovar (True) ou a corrigir/rejeitar (False)?"
+        )
+
+        if bool(getattr(avaliacao, "aprovado", False)):
+            return await _executar_fluxo_aprendizado(sessao, str(sessao.get("instrucao_original", mensagem_usuario)))
+
+        nova_instrucao = (
+            f"Instrução original: {sessao.get('instrucao_original', '')}. "
+            f"Correção pedida: {mensagem_usuario}"
+        )
+        novo_plano = await gerar_plano_acao(nova_instrucao)
+        novo_plano = novo_plano if isinstance(novo_plano, list) and novo_plano else [nova_instrucao]
+        sessoes_usuarios[user_id]["checklist_pendente"] = [str(tarefa) for tarefa in novo_plano]
+        sessoes_usuarios[user_id]["instrucao_original"] = nova_instrucao
+
+        plano_formatado = "\n".join([f"{i + 1}. {tarefa}" for i, tarefa in enumerate(novo_plano)])
+        return _montar_resposta(f"🔄 **Plano Atualizado:**\n{plano_formatado}\n\nFicou bom agora? Posso executar?")
 
     if estado == "NORMAL":
         ui_map = carregar_ui_map()
@@ -294,22 +373,28 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
                 arquivos_baixados = resultado_execucao.get("arquivos_baixados", [])
                 evidencia = str(resultado_execucao.get("evidencia", ""))
                 dados_ft = resultado_execucao.get("dados_extraidos", {})
-                payload_ft: dict[str, Any] = {
-                    "content": "✅ Execução concluída com sucesso! Evidência visual e arquivos extraídos abaixo:",
+                extras: dict[str, Any] = {
                     "evidencia": evidencia,
                     "arquivos": arquivos_baixados if isinstance(arquivos_baixados, list) else [],
                 }
                 if isinstance(dados_ft, dict) and dados_ft:
-                    payload_ft["dados_extraidos"] = dados_ft
-                return payload_ft
+                    extras["dados_extraidos"] = dados_ft
+                return _montar_resposta(
+                    "✅ Execução concluída com sucesso! Evidência visual e arquivos extraídos abaixo:",
+                    extras,
+                )
             motivo = str(resultado_execucao.get("motivo", "Falha não identificada."))
-            return f"❌ A execução rápida falhou: {motivo}"
+            return _montar_resposta(f"❌ A execução rápida falhou: {motivo}")
 
         if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
             sessao["estado"] = "ESPERANDO_ENSINO"
             sessao["acao_pendente"] = "nova_acao"
             _LOGGER.info("[HITL] Estado ESPERANDO_ENSINO para ação pendente genérica.")
-            return "Ainda não aprendi essa tarefa. Pode me explicar o passo a passo de onde eu clico no sistema?"
+            return _montar_resposta(
+                "🎓 **Modo de Aprendizado ativado!**\n\n"
+                "Por favor, descreva o passo a passo da tarefa que deseja mapear. \n"
+                "*Exemplo: 'Preencha a busca com 123, clique em Pesquisar e extraia o valor total'.*"
+            )
 
     chat_history = _historico_dicts_para_mensagens(historico)
     executor = criar_agente_executor()
@@ -319,7 +404,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
             "chat_history": chat_history,
         }
     )
-    return str(resultado.get("output", "")).strip()
+    return _montar_resposta(str(resultado.get("output", "")).strip())
 
 
 def _normalizar_chat_history_para_executor(chat_history: list[Any] | None) -> list[Any]:

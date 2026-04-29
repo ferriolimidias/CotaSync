@@ -101,7 +101,7 @@ def _screenshot_por_acao(chave_acao: str) -> Path:
 
 def _normalizar_resposta_assistente(resposta: object) -> dict:
     if isinstance(resposta, dict):
-        content = str(resposta.get("content", ""))
+        content = str(resposta.get("texto", resposta.get("content", "")))
         arquivos = resposta.get("arquivos", [])
         evidencia = str(resposta.get("evidencia", "") or "")
         if not isinstance(arquivos, list):
@@ -186,6 +186,7 @@ if "messages" not in st.session_state:
                 ),
             }
         ]
+st.session_state.setdefault("estado_agente", "NORMAL")
 
 _defaults_sessao_agendamentos()
 ui_map_data = _carregar_ui_map()
@@ -204,6 +205,10 @@ if st.session_state.pop("_pending_agent", False):
     historico_anterior = st.session_state.messages[:-1]
     with st.spinner("Analisando ERP..."):
         resposta = asyncio.run(processar_mensagem(ultima["content"], historico_anterior))
+    if isinstance(resposta, dict):
+        st.session_state.estado_agente = str(resposta.get("estado", "NORMAL"))
+    else:
+        st.session_state.estado_agente = "NORMAL"
     st.session_state.messages.append(_normalizar_resposta_assistente(resposta))
     salvar_historico_disco(st.session_state.messages)
     st.rerun()
@@ -265,6 +270,14 @@ with st.sidebar:
             st.rerun()
     else:
         st.caption("Sem ações aprendidas no momento.")
+
+    st.divider()
+    st.markdown("### 🎓 Mapeamento")
+    if st.button("Ensinar Nova Rotina", use_container_width=True, type="primary", key="ensinar_nova_rotina_btn"):
+        st.session_state.messages.append({"role": "user", "content": "Quero ensinar uma nova rotina"})
+        salvar_historico_disco(st.session_state.messages)
+        st.session_state._pending_agent = True
+        st.rerun()
 
     with st.expander("🎤 Comando de voz", expanded=False):
         st.caption("Gravacao no browser; STT e envio ao agente em iteracao futura.")
@@ -328,13 +341,41 @@ if menu_selecionado == "Chat & Ações":
                     except OSError:
                         pass
 
+    estado_agente = st.session_state.get("estado_agente", "NORMAL")
+    if estado_agente == "ESPERANDO_APROVACAO_PLANO":
+        st.warning(
+            "⏳ **Ação Pausada:** O robô criou um plano de ação acima. Responda com 'ok' para autorizar a execução ou peça correções.",
+            icon="🚨",
+        )
+    elif estado_agente == "APRENDENDO":
+        st.info(
+            "🧠 **Modo de Aprendizado:** O robô está a navegar no sistema neste momento para mapear a rotina...",
+            icon="🤖",
+        )
+
     prompt = st.chat_input("Digite sua mensagem operacional...", key="chat_operacional")
     if prompt:
         historico_antes = list(st.session_state.messages)
         st.session_state.messages.append({"role": "user", "content": prompt})
         salvar_historico_disco(st.session_state.messages)
         with st.spinner("Analisando ERP..."):
-            resposta_chat = asyncio.run(processar_mensagem(prompt, historico_antes))
+            resultado_ia = asyncio.run(processar_mensagem(prompt, historico_antes))
+        if isinstance(resultado_ia, dict):
+            resposta_texto = str(resultado_ia.get("texto", ""))
+            estado_atual = str(resultado_ia.get("estado", "NORMAL"))
+            st.session_state.estado_agente = estado_atual
+            arquivos_anexos = resultado_ia.get("arquivos", [])
+            if not isinstance(arquivos_anexos, list):
+                arquivos_anexos = []
+            resposta_chat = {
+                "texto": resposta_texto,
+                "arquivos": arquivos_anexos,
+                "evidencia": resultado_ia.get("evidencia", ""),
+                "dados_extraidos": resultado_ia.get("dados_extraidos", {}),
+            }
+        else:
+            resposta_chat = str(resultado_ia)
+            st.session_state.estado_agente = "NORMAL"
         st.session_state.messages.append(_normalizar_resposta_assistente(resposta_chat))
         salvar_historico_disco(st.session_state.messages)
         st.rerun()

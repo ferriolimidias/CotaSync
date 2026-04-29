@@ -45,6 +45,10 @@ class PassoCartografo(BaseModel):
     valor: str = Field(default="", description="Valor opcional para preencher ou referência textual.")
 
 
+class PlanoAcao(BaseModel):
+    checklist: list[str] = Field(description="Lista de tarefas técnicas claras e isoladas.")
+
+
 def _carregar_erp_config() -> tuple[str, str, str]:
     raiz = _raiz_projeto()
     erp_config_path = raiz / "erp_config.json"
@@ -315,10 +319,39 @@ async def exemplo_navegacao(url: str = "https://example.com") -> str:
         await pw.stop()
 
 
-async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
+async def gerar_plano_acao(instrucao_humana: str) -> list[str]:
+    logging.info("[PLANEJADOR] A criar checklist de tarefas...")
+    llm = ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        temperature=0,
+        api_key=os.getenv("OPENAI_API_KEY") or None,
+    )
+    llm_planejador = llm.with_structured_output(PlanoAcao)
+    prompt_plano = (
+        f"Instrução do utilizador: '{instrucao_humana}'. "
+        "Divida numa lista de tarefas técnicas claras e isoladas."
+    )
+    try:
+        plano = await llm_planejador.ainvoke(prompt_plano)
+        checklist = getattr(plano, "checklist", [])
+        if isinstance(checklist, list) and checklist:
+            return [str(item) for item in checklist if str(item).strip()]
+        return [instrucao_humana]
+    except Exception as e:
+        logging.warning(f"Erro no planeador: {e}")
+        return [instrucao_humana]
+
+
+async def acionar_ia_cartografa(
+    nome_acao: str,
+    instrucao_humana: str,
+    checklist_aprovada: list[str] | None = None,
+) -> dict:
     """Acessa o ERP, faz login e aprende via loop semântico iterativo (Reason + Act)."""
     raiz = _raiz_projeto()
     url_sistema, usuario, senha = _carregar_erp_config()
+    checklist_original = checklist_aprovada if checklist_aprovada else [instrucao_humana]
+    objetivo_checklist = " | ".join(str(item) for item in checklist_original if str(item).strip()) or instrucao_humana
     nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
     screenshot_path = raiz / f"mapeamento_{nome_arquivo}.png"
     passos_aprendidos: list[dict[str, str]] = []
@@ -354,6 +387,8 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
 
                 prompt = (
                     f"Objetivo final: {instrucao_humana}\n"
+                    f"Checklist aprovada: {json.dumps(checklist_original, ensure_ascii=False)}\n"
+                    f"Objetivo operacional consolidado: {objetivo_checklist}\n"
                     f"Passos já dados com sucesso: {json.dumps(passos_aprendidos, ensure_ascii=False)}\n"
                     f"Dados já extraídos: {json.dumps(dados_extraidos, ensure_ascii=False)}\n"
                     f"ERROS RECENTES (Evite repetir estas ações): {json.dumps(erros_recentes, ensure_ascii=False)}\n"
