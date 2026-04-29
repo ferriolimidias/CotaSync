@@ -154,6 +154,16 @@ async def _extrair_mapa_dom(page: Any, limite: int = 80) -> list[dict[str, str]]
           const limpos = Array.from(
             document.querySelectorAll("button, a, input, [role='button'], p, span, td, h1, h2, h3, label, [id]")
           )
+          .filter((e) => {
+            const style = window.getComputedStyle(e);
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              style.opacity !== "0" &&
+              e.offsetWidth > 0 &&
+              e.offsetHeight > 0
+            );
+          })
           .map((e) => {
             const tagName = (e.tagName || "").toLowerCase();
             let textoReal = "";
@@ -679,6 +689,11 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
                             f"Fast-Track não conseguiu extrair texto no seletor {seletor}: {exc}"
                         )
 
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
