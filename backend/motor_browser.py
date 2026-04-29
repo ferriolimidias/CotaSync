@@ -151,28 +151,30 @@ async def _extrair_mapa_dom(page: Any, limite: int = 80) -> list[dict[str, str]]
     mapa_dom = await page.evaluate(
         """
         (limite) => {
-          const elementos = Array.from(
-            document.querySelectorAll("button, a, input, textarea, select, [role='button'], [onclick], [tabindex]")
-          );
-          const visiveis = elementos.filter((el) => {
-            const style = window.getComputedStyle(el);
-            const rect = el.getBoundingClientRect();
-            return (
-              style &&
-              style.visibility !== "hidden" &&
-              style.display !== "none" &&
-              rect.width > 0 &&
-              rect.height > 0
-            );
-          });
-          const limpos = visiveis.map((el) => ({
-            tag: (el.tagName || "").toLowerCase(),
-            texto: (el.innerText || el.textContent || "").trim().slice(0, 120),
-            id: (el.id || "").trim(),
-            name: (el.getAttribute("name") || "").trim(),
-            href: (el.getAttribute("href") || "").trim(),
-            placeholder: (el.getAttribute("placeholder") || "").trim(),
-          }));
+          const limpos = Array.from(
+            document.querySelectorAll("button, a, input, [role='button'], p, span, td, h1, h2, h3, label, [id]")
+          )
+          .map((e) => {
+            const tagName = (e.tagName || "").toLowerCase();
+            let textoReal = "";
+            if (tagName === "input" || tagName === "textarea") {
+              textoReal = e.value || e.placeholder || "";
+            } else {
+              textoReal = e.innerText || "";
+            }
+            textoReal = (textoReal || "").trim().substring(0, 80);
+            return {
+              tag: tagName,
+              text: textoReal,
+              texto: textoReal,
+              id: (e.id || "").trim(),
+              className: typeof e.className === "string" ? e.className.trim() : "",
+              name: (e.getAttribute("name") || "").trim(),
+              href: (e.getAttribute("href") || "").trim(),
+              placeholder: (e.getAttribute("placeholder") || "").trim(),
+            };
+          })
+          .filter((item) => item.text.length > 0 || item.id);
           return limpos.slice(0, limite);
         }
         """,
@@ -484,9 +486,16 @@ async def acionar_ia_cartografa(
                             await page.wait_for_timeout(800)
                         await asyncio.sleep(1.5)
                     elif tipo == "extrair_texto":
-                        texto = await page.locator(seletor).first.inner_text(timeout=5000)
+                        elemento = page.locator(seletor).first
+                        tag_name = await elemento.evaluate("el => el.tagName.toLowerCase()")
+                        if tag_name in ["input", "textarea"]:
+                            texto = await elemento.input_value(timeout=5000)
+                            if not texto:
+                                texto = await elemento.get_attribute("value", timeout=5000) or ""
+                        else:
+                            texto = await elemento.inner_text(timeout=5000)
                         dados_extraidos[seletor] = texto
-                        _LOGGER.info(f"[EXTRAÇÃO] Dado extraído: {texto}")
+                        logging.info(f"[EXTRAÇÃO] Dado extraído: {texto}")
                     elif tipo == "download_pdf":
                         downloads_dir = raiz / "downloads"
                         downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -632,7 +641,14 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
                         continue
                     _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: extrair texto de {seletor}")
                     try:
-                        texto = await page.locator(seletor).first.inner_text(timeout=5000)
+                        elemento = page.locator(seletor).first
+                        tag_name = await elemento.evaluate("el => el.tagName.toLowerCase()")
+                        if tag_name in ["input", "textarea"]:
+                            texto = await elemento.input_value(timeout=5000)
+                            if not texto:
+                                texto = await elemento.get_attribute("value", timeout=5000) or ""
+                        else:
+                            texto = await elemento.inner_text(timeout=5000)
                         dados_extraidos[seletor] = texto
                     except Exception as exc:
                         _LOGGER.warning(
