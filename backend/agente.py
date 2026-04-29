@@ -293,11 +293,15 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
             if str(resultado_execucao.get("status", "")).lower() == "sucesso":
                 arquivos_baixados = resultado_execucao.get("arquivos_baixados", [])
                 evidencia = str(resultado_execucao.get("evidencia", ""))
-                return {
+                dados_ft = resultado_execucao.get("dados_extraidos", {})
+                payload_ft: dict[str, Any] = {
                     "content": "✅ Execução concluída com sucesso! Evidência visual e arquivos extraídos abaixo:",
                     "evidencia": evidencia,
                     "arquivos": arquivos_baixados if isinstance(arquivos_baixados, list) else [],
                 }
+                if isinstance(dados_ft, dict) and dados_ft:
+                    payload_ft["dados_extraidos"] = dados_ft
+                return payload_ft
             motivo = str(resultado_execucao.get("motivo", "Falha não identificada."))
             return f"❌ A execução rápida falhou: {motivo}"
 

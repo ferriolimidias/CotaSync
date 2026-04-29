@@ -364,7 +364,11 @@ async def acionar_ia_cartografa(nome_acao: str, instrucao_humana: str) -> dict:
                     "3. REGRA CRÍTICA DE DOWNLOAD: Se o objetivo envolve 'baixar', 'download', 'PDF', 'fatura' ou "
                     "'boleto', e você encontrar o botão correspondente, VOCÊ É OBRIGADO a usar a ação 'download_pdf'. "
                     "NUNCA use 'clicar' para baixar ficheiros.\n"
-                    "4. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
+                    "4. REGRA DE COMPLETUDE (MUITO IMPORTANTE): NUNCA utilize o tipo 'concluido' antes de ter cumprido "
+                    "TODAS as ações solicitadas na instrução final. Se o utilizador pediu para preencher, extrair um "
+                    "texto E baixar um ficheiro, você DEVE realizar essas 3 ações em iterações diferentes. Só use "
+                    "'concluido' quando tiver a certeza absoluta de que NADA faltou.\n"
+                    "5. Qual é o ÚNICO PRÓXIMO PASSO lógico? Se o objetivo já foi atingido, use 'concluido'."
                 )
                 try:
                     decisao_ia = await llm_estruturado.ainvoke(prompt)
@@ -488,6 +492,7 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
     caminho_execucao = raiz / f"execucao_{nome_arquivo}.png"
     caminho_evidencia_padrao = raiz / NOME_ARQUIVO_EVIDENCIA
     arquivos_baixados: list[str] = []
+    dados_extraidos: dict[str, str] = {}
 
     browser: Browser | None = None
     _LOGGER.info(f"[FAST-TRACK] Iniciando execução rápida da ação: {nome_acao}")
@@ -548,6 +553,17 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
                     await download.save_as(str(caminho_arquivo))
                     _LOGGER.info(f"[FAST-TRACK][DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
                     arquivos_baixados.append(str(caminho_arquivo.relative_to(raiz)))
+                elif tipo == "extrair_texto":
+                    if not seletor:
+                        continue
+                    _LOGGER.info(f"[FAST-TRACK] Executando passo {idx}: extrair texto de {seletor}")
+                    try:
+                        texto = await page.locator(seletor).first.inner_text(timeout=5000)
+                        dados_extraidos[seletor] = texto
+                    except Exception as exc:
+                        _LOGGER.warning(
+                            f"Fast-Track não conseguiu extrair texto no seletor {seletor}: {exc}"
+                        )
 
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
@@ -556,6 +572,7 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
                 "status": "sucesso",
                 "evidencia": caminho_execucao.name,
                 "arquivos_baixados": arquivos_baixados,
+                "dados_extraidos": dados_extraidos,
             }
     except Exception as exc:
         _LOGGER.info(f"[ERRO] Falha na execução rápida '{nome_acao}': {exc}")

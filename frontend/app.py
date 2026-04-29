@@ -109,6 +109,9 @@ def _normalizar_resposta_assistente(resposta: object) -> dict:
         payload = {"role": "assistant", "content": content, "arquivos": arquivos}
         if evidencia:
             payload["evidencia"] = evidencia
+        dados_extra = resposta.get("dados_extraidos")
+        if isinstance(dados_extra, dict) and dados_extra:
+            payload["dados_extraidos"] = dados_extra
         return payload
     return {"role": "assistant", "content": str(resposta)}
 
@@ -283,6 +286,9 @@ if menu_selecionado == "Chat & Ações":
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if isinstance(msg.get("dados_extraidos"), dict) and msg["dados_extraidos"]:
+                st.caption("Textos / dados extraídos nesta execução:")
+                st.json(msg["dados_extraidos"])
             if "arquivos" in msg and msg["arquivos"]:
                 for caminho_arq in msg["arquivos"]:
                     try:
@@ -302,7 +308,7 @@ if menu_selecionado == "Chat & Ações":
             if msg.get("role") == "assistant":
                 conteudo = str(msg.get("content", ""))
                 if _EVIDENCIA in conteudo and os.path.exists(str(caminho_evidencia)):
-                    st.image(str(caminho_evidencia), caption="Evidencia do Sistema", use_container_width=True)
+                    st.image(str(caminho_evidencia), caption="Evidência Visual", width=500)
                 evidencia_msg = str(msg.get("evidencia", "") or "")
                 if evidencia_msg:
                     try:
@@ -317,7 +323,7 @@ if menu_selecionado == "Chat & Ações":
                             st.image(
                                 str(caminho_evidencia_msg),
                                 caption=f"Evidência: {caminho_evidencia_msg.name}",
-                                use_container_width=True,
+                                width=500,
                             )
                     except OSError:
                         pass
