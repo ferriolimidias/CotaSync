@@ -32,7 +32,9 @@ from backend.motor_browser import (
 
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
-_UI_MAP_PATH = _ROOT / "ui_map.json"
+_DATA_DIR = _ROOT / "data"
+os.makedirs(str(_DATA_DIR), exist_ok=True)
+_UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _LOG_DIR = _ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_FILE = _LOG_DIR / "operation.log"

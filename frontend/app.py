@@ -30,17 +30,20 @@ st.set_page_config(
 load_dotenv()
 
 _ROOT = Path(__file__).resolve().parent.parent
+os.makedirs("data", exist_ok=True)
+_DATA_DIR = _ROOT / "data"
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.agente import processar_mensagem  # noqa: E402
 
-_EVIDENCIA = "print_teste.png"
-_UI_MAP_PATH = _ROOT / "ui_map.json"
-_WHITELIST_PATH = _ROOT / "usuarios_autorizados.json"
-_ERP_CONFIG_PATH = _ROOT / "erp_config.json"
+_EVIDENCIA = "data/print_teste.png"
+_UI_MAP_PATH = _DATA_DIR / "ui_map.json"
+_WHITELIST_PATH = _DATA_DIR / "usuarios_autorizados.json"
+_ERP_CONFIG_PATH = _DATA_DIR / "erp_config.json"
 _LOG_PATH = _ROOT / "logs" / "operation.log"
-_CHAT_HISTORY_PATH = _ROOT / "data" / "chat_history.json"
+_CHAT_HISTORY_PATH = _DATA_DIR / "chat_history.json"
 
 try:
     API_BASE_URL = st.secrets["API_BASE_URL"]
@@ -86,7 +89,7 @@ def _ler_ultimas_linhas_log(limite: int = 50) -> str:
 
 def _listar_mapeamentos() -> list[Path]:
     try:
-        return sorted(_ROOT.glob("mapeamento_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return sorted(_DATA_DIR.glob("mapeamento_*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return []
 
@@ -96,7 +99,7 @@ def _normalizar_nome_arquivo(texto: str) -> str:
 
 
 def _screenshot_por_acao(chave_acao: str) -> Path:
-    return _ROOT / f"mapeamento_{_normalizar_nome_arquivo(chave_acao)}.png"
+    return _DATA_DIR / f"mapeamento_{_normalizar_nome_arquivo(chave_acao)}.png"
 
 
 def _normalizar_resposta_assistente(resposta: object) -> dict:
@@ -277,6 +280,18 @@ with st.sidebar:
         st.session_state.messages.append({"role": "user", "content": "Quero ensinar uma nova rotina"})
         salvar_historico_disco(st.session_state.messages)
         st.session_state._pending_agent = True
+        st.rerun()
+
+    st.divider()
+    st.subheader("🧹 Manutenção")
+    if st.button("🗑️ Limpar Histórico de Chat", use_container_width=True, key="limpar_historico_chat_btn"):
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Olá! O histórico foi limpo. Como posso ajudar?"}
+        ]
+        try:
+            salvar_historico_disco(st.session_state.messages)
+        except Exception:
+            pass
         st.rerun()
 
     with st.expander("🎤 Comando de voz", expanded=False):

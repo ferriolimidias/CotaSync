@@ -5,6 +5,7 @@ Validação de whitelist para webhooks e canais externos (Evolution / WhatsApp).
 from __future__ import annotations
 
 import json
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -16,9 +17,13 @@ def _raiz_projeto() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+_DATA_DIR = _raiz_projeto() / "data"
+os.makedirs(str(_DATA_DIR), exist_ok=True)
+
+
 @lru_cache(maxsize=1)
 def _carregar_numeros_permitidos() -> set[str]:
-    path = _raiz_projeto() / "usuarios_autorizados.json"
+    path = _DATA_DIR / "usuarios_autorizados.json"
     if not path.is_file():
         raise FileNotFoundError(f"Arquivo de whitelist não encontrado: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))

@@ -21,9 +21,12 @@ from pydantic import BaseModel, Field
 from playwright.async_api import Browser, async_playwright
 
 load_dotenv()
+os.makedirs("data", exist_ok=True)
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Nome do ficheiro de evidência na raiz do projeto (alinhado ao Streamlit e à tool do agente).
-NOME_ARQUIVO_EVIDENCIA = "print_teste.png"
+NOME_ARQUIVO_EVIDENCIA = "data/print_teste.png"
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_FILE = _LOG_DIR / "operation.log"
@@ -51,7 +54,7 @@ class PlanoAcao(BaseModel):
 
 def _carregar_erp_config() -> tuple[str, str, str]:
     raiz = _raiz_projeto()
-    erp_config_path = raiz / "erp_config.json"
+    erp_config_path = raiz / "data" / "erp_config.json"
     url_sistema = "https://google.com"
     usuario = ""
     senha = ""
@@ -233,7 +236,7 @@ async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
     Nota: o parâmetro é tratado como texto de busca (ex.: CNPJ) para o campo da wiki.
     """
     raiz = _raiz_projeto()
-    caminho_imagem = raiz / NOME_ARQUIVO_EVIDENCIA
+    caminho_imagem = _DATA_DIR / "print_teste.png"
     ws_url = _ws_browserless()
     browser: Browser | None = None
 
@@ -264,7 +267,7 @@ async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
                 return {
                     "status": "sucesso",
                     "texto_extraido": titulo,
-                    "caminho_imagem": NOME_ARQUIVO_EVIDENCIA,
+                    "caminho_imagem": "data/print_teste.png",
                 }
             finally:
                 if browser is not None:
@@ -365,7 +368,7 @@ async def acionar_ia_cartografa(
     checklist_original = checklist_aprovada if checklist_aprovada else [instrucao_humana]
     objetivo_checklist = " | ".join(str(item) for item in checklist_original if str(item).strip()) or instrucao_humana
     nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
-    screenshot_path = raiz / f"mapeamento_{nome_arquivo}.png"
+    screenshot_path = _DATA_DIR / f"mapeamento_{nome_arquivo}.png"
     passos_aprendidos: list[dict[str, str]] = []
     dados_extraidos: dict[str, str] = {}
     erros_recentes: list[str] = []
@@ -594,7 +597,7 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
     raiz = _raiz_projeto()
     url_sistema, usuario, senha = _carregar_erp_config()
     nome_arquivo = re.sub(r"[^\w\-]+", "_", str(nome_acao or "acao"), flags=re.UNICODE).strip("_")
-    caminho_execucao = raiz / f"execucao_{nome_arquivo}.png"
+    caminho_execucao = _DATA_DIR / f"execucao_{nome_arquivo}.png"
     caminho_evidencia_padrao = raiz / NOME_ARQUIVO_EVIDENCIA
     arquivos_baixados: list[str] = []
     dados_extraidos: dict[str, str] = {}
