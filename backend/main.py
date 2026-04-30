@@ -4,15 +4,21 @@ API principal do CotaSync: FastAPI + agendador + webhook Evolution (simulado).
 
 from __future__ import annotations
 
+import asyncio
+import glob
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 
+import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
+from backend.motor_browser import processar_lote_com_semaforo
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
 
@@ -46,6 +52,68 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+async def verificar_fila_agendamentos():
+    """Verifica a cada minuto se há lotes agendados para a hora atual."""
+    pasta = "data/agendamentos"
+    os.makedirs(pasta, exist_ok=True)
+
+    while True:
+        try:
+            agora = datetime.now().strftime("%H:%M")
+            arquivos_job = glob.glob(f"{pasta}/job_*.json")
+
+            for caminho_json in arquivos_job:
+                with open(caminho_json, "r", encoding="utf-8") as f:
+                    job = json.load(f)
+
+                if job.get("status") == "pendente" and job.get("hora_execucao") == agora:
+                    logging.info(f"[CRON] Iniciando processamento do lote agendado: {job['id']}")
+
+                    job["status"] = "processando"
+                    with open(caminho_json, "w", encoding="utf-8") as f:
+                        json.dump(job, f, ensure_ascii=False, indent=4)
+
+                    try:
+                        df_lote = pd.read_csv(job["caminho_csv"])
+                        lista_dados = df_lote.to_dict("records")
+
+                        resultados = await processar_lote_com_semaforo(
+                            chave_acao=job["chave_acao"],
+                            lista_linhas=lista_dados,
+                            mapeamento=job["mapeamento"],
+                            max_concorrencia=5,
+                        )
+
+                        df_resultado = df_lote.copy()
+                        df_resultado["Status_Robo"] = [res.get("Status_Robo", "") for res in resultados]
+                        df_resultado["Detalhes_Erro"] = [res.get("Detalhes_Erro", "") for res in resultados]
+                        df_resultado["Dados_Extraidos"] = [res.get("Dados_Extraidos", "") for res in resultados]
+
+                        caminho_resultado = str(job["caminho_csv"]).replace(".csv", "_concluido.csv")
+                        df_resultado.to_csv(caminho_resultado, index=False)
+
+                        job["status"] = "concluido"
+                        job["resultado_csv"] = caminho_resultado
+                    except Exception as err_job:
+                        logging.error(f"[CRON] Erro crítico no job {job['id']}: {err_job}")
+                        job["status"] = "erro"
+                        job["detalhes_erro"] = str(err_job)
+
+                    with open(caminho_json, "w", encoding="utf-8") as f:
+                        json.dump(job, f, ensure_ascii=False, indent=4)
+
+        except Exception as e:
+            logging.error(f"[CRON] Falha no loop de verificação: {e}")
+
+        await asyncio.sleep(60)
+
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(verificar_fila_agendamentos())
+    logging.info("Agendador de tarefas em lote iniciado em background.")
 
 
 @app.get("/health")

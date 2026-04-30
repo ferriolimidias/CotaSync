@@ -8,6 +8,7 @@ Execução: a partir da raiz do projeto, ex.:
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
 import re
@@ -583,6 +584,50 @@ elif menu_selecionado == "Agendamentos e Filas":
 
     st.markdown("**Logs recentes**")
     st.code(st.session_state.cron_log_text.strip() + "\n")
+
+    st.divider()
+    st.subheader("📋 Status dos Agendamentos")
+
+    pasta_agendamentos = "data/agendamentos"
+    os.makedirs(pasta_agendamentos, exist_ok=True)
+    arquivos_job = glob.glob(f"{pasta_agendamentos}/job_*.json")
+
+    if arquivos_job:
+        for job_file in arquivos_job:
+            try:
+                with open(job_file, "r", encoding="utf-8") as f:
+                    job_data = json.load(f)
+
+                status = job_data.get("status", "pendente")
+                cor_status = (
+                    "🟠"
+                    if status == "pendente"
+                    else "🔵" if status == "processando" else "🟢" if status == "concluido" else "🔴"
+                )
+
+                with st.expander(
+                    f"{cor_status} Lote: {job_data.get('chave_acao', 'N/A')} | Hora: {job_data.get('hora_execucao', 'N/A')} | Status: {str(status).upper()}"
+                ):
+                    st.write(f"**ID da Tarefa:** {job_data.get('id')}")
+                    st.write(f"**Data de Criação:** {job_data.get('criado_em', 'N/A')}")
+
+                    if status == "concluido" and "resultado_csv" in job_data:
+                        caminho_res = str(job_data["resultado_csv"])
+                        if os.path.exists(caminho_res):
+                            with open(caminho_res, "rb") as file_csv:
+                                st.download_button(
+                                    label="📥 Descarregar Resultado (CSV)",
+                                    data=file_csv,
+                                    file_name=f"resultado_lote_{job_data.get('id', 'job')}.csv",
+                                    mime="text/csv",
+                                    key=f"dl_job_{job_data.get('id', job_file)}",
+                                )
+                    elif status == "erro":
+                        st.error(f"Erro: {job_data.get('detalhes_erro', 'Falha desconhecida')}")
+            except Exception:
+                pass
+    else:
+        st.info("Nenhum agendamento pendente ou concluído encontrado.")
 
 elif menu_selecionado == "Catálogo de Ações":
     st.markdown("##### 📚 Catálogo de Ações")
