@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from time import sleep
 
+import pandas as pd
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
 from dotenv import load_dotenv
@@ -36,7 +37,7 @@ _DATA_DIR.mkdir(parents=True, exist_ok=True)
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend.agente import processar_mensagem  # noqa: E402
+from backend.agente import executar_acao_fast_track, processar_mensagem  # noqa: E402
 
 _EVIDENCIA = "data/print_teste.png"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
@@ -129,9 +130,17 @@ def carregar_historico_disco() -> list[dict]:
         mensagens_validas: list[dict] = []
         for item in conteudo:
             if isinstance(item, dict) and item.get("role") and item.get("content") is not None:
-                mensagens_validas.append(
-                    {"role": str(item.get("role")), "content": str(item.get("content", ""))}
-                )
+                msg_restaurada: dict = {
+                    "role": str(item.get("role")),
+                    "content": str(item.get("content", "")),
+                }
+                if "arquivos" in item and isinstance(item.get("arquivos"), list):
+                    msg_restaurada["arquivos"] = item["arquivos"]
+                if "evidencia" in item and item.get("evidencia"):
+                    msg_restaurada["evidencia"] = str(item["evidencia"])
+                if "dados_extraidos" in item and isinstance(item.get("dados_extraidos"), dict):
+                    msg_restaurada["dados_extraidos"] = item["dados_extraidos"]
+                mensagens_validas.append(msg_restaurada)
         return mensagens_validas
     except (json.JSONDecodeError, OSError):
         return []
@@ -265,12 +274,43 @@ with st.sidebar:
             key="acao_sidebar_select",
             label_visibility="collapsed",
         )
+        chave_acao = opcoes_sidebar[acao_sidebar_nome]
+        acao_sidebar_dados = acoes_sidebar.get(chave_acao, {}) if isinstance(acoes_sidebar, dict) else {}
+        variaveis_necessarias = (
+            acao_sidebar_dados.get("variaveis_necessarias", [])
+            if isinstance(acao_sidebar_dados, dict)
+            else []
+        )
+        dados_digitados: dict[str, str] = {}
+        if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
+            for var_nome in variaveis_necessarias:
+                chave_var = str(var_nome)
+                if not chave_var:
+                    continue
+                dados_digitados[chave_var] = st.text_input(
+                    f"Preencha {chave_var}",
+                    key=f"acao_var_{chave_acao}_{chave_var}",
+                )
         if st.button("🚀 Disparar Ação", use_container_width=True, key="acao_sidebar_btn"):
-            chave_acao = opcoes_sidebar[acao_sidebar_nome]
-            st.session_state.messages.append({"role": "user", "content": chave_acao})
-            salvar_historico_disco(st.session_state.messages)
-            st.session_state._pending_agent = True
-            st.rerun()
+            if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
+                faltantes = [str(v) for v in variaveis_necessarias if not str(dados_digitados.get(str(v), "")).strip()]
+                if faltantes:
+                    st.warning(f"Preencha as variáveis obrigatórias: {', '.join(faltantes)}")
+                else:
+                    st.session_state.messages.append({"role": "user", "content": chave_acao})
+                    salvar_historico_disco(st.session_state.messages)
+                    with st.spinner("Executando ação parametrizada..."):
+                        resultado_direto = asyncio.run(executar_acao_fast_track(chave_acao, dados_digitados))
+                    if isinstance(resultado_direto, dict):
+                        st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
+                    st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
+                    salvar_historico_disco(st.session_state.messages)
+                    st.rerun()
+            else:
+                st.session_state.messages.append({"role": "user", "content": chave_acao})
+                salvar_historico_disco(st.session_state.messages)
+                st.session_state._pending_agent = True
+                st.rerun()
     else:
         st.caption("Sem ações aprendidas no momento.")
 
@@ -310,51 +350,47 @@ if menu_selecionado == "Chat & Ações":
     st.subheader("Conversa com o Agente")
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
 
-    caminho_evidencia = _ROOT / _EVIDENCIA
+    caminho_evidencia_padrao = _ROOT / _EVIDENCIA
     for i, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if isinstance(msg.get("dados_extraidos"), dict) and msg["dados_extraidos"]:
-                st.caption("Textos / dados extraídos nesta execução:")
-                st.json(msg["dados_extraidos"])
-            if "arquivos" in msg and msg["arquivos"]:
-                for caminho_arq in msg["arquivos"]:
-                    try:
-                        caminho_abs = _ROOT / str(caminho_arq)
-                        if caminho_abs.is_file():
-                            nome_arquivo = caminho_abs.name
-                            conteudo_arquivo = caminho_abs.read_bytes()
-                            st.download_button(
-                                label=f"📥 Baixar {nome_arquivo}",
-                                data=conteudo_arquivo,
-                                file_name=nome_arquivo,
-                                mime="application/octet-stream",
-                                key=f"dl_btn_msg_{i}_{nome_arquivo}",
-                            )
-                    except OSError:
-                        continue
-            if msg.get("role") == "assistant":
-                conteudo = str(msg.get("content", ""))
-                if _EVIDENCIA in conteudo and os.path.exists(str(caminho_evidencia)):
-                    st.image(str(caminho_evidencia), caption="Evidência Visual", width=500)
-                evidencia_msg = str(msg.get("evidencia", "") or "")
-                if evidencia_msg:
-                    try:
-                        caminho_evidencia_msg = _ROOT / evidencia_msg
-                        if caminho_evidencia_msg.is_file() and caminho_evidencia_msg.suffix.lower() in {
-                            ".png",
-                            ".jpg",
-                            ".jpeg",
-                            ".webp",
-                            ".gif",
-                        }:
-                            st.image(
-                                str(caminho_evidencia_msg),
-                                caption=f"Evidência: {caminho_evidencia_msg.name}",
-                                width=500,
-                            )
-                    except OSError:
-                        pass
+            st.markdown(msg.get("content", ""))
+
+            dados_ex = msg.get("dados_extraidos")
+            if isinstance(dados_ex, dict) and dados_ex:
+                st.write("Textos / dados extraídos nesta execução:")
+                st.json(dados_ex)
+
+            arquivos_msg = msg.get("arquivos")
+            if isinstance(arquivos_msg, list) and arquivos_msg:
+                for caminho_arq in arquivos_msg:
+                    caminho_str = str(caminho_arq)
+                    caminho_abs = Path(caminho_str) if os.path.isabs(caminho_str) else _ROOT / caminho_str
+                    if caminho_abs.is_file():
+                        nome_arquivo = caminho_abs.name
+                        conteudo_arquivo = caminho_abs.read_bytes()
+                        st.download_button(
+                            label=f"📥 Baixar {nome_arquivo}",
+                            data=conteudo_arquivo,
+                            file_name=nome_arquivo,
+                            mime="application/octet-stream",
+                            key=f"dl_btn_msg_{i}_{nome_arquivo}",
+                        )
+
+            evidencia_msg = str(msg.get("evidencia", "") or "").strip()
+            if evidencia_msg:
+                caminho_img = Path(evidencia_msg) if os.path.isabs(evidencia_msg) else _ROOT / evidencia_msg
+                if caminho_img.is_file() and caminho_img.suffix.lower() in {
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".webp",
+                    ".gif",
+                }:
+                    st.image(str(caminho_img), caption="Evidência Visual", width=500)
+            elif msg.get("role") == "assistant":
+                conteudo_txt = str(msg.get("content", ""))
+                if _EVIDENCIA in conteudo_txt and caminho_evidencia_padrao.is_file():
+                    st.image(str(caminho_evidencia_padrao), caption="Evidência Visual", width=500)
 
     estado_agente = st.session_state.get("estado_agente", "NORMAL")
     if estado_agente == "ESPERANDO_APROVACAO_PLANO":
@@ -396,6 +432,115 @@ if menu_selecionado == "Chat & Ações":
         st.rerun()
 
 elif menu_selecionado == "Agendamentos e Filas":
+    st.subheader("📁 Operação em Lote (Excel)")
+
+    memoria = _carregar_ui_map()
+    acoes_disponiveis = memoria.get("acoes_conhecidas", {})
+
+    if not isinstance(acoes_disponiveis, dict) or not acoes_disponiveis:
+        st.info("Nenhuma ação aprendida ainda. Volte ao Chat e ensine o robô primeiro!")
+    else:
+        opcoes_lote = {
+            str(dados.get("nome_amigavel", chave)): chave
+            for chave, dados in acoes_disponiveis.items()
+            if isinstance(dados, dict)
+        }
+        if opcoes_lote:
+            nome_acao_lote = st.selectbox(
+                "1. Qual rotina deseja aplicar à planilha?",
+                list(opcoes_lote.keys()),
+                key="lote_acao",
+            )
+            chave_acao_selecionada = opcoes_lote[nome_acao_lote]
+            dados_acao_lote = acoes_disponiveis.get(chave_acao_selecionada, {})
+            variaveis_exigidas = (
+                dados_acao_lote.get("variaveis_necessarias", [])
+                if isinstance(dados_acao_lote, dict)
+                else []
+            )
+
+            arquivo_excel = st.file_uploader("2. Suba a planilha (.xlsx, .csv)", type=["xlsx", "csv"])
+            if arquivo_excel is not None:
+                try:
+                    if str(arquivo_excel.name).lower().endswith(".csv"):
+                        df_lote = pd.read_csv(arquivo_excel)
+                    else:
+                        df_lote = pd.read_excel(arquivo_excel)
+
+                    colunas_excel = df_lote.columns.tolist()
+                    st.write("Visualização rápida dos dados:")
+                    st.dataframe(df_lote.head(3), use_container_width=True)
+
+                    if isinstance(variaveis_exigidas, list) and variaveis_exigidas:
+                        st.markdown("### 🔗 Mapeamento de Variáveis")
+                        st.info(
+                            f"A rotina '{nome_acao_lote}' precisa de dados. Indique em que coluna da sua planilha eles estão:"
+                        )
+
+                        mapeamento_colunas: dict[str, str] = {}
+                        for var in variaveis_exigidas:
+                            var_nome = str(var)
+                            col_selecionada = st.selectbox(
+                                f"A variável '{var_nome}' corresponde à coluna:",
+                                options=["-- Selecione a coluna --"] + [str(c) for c in colunas_excel],
+                                key=f"map_{var_nome}",
+                            )
+                            mapeamento_colunas[var_nome] = col_selecionada
+
+                        todas_mapeadas = all(v != "-- Selecione a coluna --" for v in mapeamento_colunas.values())
+                    else:
+                        st.success(f"A rotina '{nome_acao_lote}' não exige variáveis. Pronta para disparar o lote!")
+                        mapeamento_colunas = {}
+                        todas_mapeadas = True
+
+                    if todas_mapeadas:
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("🚀 Iniciar Processamento Agora", use_container_width=True, type="primary"):
+                                lista_dados = df_lote.to_dict("records")
+                                st.info(f"A processar {len(lista_dados)} itens... Por favor, não feche a página.")
+                                barra_progresso = st.progress(0)
+
+                                import asyncio
+                                from backend.motor_browser import processar_lote_com_semaforo
+
+                                with st.spinner("O robô está a operar em lote..."):
+                                    resultados_lote = asyncio.run(
+                                        processar_lote_com_semaforo(
+                                            chave_acao=chave_acao_selecionada,
+                                            lista_linhas=lista_dados,
+                                            mapeamento=mapeamento_colunas,
+                                            max_concorrencia=5,
+                                        )
+                                    )
+
+                                barra_progresso.progress(100)
+                                df_resultado = df_lote.copy()
+                                df_resultado["Status_Robo"] = [res["Status_Robo"] for res in resultados_lote]
+                                df_resultado["Detalhes_Erro"] = [res["Detalhes_Erro"] for res in resultados_lote]
+                                df_resultado["Dados_Extraidos"] = [res["Dados_Extraidos"] for res in resultados_lote]
+
+                                st.success("✅ Processamento concluído!")
+                                st.markdown("### 📊 Relatório Final")
+                                st.dataframe(df_resultado, use_container_width=True)
+
+                                csv_final = df_resultado.to_csv(index=False).encode("utf-8")
+                                st.download_button(
+                                    label="📥 Descarregar Relatório Processado (CSV)",
+                                    data=csv_final,
+                                    file_name="relatorio_cotasync_processado.csv",
+                                    mime="text/csv",
+                                    type="primary",
+                                    use_container_width=True,
+                                )
+                        with col2:
+                            if st.button("⏰ Agendar para o futuro", use_container_width=True):
+                                st.info("A ligação do CRON (APScheduler) será finalizada na Etapa 3!")
+                except Exception as e:
+                    st.error(f"Erro ao ler a planilha: {str(e)}")
+
+    st.divider()
     st.markdown("##### Gestão de rotinas e processamento em lote")
     st.caption(
         "Painel visual de demonstracao. O agendador real (APScheduler) roda no backend."
@@ -416,7 +561,7 @@ elif menu_selecionado == "Agendamentos e Filas":
         "Selecione a Ação a ser executada em lote",
         options=nomes_acoes if nomes_acoes else ["Sem acoes disponiveis"],
         index=0,
-        key="acao_lote",
+        key="acao_lote_cron",
     )
 
     col_a, col_b = st.columns(2)

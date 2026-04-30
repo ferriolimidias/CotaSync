@@ -13,3 +13,4 @@ python-dotenv
 requests
 audio-recorder-streamlit
 streamlit-option-menu
+pandas

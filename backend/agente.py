@@ -277,6 +277,11 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
             "descricao": f"Ação aprendida: {str(sessao_atual.get('instrucao_original', instrucao_execucao))[:80]}...",
             "url_inicial": "Lida do erp_config.json",
             "passos_playwright": passos_reais,
+            "variaveis_necessarias": (
+                resultado_mapeamento.get("variaveis_necessarias", [])
+                if isinstance(resultado_mapeamento, dict)
+                else []
+            ),
         }
         try:
             salvar_ui_map(ui_map)
@@ -370,7 +375,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
             _LOGGER.info(f"[FAST-TRACK] Disparo direto da ação: {mensagem_limpa}")
             acao = acoes.get(mensagem_limpa, {})
             passos = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
-            resultado_execucao = await executar_acao_rapida(mensagem_limpa, passos)
+            resultado_execucao = await executar_acao_rapida(mensagem_limpa, passos, None)
             if str(resultado_execucao.get("status", "")).lower() == "sucesso":
                 arquivos_baixados = resultado_execucao.get("arquivos_baixados", [])
                 evidencia = str(resultado_execucao.get("evidencia", ""))
@@ -407,6 +412,80 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         }
     )
     return _montar_resposta(str(resultado.get("output", "")).strip())
+
+
+async def executar_acao_fast_track(nome_acao: str, dados_variaveis: dict | None = None) -> dict[str, Any]:
+    ui_map = carregar_ui_map()
+    acoes = ui_map.get("acoes_conhecidas", {})
+    if not isinstance(acoes, dict) or nome_acao not in acoes:
+        return {"texto": f"❌ A ação '{nome_acao}' não foi encontrada.", "estado": "NORMAL"}
+
+    acao = acoes.get(nome_acao, {})
+    passos_playwright = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
+
+    try:
+        resultado = await executar_acao_rapida(
+            nome_acao,
+            passos_playwright,
+            dados_variaveis if isinstance(dados_variaveis, dict) else None,
+        )
+        if str(resultado.get("status", "")).lower() != "sucesso":
+            motivo = str(resultado.get("motivo", "Falha não identificada."))
+            raise RuntimeError(motivo)
+        return {
+            "texto": "✅ Execução rápida concluída com sucesso da memória!",
+            "estado": "NORMAL",
+            "evidencia": str(resultado.get("evidencia", "")),
+            "arquivos": resultado.get("arquivos_baixados", []),
+            "dados_extraidos": resultado.get("dados_extraidos", {}),
+        }
+
+    except Exception as erro_fast_track:
+        logging.warning(f"[AUTO-HEALING] Fast-Track falhou para a ação '{nome_acao}'. Erro: {erro_fast_track}")
+        logging.info("[AUTO-HEALING] Acionando a IA para Diagnóstico e Correção da tela...")
+
+        instrucao_recuperacao = f"""
+        A rotina mapeada '{nome_acao}' falhou ao ser repetida com o erro: {str(erro_fast_track)}.
+        DIAGNÓSTICO OBRIGATÓRIO:
+        1. Olhe para a tela atual. O sistema alvo está apenas lento (ex: ícone a carregar, erro 504/503) ou apareceu um popup/aviso bloqueador normal do sistema?
+        2. Se for um erro temporário ou popup, feche o aviso ou clique em atualizar e tente concluir a tarefa com os seletores originais.
+        3. Apenas se a interface realmente MUDOU de estrutura (o botão desapareceu definitivamente), encontre o novo botão/caminho.
+        Conclua a tarefa original de '{nome_acao}' e atualize a receita dos passos.
+        """
+
+        try:
+            novos_passos = await acionar_ia_cartografa(nome_acao, instrucao_recuperacao)
+
+            memoria = carregar_ui_map()
+            memoria.setdefault("acoes_conhecidas", {})
+            memoria["acoes_conhecidas"].setdefault(nome_acao, {})
+            memoria["acoes_conhecidas"][nome_acao]["passos_playwright"] = novos_passos.get("passos_playwright", [])
+            salvar_ui_map(memoria)
+
+            logging.info(f"[AUTO-HEALING] SUCESSO! A rotina '{nome_acao}' foi auto-corrigida.")
+
+            return {
+                "texto": (
+                    "⚠️ **Diagnóstico e Auto-Correção:** Ocorreu um obstáculo no sistema (possível lentidão ou mudança de tela).\n\n"
+                    "Assumi o controlo manual com a Inteligência Artificial, analisei a situação, concluí a tarefa pretendida "
+                    "e ajustei a minha abordagem para não falhar na próxima!\n\n"
+                    f"Dados extraídos: {novos_passos.get('dados_extraidos', {})}"
+                ),
+                "estado": "NORMAL",
+                "arquivos": novos_passos.get("arquivos_baixados", []),
+                "dados_extraidos": novos_passos.get("dados_extraidos", {}),
+            }
+
+        except Exception as e_ia:
+            logging.error(f"[AUTO-HEALING FALHOU] {str(e_ia)}")
+            return {
+                "texto": (
+                    "❌ **Falha Crítica:** O sistema parece estar indisponível ou ocorreu um erro incontornável. "
+                    "Tentei assumir o controlo manual com a IA, mas não foi possível avançar. "
+                    f"Erro técnico: {str(e_ia)}"
+                ),
+                "estado": "NORMAL",
+            }
 
 
 def _normalizar_chat_history_para_executor(chat_history: list[Any] | None) -> list[Any]:

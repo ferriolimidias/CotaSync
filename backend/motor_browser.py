@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+import pandas as pd
 from pydantic import BaseModel, Field
 from playwright.async_api import Browser, async_playwright
 
@@ -229,6 +230,73 @@ def _ws_browserless() -> str:
     return ws_url
 
 
+def _carregar_ui_map() -> dict:
+    caminho = _DATA_DIR / "ui_map.json"
+    if not caminho.is_file():
+        return {"acoes_conhecidas": {}}
+    try:
+        dados = json.loads(caminho.read_text(encoding="utf-8"))
+        if not isinstance(dados, dict):
+            return {"acoes_conhecidas": {}}
+        if not isinstance(dados.get("acoes_conhecidas"), dict):
+            dados["acoes_conhecidas"] = {}
+        return dados
+    except (json.JSONDecodeError, OSError):
+        return {"acoes_conhecidas": {}}
+
+
+async def processar_lote_com_semaforo(
+    chave_acao: str,
+    lista_linhas: list[dict],
+    mapeamento: dict,
+    max_concorrencia: int = 5,
+) -> list[dict]:
+    """
+    Processa uma lista de dados (linhas do Excel) de forma assíncrona e controlada.
+    Limita a abertura simultânea de abas no Browserless usando asyncio.Semaphore.
+    """
+    semaforo = asyncio.Semaphore(max_concorrencia)
+    memoria = _carregar_ui_map()
+
+    if chave_acao not in memoria.get("acoes_conhecidas", {}):
+        raise ValueError(f"Ação {chave_acao} não encontrada na memória.")
+
+    passos_playwright = memoria["acoes_conhecidas"][chave_acao].get("passos_playwright", [])
+
+    async def worker(index: int, linha_dados: dict):
+        async with semaforo:
+            dados_variaveis = {}
+            for var_json, col_excel in mapeamento.items():
+                dados_variaveis[var_json] = str(linha_dados.get(col_excel, ""))
+
+            try:
+                logging.info(f"[LOTE] Iniciando linha {index}...")
+                resultado = await executar_acao_rapida(chave_acao, passos_playwright, dados_variaveis)
+                textos_extraidos = str(resultado.get("dados_extraidos", "")) if resultado.get("dados_extraidos") else ""
+
+                return {
+                    "indice_original": index,
+                    "Status_Robo": "Sucesso",
+                    "Detalhes_Erro": "",
+                    "Dados_Extraidos": textos_extraidos,
+                    "Evidencia": resultado.get("evidencia", ""),
+                }
+            except Exception as e:
+                logging.error(f"[LOTE] Erro na linha {index}: {str(e)}")
+                return {
+                    "indice_original": index,
+                    "Status_Robo": "Erro",
+                    "Detalhes_Erro": str(e),
+                    "Dados_Extraidos": "",
+                    "Evidencia": "",
+                }
+
+    tasks = [worker(idx, linha) for idx, linha in enumerate(lista_linhas)]
+    resultados = await asyncio.gather(*tasks)
+    resultados.sort(key=lambda x: x["indice_original"])
+    return resultados
+
+
 async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
     """
     Navegação real de validação: Wikipedia PT + busca + screenshot na raiz do projeto.
@@ -365,8 +433,11 @@ async def acionar_ia_cartografa(
     """Acessa o ERP, faz login e aprende via loop semântico iterativo (Reason + Act)."""
     raiz = _raiz_projeto()
     url_sistema, usuario, senha = _carregar_erp_config()
-    checklist_original = checklist_aprovada if checklist_aprovada else [instrucao_humana]
-    objetivo_checklist = " | ".join(str(item) for item in checklist_original if str(item).strip()) or instrucao_humana
+    variaveis_mock = re.findall(r"\{(.*?)\}", instrucao_humana)
+    instrucao_limpa = re.sub(r"\{(.*?)\}", r"\1", instrucao_humana)
+    checklist_base = checklist_aprovada if checklist_aprovada else [instrucao_limpa]
+    checklist_original = [re.sub(r"\{(.*?)\}", r"\1", str(item)) for item in checklist_base]
+    objetivo_checklist = " | ".join(str(item) for item in checklist_original if str(item).strip()) or instrucao_limpa
     nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
     screenshot_path = _DATA_DIR / f"mapeamento_{nome_arquivo}.png"
     passos_aprendidos: list[dict[str, str]] = []
@@ -387,7 +458,7 @@ async def acionar_ia_cartografa(
                 return {"status": "erro", "motivo": str(exc)}
             if not login_ok:
                 return {"status": "erro", "motivo": login_msg}
-            _LOGGER.info(f"[LOGIN] {login_msg} Iniciando busca por: {instrucao_humana}")
+            _LOGGER.info(f"[LOGIN] {login_msg} Iniciando busca por: {instrucao_limpa}")
 
             llm = ChatOpenAI(
                 model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
@@ -402,7 +473,7 @@ async def acionar_ia_cartografa(
                     return {"status": "erro", "motivo": "Nao consegui extrair elementos interativos da tela atual."}
 
                 prompt = (
-                    f"Objetivo final: {instrucao_humana}\n"
+                    f"Objetivo final: {instrucao_limpa}\n"
                     f"Checklist aprovada: {json.dumps(checklist_original, ensure_ascii=False)}\n"
                     f"Objetivo operacional consolidado: {objetivo_checklist}\n"
                     f"Passos já dados com sucesso: {json.dumps(passos_aprendidos, ensure_ascii=False)}\n"
@@ -485,8 +556,41 @@ async def acionar_ia_cartografa(
 
                 try:
                     if decisao_ia.tipo == "clicar":
-                        await page.click(decisao_ia.seletor, timeout=5000)
-                        await page.wait_for_load_state("networkidle", timeout=3000)
+                        elementos = page.locator(decisao_ia.seletor)
+                        quantidade = await elementos.count()
+                        sucesso_clique = False
+
+                        try:
+                            async with page.expect_popup(timeout=3000) as popup_info:
+                                for i in range(quantidade):
+                                    if await elementos.nth(i).is_visible():
+                                        await elementos.nth(i).click(timeout=5000)
+                                        sucesso_clique = True
+                                        break
+                                if not sucesso_clique:
+                                    await elementos.first.click(timeout=5000, force=True)
+
+                            nova_aba = await popup_info.value
+                            try:
+                                await nova_aba.wait_for_load_state("networkidle", timeout=5000)
+                            except Exception:
+                                pass
+
+                            page = nova_aba
+                            logging.info(f"[NAVEGAÇÃO] Popup/Nova Aba detetada! Foco transferido para: {page.url}")
+
+                        except Exception:
+                            if not sucesso_clique:
+                                try:
+                                    await elementos.first.click(timeout=5000, force=True)
+                                except Exception:
+                                    pass
+
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=3000)
+                            except Exception:
+                                pass
+
                         await asyncio.sleep(2)
                     elif tipo == "preencher":
                         await page.fill(seletor, valor)
@@ -559,7 +663,7 @@ async def acionar_ia_cartografa(
                 if isinstance(passo, dict)
                 and str(passo.get("tipo", "")).lower() in {"clicar", "preencher", "teclar", "download_pdf"}
             ]
-            instrucao_norm = str(instrucao_humana or "").lower()
+            instrucao_norm = str(instrucao_limpa or "").lower()
             exige_extracao = any(chave in instrucao_norm for chave in ["pegar", "extrair", "ler", "buscar", "baixar"])
             if not passos_concretos or (exige_extracao and not dados_extraidos):
                 return {
@@ -569,6 +673,15 @@ async def acionar_ia_cartografa(
                         "dados solicitados. A rotina não foi gravada para evitar falsos positivos."
                     ),
                 }
+
+            variaveis_necessarias: list[str] = []
+            for i, mock_val in enumerate(variaveis_mock):
+                var_key = f"var_{i + 1}"
+                variaveis_necessarias.append(var_key)
+                for passo in passos_aprendidos:
+                    if passo.get("valor") == mock_val:
+                        passo["variavel"] = var_key
+                        passo["valor"] = ""
 
             await page.screenshot(path=str(screenshot_path), full_page=False)
             _LOGGER.info(f"[CARTÓGRAFO] Screenshot pós-aprendizado salvo em: {screenshot_path.name}")
@@ -584,14 +697,15 @@ async def acionar_ia_cartografa(
         "status": "sucesso",
         "passos_playwright": passos_aprendidos,
         "dados_extraidos": dados_extraidos,
+        "variaveis_necessarias": variaveis_necessarias if "variaveis_necessarias" in locals() else [],
     }
 
 
-async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
+async def executar_acao_rapida(nome_acao: str, passos_playwright: list, dados_variaveis: dict | None = None) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Fast-Track), repetindo os passos técnicos.
     """
-    if not isinstance(passos, list) or not passos:
+    if not isinstance(passos_playwright, list) or not passos_playwright:
         return {"status": "erro", "motivo": "A rotina não possui passos para execução."}
 
     raiz = _raiz_projeto()
@@ -617,8 +731,8 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
             if not login_ok:
                 return {"status": "erro", "motivo": login_msg}
             _LOGGER.info(f"[FAST-TRACK] {login_msg}")
-            dados_variaveis: dict[str, str] = {}
-            for passo in passos:
+            dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
+            for passo in passos_playwright:
                 if not isinstance(passo, dict):
                     continue
                 seletor = str(passo.get("seletor", "")).strip()
@@ -634,38 +748,60 @@ async def executar_acao_rapida(nome_acao: str, passos: list) -> dict:
 
                 try:
                     if tipo_acao == "clicar":
-                        elementos = page.locator(seletor)
+                        elementos = page.locator(passo["seletor"])
                         quantidade = await elementos.count()
                         sucesso_clique = False
 
-                        for i in range(quantidade):
-                            if await elementos.nth(i).is_visible():
-                                await elementos.nth(i).click(timeout=5000)
-                                sucesso_clique = True
-                                break
-
-                        if not sucesso_clique:
-                            await elementos.first.click(timeout=5000, force=True)
-
                         try:
-                            await page.wait_for_load_state("networkidle", timeout=3000)
+                            async with page.expect_popup(timeout=3000) as popup_info:
+                                for i in range(quantidade):
+                                    if await elementos.nth(i).is_visible():
+                                        await elementos.nth(i).click(timeout=5000)
+                                        sucesso_clique = True
+                                        break
+                                if not sucesso_clique:
+                                    await elementos.first.click(timeout=5000, force=True)
+
+                            nova_aba = await popup_info.value
+                            try:
+                                await nova_aba.wait_for_load_state("networkidle", timeout=5000)
+                            except Exception:
+                                pass
+
+                            page = nova_aba
+                            logging.info(f"[NAVEGAÇÃO] Popup/Nova Aba detetada! Foco transferido para: {page.url}")
+
                         except Exception:
-                            pass
+                            if not sucesso_clique:
+                                try:
+                                    await elementos.first.click(timeout=5000, force=True)
+                                except Exception:
+                                    pass
+
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=3000)
+                            except Exception:
+                                pass
+
+                        await asyncio.sleep(2)
 
                     elif tipo_acao == "preencher":
-                        valor = str(dados_variaveis.get(str(passo.get("variavel", "")), passo.get("valor", "")))
+                        if "variavel" in passo and dados_variaveis and str(passo["variavel"]) in dados_variaveis:
+                            valor_final = str(dados_variaveis[str(passo["variavel"])])
+                        else:
+                            valor_final = str(passo.get("valor", ""))
                         elementos = page.locator(seletor)
                         quantidade = await elementos.count()
                         sucesso_preencher = False
 
                         for i in range(quantidade):
                             if await elementos.nth(i).is_visible():
-                                await elementos.nth(i).fill(valor, timeout=5000)
+                                await elementos.nth(i).fill(valor_final, timeout=5000)
                                 sucesso_preencher = True
                                 break
 
                         if not sucesso_preencher:
-                            await elementos.first.fill(valor, timeout=5000, force=True)
+                            await elementos.first.fill(valor_final, timeout=5000, force=True)
 
                     elif tipo_acao == "teclar":
                         await page.keyboard.press(str(passo.get("valor", "")))
