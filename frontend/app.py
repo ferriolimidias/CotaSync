@@ -292,12 +292,6 @@ with st.sidebar:
                     f"Preencha {chave_var}",
                     key=f"acao_var_{chave_acao}_{chave_var}",
                 )
-        st.divider()
-        converter_pdf_sidebar = st.checkbox(
-            "🔄 Converter PDF p/ Excel",
-            key="chk_pdf_sidebar",
-            help="Extrai tabelas de PDFs baixados para planilhas .xlsx",
-        )
         if st.button("🚀 Disparar Ação", use_container_width=True, key="acao_sidebar_btn"):
             if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
                 faltantes = [str(v) for v in variaveis_necessarias if not str(dados_digitados.get(str(v), "")).strip()]
@@ -311,7 +305,6 @@ with st.sidebar:
                             executar_acao_fast_track(
                                 chave_acao,
                                 dados_digitados,
-                                converter_pdf_excel=converter_pdf_sidebar,
                             )
                         )
                     if isinstance(resultado_direto, dict):
@@ -327,7 +320,6 @@ with st.sidebar:
                         executar_acao_fast_track(
                             chave_acao,
                             None,
-                            converter_pdf_excel=converter_pdf_sidebar,
                         )
                     )
                 if isinstance(resultado_direto, dict):
@@ -384,21 +376,42 @@ if menu_selecionado == "Chat & Ações":
                 st.write("Textos / dados extraídos nesta execução:")
                 st.json(dados_ex)
 
-            arquivos_msg = msg.get("arquivos")
-            if isinstance(arquivos_msg, list) and arquivos_msg:
-                for caminho_arq in arquivos_msg:
-                    caminho_str = str(caminho_arq)
-                    caminho_abs = Path(caminho_str) if os.path.isabs(caminho_str) else _ROOT / caminho_str
-                    if caminho_abs.is_file():
-                        nome_arquivo = caminho_abs.name
-                        conteudo_arquivo = caminho_abs.read_bytes()
-                        st.download_button(
-                            label=f"📥 Baixar {nome_arquivo}",
-                            data=conteudo_arquivo,
-                            file_name=nome_arquivo,
-                            mime="application/octet-stream",
-                            key=f"dl_btn_msg_{i}_{nome_arquivo}",
-                        )
+            if "arquivos" in msg and msg["arquivos"]:
+                from backend.motor_browser import _converter_pdf_para_excel
+                for idx_arq, caminho in enumerate(msg["arquivos"]):
+                    nome_arq = os.path.basename(str(caminho))
+                    caminho_abs = Path(str(caminho)) if os.path.isabs(str(caminho)) else _ROOT / str(caminho)
+                    caminho_resolvido = str(caminho_abs)
+                    if os.path.exists(caminho_resolvido):
+                        col1, col2 = st.columns([1, 1])
+
+                        with col1:
+                            with open(caminho_resolvido, "rb") as f:
+                                st.download_button(
+                                    label="📄 Baixar PDF",
+                                    data=f,
+                                    file_name=nome_arq,
+                                    mime="application/pdf",
+                                    key=f"dl_pdf_{i}_{idx_arq}_{nome_arq}",
+                                )
+
+                        with col2:
+                            if caminho_resolvido.endswith(".pdf"):
+                                caminho_excel = caminho_resolvido.replace(".pdf", ".xlsx")
+                                if os.path.exists(caminho_excel):
+                                    with open(caminho_excel, "rb") as f_xls:
+                                        st.download_button(
+                                            label="📊 Baixar Excel",
+                                            data=f_xls,
+                                            file_name=os.path.basename(caminho_excel),
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            key=f"dl_xls_{i}_{idx_arq}_{nome_arq}",
+                                        )
+                                else:
+                                    if st.button("🪄 Converter para Excel", key=f"btn_conv_{i}_{idx_arq}_{nome_arq}"):
+                                        with st.spinner("Extraindo tabelas do PDF..."):
+                                            _converter_pdf_para_excel(caminho_resolvido)
+                                        st.rerun()
 
             evidencia_msg = str(msg.get("evidencia", "") or "").strip()
             if evidencia_msg:
@@ -511,15 +524,6 @@ elif menu_selecionado == "Agendamentos e Filas":
                 # 4. Botões de Disparo
                 if todas_mapeadas:
                     st.divider()
-                    st.markdown("### 🛠️ Opções de Processamento")
-                    converter_pdfs = st.checkbox(
-                        "🔄 Tentar converter PDFs de relatórios para Excel (.xlsx)?",
-                        help=(
-                            "Marque se a rotina baixa um relatório em PDF que você deseja transformar em planilha. "
-                            "Deixe desmarcado para boletos/faturas normais."
-                        ),
-                    )
-                    st.divider()
                     col1, col2 = st.columns(2)
                     
                     with col1:
@@ -536,8 +540,7 @@ elif menu_selecionado == "Agendamentos e Filas":
                                     chave_acao=chave_acao_selecionada, 
                                     lista_linhas=lista_dados, 
                                     mapeamento=mapeamento_colunas, 
-                                    max_concorrencia=5,
-                                    converter_pdf_excel=converter_pdfs
+                                    max_concorrencia=5
                                 ))
                                 
                             df_resultado = df_lote.copy()
@@ -593,7 +596,6 @@ elif menu_selecionado == "Agendamentos e Filas":
                                 "caminho_csv": caminho_csv,
                                 "data_execucao": data_agendamento.strftime("%Y-%m-%d"),
                                 "hora_execucao": hora_agendamento.strftime("%H:%M"),
-                                "converter_pdf_excel": converter_pdfs,
                                 "status": "pendente",
                                 "criado_em": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             }

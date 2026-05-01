@@ -287,7 +287,6 @@ async def processar_lote_com_semaforo(
     lista_linhas: list[dict],
     mapeamento: dict,
     max_concorrencia: int = 5,
-    converter_pdf_excel: bool = False,
 ) -> list[dict]:
     """
     Processa uma lista de dados (linhas do Excel) de forma assíncrona e controlada.
@@ -313,7 +312,6 @@ async def processar_lote_com_semaforo(
                     chave_acao,
                     passos_playwright,
                     dados_variaveis,
-                    converter_pdf_excel,
                 )
                 textos_extraidos = str(resultado.get("dados_extraidos", "")) if resultado.get("dados_extraidos") else ""
 
@@ -748,7 +746,6 @@ async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
     dados_variaveis: dict | None = None,
-    converter_pdf_excel: bool = False,
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Fast-Track), repetindo os passos técnicos.
@@ -890,11 +887,7 @@ async def executar_acao_rapida(
                         download = await download_info.value
                         caminho_arquivo = f"downloads/{download.suggested_filename}"
                         await download.save_as(caminho_arquivo)
-                        if converter_pdf_excel:
-                            caminho_convertido = _converter_pdf_para_excel(caminho_arquivo)
-                            arquivos_baixados.append(caminho_convertido)
-                        else:
-                            arquivos_baixados.append(caminho_arquivo)
+                        arquivos_baixados.append(caminho_arquivo)
 
                 except Exception as e:
                     raise Exception(

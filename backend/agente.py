@@ -417,7 +417,6 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 async def executar_acao_fast_track(
     nome_acao: str,
     dados_variaveis: dict | None = None,
-    converter_pdf_excel: bool = False,
 ) -> dict[str, Any]:
     ui_map = carregar_ui_map()
     acoes = ui_map.get("acoes_conhecidas", {})
@@ -432,7 +431,6 @@ async def executar_acao_fast_track(
             nome_acao,
             passos_playwright,
             dados_variaveis if isinstance(dados_variaveis, dict) else None,
-            converter_pdf_excel=converter_pdf_excel,
         )
         if str(resultado.get("status", "")).lower() != "sucesso":
             motivo = str(resultado.get("motivo", "Falha não identificada."))

@@ -88,7 +88,6 @@ async def verificar_fila_agendamentos():
                             lista_linhas=lista_dados,
                             mapeamento=job["mapeamento"],
                             max_concorrencia=5,
-                            converter_pdf_excel=job.get("converter_pdf_excel", False),
                         )
 
                         df_resultado = df_lote.copy()
