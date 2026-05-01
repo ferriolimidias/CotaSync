@@ -433,239 +433,184 @@ if menu_selecionado == "Chat & Ações":
         st.rerun()
 
 elif menu_selecionado == "Agendamentos e Filas":
+    st.header("⏰ Agendamentos e Operação em Lote")
+    
     st.subheader("📁 Operação em Lote (Excel)")
-
+    
+    # 1. Escolha da Ação
     memoria = _carregar_ui_map()
     acoes_disponiveis = memoria.get("acoes_conhecidas", {})
-
-    if not isinstance(acoes_disponiveis, dict) or not acoes_disponiveis:
+    
+    if not acoes_disponiveis:
         st.info("Nenhuma ação aprendida ainda. Volte ao Chat e ensine o robô primeiro!")
     else:
-        opcoes_lote = {
-            str(dados.get("nome_amigavel", chave)): chave
-            for chave, dados in acoes_disponiveis.items()
-            if isinstance(dados, dict)
-        }
-        if opcoes_lote:
-            nome_acao_lote = st.selectbox(
-                "1. Qual rotina deseja aplicar à planilha?",
-                list(opcoes_lote.keys()),
-                key="lote_acao",
-            )
-            chave_acao_selecionada = opcoes_lote[nome_acao_lote]
-            dados_acao_lote = acoes_disponiveis.get(chave_acao_selecionada, {})
-            variaveis_exigidas = (
-                dados_acao_lote.get("variaveis_necessarias", [])
-                if isinstance(dados_acao_lote, dict)
-                else []
-            )
-
-            arquivo_excel = st.file_uploader("2. Suba a planilha (.xlsx, .csv)", type=["xlsx", "csv"])
-            if arquivo_excel is not None:
-                try:
-                    if str(arquivo_excel.name).lower().endswith(".csv"):
-                        df_lote = pd.read_csv(arquivo_excel)
-                    else:
-                        df_lote = pd.read_excel(arquivo_excel)
-
-                    colunas_excel = df_lote.columns.tolist()
-                    st.write("Visualização rápida dos dados:")
-                    st.dataframe(df_lote.head(3), use_container_width=True)
-
-                    if isinstance(variaveis_exigidas, list) and variaveis_exigidas:
-                        st.markdown("### 🔗 Mapeamento de Variáveis")
-                        st.info(
-                            f"A rotina '{nome_acao_lote}' precisa de dados. Indique em que coluna da sua planilha eles estão:"
+        opcoes_lote = {dados.get("nome_amigavel", chave): chave for chave, dados in acoes_disponiveis.items()}
+        nome_acao_lote = st.selectbox("1. Qual rotina deseja aplicar à planilha?", list(opcoes_lote.keys()), key="lote_acao")
+        chave_acao_selecionada = opcoes_lote[nome_acao_lote]
+        variaveis_exigidas = acoes_disponiveis[chave_acao_selecionada].get("variaveis_necessarias", [])
+        
+        # 2. Upload do Arquivo
+        arquivo_excel = st.file_uploader("2. Suba a planilha (.xlsx, .csv)", type=["xlsx", "csv"])
+        
+        if arquivo_excel is not None:
+            try:
+                import pandas as pd
+                if arquivo_excel.name.endswith('.csv'):
+                    df_lote = pd.read_csv(arquivo_excel)
+                else:
+                    df_lote = pd.read_excel(arquivo_excel)
+                    
+                colunas_excel = df_lote.columns.tolist()
+                
+                st.write("Visualização rápida dos dados:")
+                st.dataframe(df_lote.head(3), use_container_width=True)
+                
+                # 3. Mapeamento
+                if variaveis_exigidas:
+                    st.markdown("### 🔗 Mapeamento de Variáveis")
+                    st.info(f"A rotina '{nome_acao_lote}' precisa de dados. Indique em que coluna da sua planilha eles estão:")
+                    
+                    mapeamento_colunas = {}
+                    for var in variaveis_exigidas:
+                        col_selecionada = st.selectbox(
+                            f"A variável '{var}' corresponde à coluna:",
+                            options=["-- Selecione a coluna --"] + colunas_excel,
+                            key=f"map_{var}"
                         )
-
-                        mapeamento_colunas: dict[str, str] = {}
-                        for var in variaveis_exigidas:
-                            var_nome = str(var)
-                            col_selecionada = st.selectbox(
-                                f"A variável '{var_nome}' corresponde à coluna:",
-                                options=["-- Selecione a coluna --"] + [str(c) for c in colunas_excel],
-                                key=f"map_{var_nome}",
+                        mapeamento_colunas[var] = col_selecionada
+                    
+                    todas_mapeadas = all(v != "-- Selecione a coluna --" for v in mapeamento_colunas.values())
+                else:
+                    st.success(f"A rotina '{nome_acao_lote}' não exige variáveis. Pronta para disparar o lote!")
+                    mapeamento_colunas = {}
+                    todas_mapeadas = True
+                
+                # 4. Botões de Disparo
+                if todas_mapeadas:
+                    st.divider()
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if st.button("🚀 Iniciar Processamento Agora", use_container_width=True, type="primary"):
+                            lista_dados = df_lote.to_dict('records')
+                            st.info(f"A processar {len(lista_dados)} itens... Por favor, não feche a página.")
+                            barra_progresso = st.progress(0)
+                            
+                            import asyncio
+                            from backend.motor_browser import processar_lote_com_semaforo
+                            
+                            with st.spinner("O robô está a operar em lote..."):
+                                resultados_lote = asyncio.run(processar_lote_com_semaforo(
+                                    chave_acao=chave_acao_selecionada, 
+                                    lista_linhas=lista_dados, 
+                                    mapeamento=mapeamento_colunas, 
+                                    max_concorrencia=5
+                                ))
+                                
+                            df_resultado = df_lote.copy()
+                            df_resultado["Status_Robo"] = [res.get("Status_Robo", "") for res in resultados_lote]
+                            df_resultado["Detalhes_Erro"] = [res.get("Detalhes_Erro", "") for res in resultados_lote]
+                            df_resultado["Dados_Extraidos"] = [res.get("Dados_Extraidos", "") for res in resultados_lote]
+                            
+                            st.success("✅ Processamento concluído!")
+                            st.markdown("### 📊 Relatório Final")
+                            st.dataframe(df_resultado, use_container_width=True)
+                            
+                            csv_final = df_resultado.to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label="📥 Descarregar Relatório Processado (CSV)",
+                                data=csv_final,
+                                file_name="relatorio_cotasync_processado.csv",
+                                mime="text/csv",
+                                type="primary",
+                                use_container_width=True
                             )
-                            mapeamento_colunas[var_nome] = col_selecionada
-
-                        todas_mapeadas = all(v != "-- Selecione a coluna --" for v in mapeamento_colunas.values())
-                    else:
-                        st.success(f"A rotina '{nome_acao_lote}' não exige variáveis. Pronta para disparar o lote!")
-                        mapeamento_colunas = {}
-                        todas_mapeadas = True
-
-                    if todas_mapeadas:
+                    
+                    with col2:
+                        if st.button("⏰ Agendar para o futuro", use_container_width=True):
+                            st.session_state.mostrando_agendador = True
+                            
+                    if st.session_state.get("mostrando_agendador", False):
                         st.divider()
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.button("🚀 Iniciar Processamento Agora", use_container_width=True, type="primary"):
-                                lista_dados = df_lote.to_dict("records")
-                                st.info(f"A processar {len(lista_dados)} itens... Por favor, não feche a página.")
-                                barra_progresso = st.progress(0)
+                        st.markdown("### 📅 Configurar Agendamento")
+                        
+                        col_data, col_hora = st.columns(2)
+                        with col_data:
+                            data_agendamento = st.date_input("Data de Início")
+                        with col_hora:
+                            hora_agendamento = st.time_input("Hora de Início")
+                        
+                        if st.button("Confirmar Agendamento", type="primary"):
+                            import uuid
+                            import json
+                            import datetime
+                            import os
+                            
+                            os.makedirs("data/agendamentos", exist_ok=True)
+                            job_id = str(uuid.uuid4())[:8]
+                            caminho_csv = f"data/agendamentos/lote_{job_id}.csv"
+                            caminho_json = f"data/agendamentos/job_{job_id}.json"
+                            
+                            df_lote.to_csv(caminho_csv, index=False)
+                            
+                            config_job = {
+                                "id": job_id,
+                                "chave_acao": chave_acao_selecionada,
+                                "mapeamento": mapeamento_colunas,
+                                "caminho_csv": caminho_csv,
+                                "data_execucao": data_agendamento.strftime("%Y-%m-%d"),
+                                "hora_execucao": hora_agendamento.strftime("%H:%M"),
+                                "status": "pendente",
+                                "criado_em": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            
+                            with open(caminho_json, "w", encoding="utf-8") as f:
+                                json.dump(config_job, f, ensure_ascii=False, indent=4)
+                                
+                            st.success(f"✅ Lote agendado com sucesso para {data_agendamento.strftime('%d/%m/%Y')} às {hora_agendamento.strftime('%H:%M')}! Pode fechar o sistema.")
+                            st.session_state.mostrando_agendador = False
+                            st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao ler a planilha: {str(e)}")
 
-                                import asyncio
-                                from backend.motor_browser import processar_lote_com_semaforo
-
-                                with st.spinner("O robô está a operar em lote..."):
-                                    resultados_lote = asyncio.run(
-                                        processar_lote_com_semaforo(
-                                            chave_acao=chave_acao_selecionada,
-                                            lista_linhas=lista_dados,
-                                            mapeamento=mapeamento_colunas,
-                                            max_concorrencia=5,
-                                        )
-                                    )
-
-                                barra_progresso.progress(100)
-                                df_resultado = df_lote.copy()
-                                df_resultado["Status_Robo"] = [res["Status_Robo"] for res in resultados_lote]
-                                df_resultado["Detalhes_Erro"] = [res["Detalhes_Erro"] for res in resultados_lote]
-                                df_resultado["Dados_Extraidos"] = [res["Dados_Extraidos"] for res in resultados_lote]
-
-                                st.success("✅ Processamento concluído!")
-                                st.markdown("### 📊 Relatório Final")
-                                st.dataframe(df_resultado, use_container_width=True)
-
-                                csv_final = df_resultado.to_csv(index=False).encode("utf-8")
-                                st.download_button(
-                                    label="📥 Descarregar Relatório Processado (CSV)",
-                                    data=csv_final,
-                                    file_name="relatorio_cotasync_processado.csv",
-                                    mime="text/csv",
-                                    type="primary",
-                                    use_container_width=True,
-                                )
-                        with col2:
-                            if st.button("⏰ Agendar para o futuro", use_container_width=True):
-                                st.session_state.mostrando_agendador = True
-
-                        if st.session_state.get("mostrando_agendador", False):
-                            st.divider()
-                            st.markdown("### 📅 Configurar Agendamento")
-
-                            col_data, col_hora = st.columns(2)
-                            with col_data:
-                                data_agendamento = st.date_input("Data de Início")
-                            with col_hora:
-                                hora_agendamento = st.time_input("Hora de Início")
-
-                            if st.button("Confirmar Agendamento", type="primary"):
-                                import datetime
-                                import uuid
-
-                                os.makedirs("data/agendamentos", exist_ok=True)
-                                job_id = str(uuid.uuid4())[:8]
-                                caminho_csv = f"data/agendamentos/lote_{job_id}.csv"
-                                caminho_json = f"data/agendamentos/job_{job_id}.json"
-
-                                df_lote.to_csv(caminho_csv, index=False)
-
-                                config_job = {
-                                    "id": job_id,
-                                    "chave_acao": chave_acao_selecionada,
-                                    "mapeamento": mapeamento_colunas,
-                                    "caminho_csv": caminho_csv,
-                                    "data_execucao": data_agendamento.strftime("%Y-%m-%d"),
-                                    "hora_execucao": hora_agendamento.strftime("%H:%M"),
-                                    "status": "pendente",
-                                    "criado_em": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                }
-
-                                with open(caminho_json, "w", encoding="utf-8") as f:
-                                    json.dump(config_job, f, ensure_ascii=False, indent=4)
-
-                                st.success(
-                                    f"✅ Lote agendado com sucesso para {data_agendamento.strftime('%d/%m/%Y')} às {hora_agendamento.strftime('%H:%M')}! Pode fechar o sistema."
-                                )
-                                st.session_state.mostrando_agendador = False
-                                st.rerun()
-                except Exception as e:
-                    st.error(f"Erro ao ler a planilha: {str(e)}")
-
-    st.divider()
-    st.markdown("##### Gestão de rotinas e processamento em lote")
-    st.caption(
-        "Painel visual de demonstracao. O agendador real (APScheduler) roda no backend."
-    )
-
-    st.markdown("**Suba a planilha com a fila de clientes/lotes**")
-    upl = st.file_uploader(
-        "Planilha para processamento em lote",
-        type=["xlsx"],
-        accept_multiple_files=False,
-        key="lote_xlsx_uploader",
-    )
-    if upl is not None:
-        st.success(f"📎 Recebido: `{upl.name}` ({upl.size:,} bytes)".replace(",", "."))
-        st.caption("Pipeline em lote ainda em modo simulado.")
-
-    st.selectbox(
-        "Selecione a Ação a ser executada em lote",
-        options=nomes_acoes if nomes_acoes else ["Sem acoes disponiveis"],
-        index=0,
-        key="acao_lote_cron",
-    )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.toggle("Rotina de Boletos (Dia 10)", key="rotina_boletos")
-    with col_b:
-        st.toggle("Aviso de Contemplados (Sexta-feira)", key="aviso_contemplados")
-
-    st.divider()
-    if st.button("⚙️ Forçar Execução Manual Agora", type="secondary", key="force_cron_run"):
-        agora = datetime.now().isoformat(timespec="seconds")
-        linha = (
-            f"[{agora}] Execucao manual forcada (simulada).\n"
-            f"  · Rotina de boletos: {st.session_state.rotina_boletos}\n"
-            f"  · Aviso contemplados: {st.session_state.aviso_contemplados}\n"
-        )
-        st.session_state.cron_log_text = linha + st.session_state.cron_log_text
-        st.rerun()
-
-    st.markdown("**Logs recentes**")
-    st.code(st.session_state.cron_log_text.strip() + "\n")
-
+    # STATUS DOS AGENDAMENTOS (Sempre visível no fundo da página)
     st.divider()
     st.subheader("📋 Status dos Agendamentos")
-
+    
+    import glob
+    import os
+    import json
     pasta_agendamentos = "data/agendamentos"
     os.makedirs(pasta_agendamentos, exist_ok=True)
     arquivos_job = glob.glob(f"{pasta_agendamentos}/job_*.json")
-
+    
     if arquivos_job:
         for job_file in arquivos_job:
             try:
                 with open(job_file, "r", encoding="utf-8") as f:
                     job_data = json.load(f)
-
+                
                 status = job_data.get("status", "pendente")
-                cor_status = (
-                    "🟠"
-                    if status == "pendente"
-                    else "🔵" if status == "processando" else "🟢" if status == "concluido" else "🔴"
-                )
-
-                with st.expander(
-                    f"{cor_status} Lote: {job_data.get('chave_acao', 'N/A')} | Data: {job_data.get('data_execucao', 'N/A')} às {job_data.get('hora_execucao', 'N/A')} | Status: {str(status).upper()}"
-                ):
+                cor_status = "🟠" if status == "pendente" else "🔵" if status == "processando" else "🟢" if status == "concluido" else "🔴"
+                
+                with st.expander(f"{cor_status} Lote: {job_data.get('chave_acao', 'N/A')} | Data: {job_data.get('data_execucao', 'N/A')} às {job_data.get('hora_execucao', 'N/A')} | Status: {status.upper()}"):
                     st.write(f"**ID da Tarefa:** {job_data.get('id')}")
                     st.write(f"**Data de Criação:** {job_data.get('criado_em', 'N/A')}")
-
+                    
                     if status == "concluido" and "resultado_csv" in job_data:
-                        caminho_res = str(job_data["resultado_csv"])
+                        caminho_res = job_data["resultado_csv"]
                         if os.path.exists(caminho_res):
                             with open(caminho_res, "rb") as file_csv:
                                 st.download_button(
                                     label="📥 Descarregar Resultado (CSV)",
                                     data=file_csv,
-                                    file_name=f"resultado_lote_{job_data.get('id', 'job')}.csv",
+                                    file_name=f"resultado_lote_{job_data['id']}.csv",
                                     mime="text/csv",
-                                    key=f"dl_job_{job_data.get('id', job_file)}",
+                                    key=f"dl_job_{job_data['id']}"
                                 )
                     elif status == "erro":
                         st.error(f"Erro: {job_data.get('detalhes_erro', 'Falha desconhecida')}")
-            except Exception:
+            except Exception as e:
                 pass
     else:
         st.info("Nenhum agendamento pendente ou concluído encontrado.")
