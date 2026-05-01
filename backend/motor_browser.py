@@ -8,6 +8,7 @@ O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ from langchain_openai import ChatOpenAI
 import pandas as pd
 from pydantic import BaseModel, Field
 from playwright.async_api import Browser, async_playwright
+import requests
 
 load_dotenv()
 os.makedirs("data", exist_ok=True)
@@ -328,6 +330,120 @@ def _arquivo_pdf_pronto_e_integro(caminho_pdf: str, timeout_segundos: int = 45) 
 
     logging.info(f"[DOWNLOAD] Download concluído, tamanho: {tamanho_final} bytes")
     return True
+
+
+def _arquivo_pdf_valido(caminho_pdf: str) -> bool:
+    """Validação imediata: existência, tamanho mínimo e assinatura PDF."""
+    if not os.path.exists(caminho_pdf):
+        return False
+    tamanho = os.path.getsize(caminho_pdf)
+    if tamanho <= 1024:
+        return False
+    try:
+        with open(caminho_pdf, "rb") as f:
+            assinatura = f.read(5)
+        return assinatura == b"%PDF-"
+    except OSError:
+        return False
+
+
+async def _extrator_universal_de_download(page: Any, botao_locator: str, caminho_destino: str) -> bool:
+    """
+    Estratégia tripla para download robusto:
+    1) save_as nativo com validação imediata.
+    2) GET autenticado via Python com cookies/sessão.
+    3) Fallback blob/base64 via page.evaluate.
+    """
+    os.makedirs(str(Path(caminho_destino).parent), exist_ok=True)
+    download_url = ""
+
+    # Camada 1: stream nativo do Playwright
+    try:
+        logging.info("[DOWNLOAD] Camada 1: aguardando evento nativo de download...")
+        async with page.expect_download(timeout=60000) as download_info:
+            elementos = page.locator(botao_locator)
+            quantidade = await elementos.count()
+            sucesso_clique = False
+            for i in range(quantidade):
+                if await elementos.nth(i).is_visible():
+                    await elementos.nth(i).click(timeout=5000)
+                    sucesso_clique = True
+                    break
+            if not sucesso_clique:
+                await elementos.first.click(timeout=5000, force=True)
+
+        download = await download_info.value
+        download_url = str(getattr(download, "url", "") or "")
+        logging.info(f"[DOWNLOAD] Evento capturado. URL detectada: {download_url or 'N/A'}")
+        await download.save_as(caminho_destino)
+        if _arquivo_pdf_valido(caminho_destino):
+            logging.info(f"[DOWNLOAD] Camada 1 concluída com sucesso: {caminho_destino}")
+            return True
+        logging.warning("[DOWNLOAD] Camada 1 falhou na validação imediata. Avançando fallback...")
+    except Exception as exc:
+        logging.warning(f"[DOWNLOAD] Camada 1 falhou: {exc}")
+
+    # Camada 2: requisição autenticada no Python (se URL não blob)
+    if download_url and not download_url.startswith("blob:"):
+        try:
+            logging.info("[DOWNLOAD] Camada 2: tentativa via requisição autenticada Python...")
+            cookies = await page.context.cookies()
+            cookies_dict = {str(c.get("name", "")): str(c.get("value", "")) for c in cookies if c.get("name")}
+            user_agent = await page.evaluate("() => navigator.userAgent")
+            headers = {
+                "User-Agent": str(user_agent or ""),
+                "Accept": "application/pdf,application/octet-stream,*/*",
+            }
+
+            def _baixar_sync() -> None:
+                resp = requests.get(download_url, headers=headers, cookies=cookies_dict, timeout=60)
+                resp.raise_for_status()
+                with open(caminho_destino, "wb") as f:
+                    f.write(resp.content)
+
+            await asyncio.to_thread(_baixar_sync)
+            if _arquivo_pdf_valido(caminho_destino):
+                logging.info(f"[DOWNLOAD] Camada 2 concluída com sucesso: {caminho_destino}")
+                return True
+            logging.warning("[DOWNLOAD] Camada 2 falhou na validação. Avançando fallback blob...")
+        except Exception as exc:
+            logging.warning(f"[DOWNLOAD] Camada 2 falhou: {exc}")
+
+    # Camada 3: blob -> base64 no browser -> bytes no Python
+    if download_url.startswith("blob:"):
+        try:
+            logging.info("[DOWNLOAD] Camada 3: fallback blob/base64...")
+            conteudo_b64 = await page.evaluate(
+                """
+                async (blobUrl) => {
+                    const response = await fetch(blobUrl);
+                    const blob = await response.blob();
+                    return await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => {
+                            const dataUrl = String(reader.result || "");
+                            const idx = dataUrl.indexOf(",");
+                            resolve(idx >= 0 ? dataUrl.slice(idx + 1) : "");
+                        };
+                        reader.onerror = () => reject(new Error("Falha no FileReader"));
+                        reader.readAsDataURL(blob);
+                    });
+                }
+                """,
+                download_url,
+            )
+            if not conteudo_b64:
+                raise RuntimeError("Base64 vazio retornado do blob")
+            binario = base64.b64decode(str(conteudo_b64))
+            with open(caminho_destino, "wb") as f:
+                f.write(binario)
+            if _arquivo_pdf_valido(caminho_destino):
+                logging.info(f"[DOWNLOAD] Camada 3 concluída com sucesso: {caminho_destino}")
+                return True
+        except Exception as exc:
+            logging.warning(f"[DOWNLOAD] Camada 3 falhou: {exc}")
+
+    raise RuntimeError(f"Falha ao obter PDF íntegro após todas as camadas: {caminho_destino}")
 
 
 async def _aguardar_arquivo_estavel(caminho_arquivo: str, timeout_segundos: int = 45) -> bool:
@@ -732,23 +848,8 @@ async def acionar_ia_cartografa(
                         os.makedirs("downloads", exist_ok=True)
                         downloads_dir = raiz / "downloads"
                         downloads_dir.mkdir(parents=True, exist_ok=True)
-                        async with page.expect_download(timeout=60000) as download_info:
-                            elementos = page.locator(seletor)
-                            quantidade = await elementos.count()
-                            sucesso_clique = False
-
-                            for i in range(quantidade):
-                                if await elementos.nth(i).is_visible():
-                                    await elementos.nth(i).click(timeout=5000)
-                                    sucesso_clique = True
-                                    break
-
-                            if not sucesso_clique:
-                                await elementos.first.click(timeout=5000, force=True)
-                        download = await download_info.value
-                        caminho_arquivo = downloads_dir / download.suggested_filename
-                        await download.save_as(str(caminho_arquivo))
-                        await _aguardar_arquivo_estavel(str(caminho_arquivo), timeout_segundos=45)
+                        caminho_arquivo = downloads_dir / f"{nome_arquivo}.pdf"
+                        await _extrator_universal_de_download(page, seletor, str(caminho_arquivo))
                         chave = f"arquivo_{seletor}"
                         dados_extraidos[chave] = str(caminho_arquivo.relative_to(raiz))
                         _LOGGER.info(f"[DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
@@ -945,24 +1046,8 @@ async def executar_acao_rapida(
 
                     elif tipo_acao == "download_pdf":
                         os.makedirs("downloads", exist_ok=True)
-                        async with page.expect_download(timeout=60000) as download_info:
-                            elementos = page.locator(seletor)
-                            quantidade = await elementos.count()
-                            sucesso_clique_dl = False
-
-                            for i in range(quantidade):
-                                if await elementos.nth(i).is_visible():
-                                    await elementos.nth(i).click(timeout=5000)
-                                    sucesso_clique_dl = True
-                                    break
-
-                            if not sucesso_clique_dl:
-                                await elementos.first.click(timeout=5000, force=True)
-
-                        download = await download_info.value
-                        caminho_arquivo = f"downloads/{download.suggested_filename}"
-                        await download.save_as(caminho_arquivo)
-                        await _aguardar_arquivo_estavel(caminho_arquivo, timeout_segundos=45)
+                        caminho_arquivo = f"downloads/{re.sub(r'[^\w\\-.]+', '_', str(nome_acao or 'acao'))}.pdf"
+                        await _extrator_universal_de_download(page, seletor, caminho_arquivo)
                         arquivos_baixados.append(caminho_arquivo)
 
                 except Exception as e:
