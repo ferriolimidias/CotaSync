@@ -674,6 +674,7 @@ async def acionar_ia_cartografa(
                         download = await download_info.value
                         caminho_arquivo = downloads_dir / download.suggested_filename
                         await download.save_as(str(caminho_arquivo))
+                        await asyncio.sleep(2)
                         chave = f"arquivo_{seletor}"
                         dados_extraidos[chave] = str(caminho_arquivo.relative_to(raiz))
                         _LOGGER.info(f"[DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
