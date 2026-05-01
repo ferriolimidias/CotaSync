@@ -137,7 +137,7 @@ async def revisar_e_otimizar_passos(objetivo: str, passos_brutos: list) -> list:
 
         logging.info("[CARTÓGRAFO] Iniciando revisão e otimização do mapa com LLM...")
         response = await acompletion(
-            model="gemini/gemini-2.5-flash",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt_sistema},
                 {"role": "user", "content": prompt_usuario},
