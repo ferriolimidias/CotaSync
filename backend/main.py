@@ -61,14 +61,18 @@ async def verificar_fila_agendamentos():
 
     while True:
         try:
-            agora = datetime.now().strftime("%H:%M")
-            arquivos_job = glob.glob(f"{pasta}/job_*.json")
+            agora_data = datetime.now().strftime("%Y-%m-%d")
+            agora_hora = datetime.now().strftime("%H:%M")
+            arquivos_job = glob.glob("data/agendamentos/job_*.json")
 
             for caminho_json in arquivos_job:
                 with open(caminho_json, "r", encoding="utf-8") as f:
                     job = json.load(f)
 
-                if job.get("status") == "pendente" and job.get("hora_execucao") == agora:
+                data_job = job.get("data_execucao", agora_data)
+                hora_job = job.get("hora_execucao")
+
+                if job.get("status") == "pendente" and data_job == agora_data and hora_job == agora_hora:
                     logging.info(f"[CRON] Iniciando processamento do lote agendado: {job['id']}")
 
                     job["status"] = "processando"

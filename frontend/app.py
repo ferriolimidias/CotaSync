@@ -537,7 +537,48 @@ elif menu_selecionado == "Agendamentos e Filas":
                                 )
                         with col2:
                             if st.button("⏰ Agendar para o futuro", use_container_width=True):
-                                st.info("A ligação do CRON (APScheduler) será finalizada na Etapa 3!")
+                                st.session_state.mostrando_agendador = True
+
+                        if st.session_state.get("mostrando_agendador", False):
+                            st.divider()
+                            st.markdown("### 📅 Configurar Agendamento")
+
+                            col_data, col_hora = st.columns(2)
+                            with col_data:
+                                data_agendamento = st.date_input("Data de Início")
+                            with col_hora:
+                                hora_agendamento = st.time_input("Hora de Início")
+
+                            if st.button("Confirmar Agendamento", type="primary"):
+                                import datetime
+                                import uuid
+
+                                os.makedirs("data/agendamentos", exist_ok=True)
+                                job_id = str(uuid.uuid4())[:8]
+                                caminho_csv = f"data/agendamentos/lote_{job_id}.csv"
+                                caminho_json = f"data/agendamentos/job_{job_id}.json"
+
+                                df_lote.to_csv(caminho_csv, index=False)
+
+                                config_job = {
+                                    "id": job_id,
+                                    "chave_acao": chave_acao_selecionada,
+                                    "mapeamento": mapeamento_colunas,
+                                    "caminho_csv": caminho_csv,
+                                    "data_execucao": data_agendamento.strftime("%Y-%m-%d"),
+                                    "hora_execucao": hora_agendamento.strftime("%H:%M"),
+                                    "status": "pendente",
+                                    "criado_em": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                }
+
+                                with open(caminho_json, "w", encoding="utf-8") as f:
+                                    json.dump(config_job, f, ensure_ascii=False, indent=4)
+
+                                st.success(
+                                    f"✅ Lote agendado com sucesso para {data_agendamento.strftime('%d/%m/%Y')} às {hora_agendamento.strftime('%H:%M')}! Pode fechar o sistema."
+                                )
+                                st.session_state.mostrando_agendador = False
+                                st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao ler a planilha: {str(e)}")
 
@@ -606,7 +647,7 @@ elif menu_selecionado == "Agendamentos e Filas":
                 )
 
                 with st.expander(
-                    f"{cor_status} Lote: {job_data.get('chave_acao', 'N/A')} | Hora: {job_data.get('hora_execucao', 'N/A')} | Status: {str(status).upper()}"
+                    f"{cor_status} Lote: {job_data.get('chave_acao', 'N/A')} | Data: {job_data.get('data_execucao', 'N/A')} às {job_data.get('hora_execucao', 'N/A')} | Status: {str(status).upper()}"
                 ):
                     st.write(f"**ID da Tarefa:** {job_data.get('id')}")
                     st.write(f"**Data de Criação:** {job_data.get('criado_em', 'N/A')}")
