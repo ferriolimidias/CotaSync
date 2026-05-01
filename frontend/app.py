@@ -572,6 +572,23 @@ elif menu_selecionado == "Agendamentos e Filas":
                             st.rerun()
             except Exception as e:
                 st.error(f"Erro ao ler a planilha: {str(e)}")
+        else:
+            # SE O UTILIZADOR AINDA NÃO SUBIU O EXCEL, MOSTRA UM PLACEHOLDER CLARO
+            st.divider()
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.markdown("### 🚀 Execução Imediata")
+                st.button("Iniciar Processamento Agora", disabled=True, key="btn_fake_run", use_container_width=True)
+
+            with col2:
+                st.markdown("### 📅 Agendamento Futuro")
+                st.button("⏰ Agendar para o futuro", disabled=True, key="btn_fake_cron", use_container_width=True)
+
+            st.warning(
+                "⚠️ **Ação Necessária:** Para libertar o Calendário de Agendamentos e a Execução em Lote, "
+                "por favor faça o upload da sua planilha (.xlsx ou .csv) no campo acima."
+            )
 
     # STATUS DOS AGENDAMENTOS (Sempre visível no fundo da página)
     st.divider()
