@@ -292,6 +292,12 @@ with st.sidebar:
                     f"Preencha {chave_var}",
                     key=f"acao_var_{chave_acao}_{chave_var}",
                 )
+        st.divider()
+        converter_pdf_sidebar = st.checkbox(
+            "🔄 Converter PDF p/ Excel",
+            key="chk_pdf_sidebar",
+            help="Extrai tabelas de PDFs baixados para planilhas .xlsx",
+        )
         if st.button("🚀 Disparar Ação", use_container_width=True, key="acao_sidebar_btn"):
             if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
                 faltantes = [str(v) for v in variaveis_necessarias if not str(dados_digitados.get(str(v), "")).strip()]
@@ -301,7 +307,13 @@ with st.sidebar:
                     st.session_state.messages.append({"role": "user", "content": chave_acao})
                     salvar_historico_disco(st.session_state.messages)
                     with st.spinner("Executando ação parametrizada..."):
-                        resultado_direto = asyncio.run(executar_acao_fast_track(chave_acao, dados_digitados))
+                        resultado_direto = asyncio.run(
+                            executar_acao_fast_track(
+                                chave_acao,
+                                dados_digitados,
+                                converter_pdf_excel=converter_pdf_sidebar,
+                            )
+                        )
                     if isinstance(resultado_direto, dict):
                         st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
                     st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
@@ -310,7 +322,18 @@ with st.sidebar:
             else:
                 st.session_state.messages.append({"role": "user", "content": chave_acao})
                 salvar_historico_disco(st.session_state.messages)
-                st.session_state._pending_agent = True
+                with st.spinner("Executando ação rápida..."):
+                    resultado_direto = asyncio.run(
+                        executar_acao_fast_track(
+                            chave_acao,
+                            None,
+                            converter_pdf_excel=converter_pdf_sidebar,
+                        )
+                    )
+                if isinstance(resultado_direto, dict):
+                    st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
+                st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
+                salvar_historico_disco(st.session_state.messages)
                 st.rerun()
     else:
         st.caption("Sem ações aprendidas no momento.")
