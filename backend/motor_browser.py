@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -248,7 +249,6 @@ def _carregar_ui_map() -> dict:
 def _converter_pdf_para_excel(caminho_pdf: str) -> str:
     """Extrai tabelas de um PDF e salva como ficheiro Excel (.xlsx)."""
     import logging
-    import os
 
     import pandas as pd
     try:
@@ -261,6 +261,10 @@ def _converter_pdf_para_excel(caminho_pdf: str) -> str:
     dados = []
 
     try:
+        if not _arquivo_pdf_pronto_e_integro(caminho_pdf, timeout_segundos=45):
+            logging.error(f"[CONVERSÃO] PDF inválido/incompleto: {caminho_pdf}")
+            return caminho_pdf
+
         with pdfplumber.open(caminho_pdf) as pdf:
             for pagina in pdf.pages:
                 tabelas = pagina.extract_tables()
@@ -280,6 +284,76 @@ def _converter_pdf_para_excel(caminho_pdf: str) -> str:
     except Exception as e:
         logging.error(f"[CONVERSÃO] Erro crítico ao converter {caminho_pdf}: {e}")
         return caminho_pdf
+
+
+def _arquivo_pdf_pronto_e_integro(caminho_pdf: str, timeout_segundos: int = 45) -> bool:
+    """Espera arquivo estabilizar e valida assinatura básica de PDF."""
+    inicio = time.time()
+    tamanho_anterior = -1
+    repeticoes_mesmo_tamanho = 0
+
+    logging.info(f"[DOWNLOAD] Aguardando arquivo no disco: {caminho_pdf}")
+    while (time.time() - inicio) < timeout_segundos:
+        if os.path.exists(caminho_pdf):
+            tamanho_atual = os.path.getsize(caminho_pdf)
+            logging.info(f"[DOWNLOAD] Download em andamento... tamanho atual: {tamanho_atual} bytes")
+            if tamanho_atual > 0:
+                if tamanho_atual == tamanho_anterior:
+                    repeticoes_mesmo_tamanho += 1
+                else:
+                    repeticoes_mesmo_tamanho = 0
+                tamanho_anterior = tamanho_atual
+                if repeticoes_mesmo_tamanho >= 1:
+                    break
+        time.sleep(1)
+
+    if not os.path.exists(caminho_pdf):
+        logging.error(f"[DOWNLOAD] Timeout: arquivo não apareceu em disco: {caminho_pdf}")
+        return False
+
+    tamanho_final = os.path.getsize(caminho_pdf)
+    if tamanho_final <= 1024:
+        logging.error(f"[DOWNLOAD] Arquivo muito pequeno para PDF válido ({tamanho_final} bytes): {caminho_pdf}")
+        return False
+
+    try:
+        with open(caminho_pdf, "rb") as f:
+            assinatura = f.read(5)
+        if assinatura != b"%PDF-":
+            logging.error(f"[DOWNLOAD] Assinatura inválida para PDF em {caminho_pdf}: {assinatura!r}")
+            return False
+    except OSError as exc:
+        logging.error(f"[DOWNLOAD] Erro ao validar PDF {caminho_pdf}: {exc}")
+        return False
+
+    logging.info(f"[DOWNLOAD] Download concluído, tamanho: {tamanho_final} bytes")
+    return True
+
+
+async def _aguardar_arquivo_estavel(caminho_arquivo: str, timeout_segundos: int = 45) -> bool:
+    """Polling assíncrono para garantir término da escrita no disco."""
+    inicio = time.time()
+    tamanho_anterior = -1
+    repeticoes_mesmo_tamanho = 0
+
+    logging.info(f"[DOWNLOAD] Aguardando início do download em: {caminho_arquivo}")
+    while (time.time() - inicio) < timeout_segundos:
+        if os.path.exists(caminho_arquivo):
+            tamanho_atual = os.path.getsize(caminho_arquivo)
+            logging.info(f"[DOWNLOAD] Download em andamento... tamanho atual: {tamanho_atual} bytes")
+            if tamanho_atual > 0:
+                if tamanho_atual == tamanho_anterior:
+                    repeticoes_mesmo_tamanho += 1
+                else:
+                    repeticoes_mesmo_tamanho = 0
+                tamanho_anterior = tamanho_atual
+                if repeticoes_mesmo_tamanho >= 1:
+                    logging.info(f"[DOWNLOAD] Download concluído, tamanho: {tamanho_atual} bytes")
+                    return True
+        await asyncio.sleep(1)
+
+    logging.error(f"[DOWNLOAD] Timeout ao aguardar escrita completa: {caminho_arquivo}")
+    return False
 
 
 async def processar_lote_com_semaforo(
@@ -674,7 +748,7 @@ async def acionar_ia_cartografa(
                         download = await download_info.value
                         caminho_arquivo = downloads_dir / download.suggested_filename
                         await download.save_as(str(caminho_arquivo))
-                        await asyncio.sleep(2)
+                        await _aguardar_arquivo_estavel(str(caminho_arquivo), timeout_segundos=45)
                         chave = f"arquivo_{seletor}"
                         dados_extraidos[chave] = str(caminho_arquivo.relative_to(raiz))
                         _LOGGER.info(f"[DOWNLOAD] Ficheiro salvo em: {caminho_arquivo}")
@@ -888,7 +962,7 @@ async def executar_acao_rapida(
                         download = await download_info.value
                         caminho_arquivo = f"downloads/{download.suggested_filename}"
                         await download.save_as(caminho_arquivo)
-                        await asyncio.sleep(2)
+                        await _aguardar_arquivo_estavel(caminho_arquivo, timeout_segundos=45)
                         arquivos_baixados.append(caminho_arquivo)
 
                 except Exception as e:
