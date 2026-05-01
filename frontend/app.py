@@ -387,9 +387,10 @@ if menu_selecionado == "Chat & Ações":
 
                         with col1:
                             with open(caminho_resolvido, "rb") as f:
+                                arquivo_bytes = f.read()
                                 st.download_button(
                                     label="📄 Baixar PDF",
-                                    data=f,
+                                    data=arquivo_bytes,
                                     file_name=nome_arq,
                                     mime="application/pdf",
                                     key=f"dl_pdf_{i}_{idx_arq}_{nome_arq}",
@@ -400,9 +401,10 @@ if menu_selecionado == "Chat & Ações":
                                 caminho_excel = caminho_resolvido.replace(".pdf", ".xlsx")
                                 if os.path.exists(caminho_excel):
                                     with open(caminho_excel, "rb") as f_xls:
+                                        excel_bytes = f_xls.read()
                                         st.download_button(
                                             label="📊 Baixar Excel",
-                                            data=f_xls,
+                                            data=excel_bytes,
                                             file_name=os.path.basename(caminho_excel),
                                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                             key=f"dl_xls_{i}_{idx_arq}_{nome_arq}",
@@ -654,9 +656,10 @@ elif menu_selecionado == "Agendamentos e Filas":
                         caminho_res = job_data["resultado_csv"]
                         if os.path.exists(caminho_res):
                             with open(caminho_res, "rb") as file_csv:
+                                csv_bytes = file_csv.read()
                                 st.download_button(
                                     label="📥 Descarregar Resultado (CSV)",
-                                    data=file_csv,
+                                    data=csv_bytes,
                                     file_name=f"resultado_lote_{job_data['id']}.csv",
                                     mime="text/csv",
                                     key=f"dl_job_{job_data['id']}"

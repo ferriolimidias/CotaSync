@@ -108,6 +108,61 @@ async def gerar_nome_acao(instrucao: str) -> str:
     return nome
 
 
+async def revisar_e_otimizar_passos(objetivo: str, passos_brutos: list) -> list:
+    """Passa o mapa bruto por uma revisão LLM para remover loops e redundâncias."""
+    import logging
+
+    # Se a rotina for muito curta, nem precisa gastar token revisando
+    if len(passos_brutos) <= 2:
+        return passos_brutos
+
+    prompt_sistema = (
+        "Você é um Engenheiro de Qualidade de RPA. "
+        "Sua função é analisar uma lista de passos (JSON) gravados por um robô explorador e otimizá-la.\n"
+        "Regras:\n"
+        "1. Remova passos redundantes ou em loop (ex: a mesma ação no mesmo seletor repetida várias vezes sem necessidade, como múltiplos 'download_pdf' seguidos no mesmo botão).\n"
+        "2. Mantenha a ordem cronológica estrita.\n"
+        "3. Não altere o nome das ações, seletores ou variáveis.\n"
+        "4. Retorne APENAS um array JSON válido com a lista de passos otimizada, sem marcações markdown ou texto extra."
+    )
+
+    prompt_usuario = (
+        f"Objetivo da Rotina: {objetivo}\n\n"
+        f"Passos Brutos (JSON):\n{json.dumps(passos_brutos, indent=2, ensure_ascii=False)}\n\n"
+        "Retorne apenas o JSON otimizado."
+    )
+
+    try:
+        from litellm import acompletion
+
+        logging.info("[CARTÓGRAFO] Iniciando revisão e otimização do mapa com LLM...")
+        response = await acompletion(
+            model="gemini/gemini-2.5-flash",
+            messages=[
+                {"role": "system", "content": prompt_sistema},
+                {"role": "user", "content": prompt_usuario},
+            ],
+            temperature=0.0,
+        )
+
+        conteudo = str(response.choices[0].message.content or "").strip()
+        if conteudo.startswith("```json"):
+            conteudo = conteudo[7:]
+        if conteudo.endswith("```"):
+            conteudo = conteudo[:-3]
+
+        passos_otimizados = json.loads(conteudo.strip())
+        if isinstance(passos_otimizados, list):
+            logging.info(
+                f"[CARTÓGRAFO] Mapa otimizado! Reduzido de {len(passos_brutos)} para {len(passos_otimizados)} passos."
+            )
+            return passos_otimizados
+        return passos_brutos
+    except Exception as e:
+        logging.error(f"[CARTÓGRAFO] Erro na revisão do mapa, salvando versão bruta como fallback: {e}")
+        return passos_brutos
+
+
 @tool
 async def consultar_cadastro_erp(documento: str) -> str:
     """
@@ -269,6 +324,8 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
                 "estão incorretos ou o sistema pediu um CAPTCHA/Código que eu não consigo ver. "
                 "Pode verificar as configurações ou me ajudar a passar dessa tela no 'Logs do Sistema'?"
             )
+
+        passos_reais = await revisar_e_otimizar_passos(instrucao_execucao, passos_reais)
 
         ui_map = carregar_ui_map()
         ui_map.setdefault("acoes_conhecidas", {})
