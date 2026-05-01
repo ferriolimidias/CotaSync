@@ -376,6 +376,7 @@ async def _extrator_universal_de_download(page: Any, botao_locator: str, caminho
         download_url = str(getattr(download, "url", "") or "")
         logging.info(f"[DOWNLOAD] Evento capturado. URL detectada: {download_url or 'N/A'}")
         await download.save_as(caminho_destino)
+        await asyncio.sleep(2)  # Garantia extra de flush no disco após save_as
         if _arquivo_pdf_valido(caminho_destino):
             logging.info(f"[DOWNLOAD] Camada 1 concluída com sucesso: {caminho_destino}")
             return True
