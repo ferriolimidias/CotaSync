@@ -887,6 +887,7 @@ async def executar_acao_rapida(
                         download = await download_info.value
                         caminho_arquivo = f"downloads/{download.suggested_filename}"
                         await download.save_as(caminho_arquivo)
+                        await asyncio.sleep(2)
                         arquivos_baixados.append(caminho_arquivo)
 
                 except Exception as e:

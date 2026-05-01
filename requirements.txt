@@ -16,3 +16,4 @@ streamlit-option-menu
 pandas
 pdfplumber
 openpyxl
+litellm
