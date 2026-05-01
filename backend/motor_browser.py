@@ -245,11 +245,49 @@ def _carregar_ui_map() -> dict:
         return {"acoes_conhecidas": {}}
 
 
+def _converter_pdf_para_excel(caminho_pdf: str) -> str:
+    """Extrai tabelas de um PDF e salva como ficheiro Excel (.xlsx)."""
+    import logging
+    import os
+
+    import pandas as pd
+    try:
+        import pdfplumber
+    except ImportError:
+        logging.error("[CONVERSÃO] Biblioteca pdfplumber não instalada.")
+        return caminho_pdf
+
+    caminho_excel = caminho_pdf.replace(".pdf", ".xlsx")
+    dados = []
+
+    try:
+        with pdfplumber.open(caminho_pdf) as pdf:
+            for pagina in pdf.pages:
+                tabelas = pagina.extract_tables()
+                for tabela in tabelas:
+                    for linha in tabela:
+                        dados.append([str(c).replace("\n", " ").strip() if c else "" for c in linha])
+
+        if dados:
+            df = pd.DataFrame(dados)
+            df.to_excel(caminho_excel, index=False, header=False)
+            logging.info(f"[CONVERSÃO] PDF convertido para Excel com sucesso: {caminho_excel}")
+            return caminho_excel
+        else:
+            logging.warning(f"[CONVERSÃO] Nenhuma tabela estruturada encontrada no PDF: {caminho_pdf}")
+            return caminho_pdf
+
+    except Exception as e:
+        logging.error(f"[CONVERSÃO] Erro crítico ao converter {caminho_pdf}: {e}")
+        return caminho_pdf
+
+
 async def processar_lote_com_semaforo(
     chave_acao: str,
     lista_linhas: list[dict],
     mapeamento: dict,
     max_concorrencia: int = 5,
+    converter_pdf_excel: bool = False,
 ) -> list[dict]:
     """
     Processa uma lista de dados (linhas do Excel) de forma assíncrona e controlada.
@@ -271,7 +309,12 @@ async def processar_lote_com_semaforo(
 
             try:
                 logging.info(f"[LOTE] Iniciando linha {index}...")
-                resultado = await executar_acao_rapida(chave_acao, passos_playwright, dados_variaveis)
+                resultado = await executar_acao_rapida(
+                    chave_acao,
+                    passos_playwright,
+                    dados_variaveis,
+                    converter_pdf_excel,
+                )
                 textos_extraidos = str(resultado.get("dados_extraidos", "")) if resultado.get("dados_extraidos") else ""
 
                 return {
@@ -701,7 +744,12 @@ async def acionar_ia_cartografa(
     }
 
 
-async def executar_acao_rapida(nome_acao: str, passos_playwright: list, dados_variaveis: dict | None = None) -> dict:
+async def executar_acao_rapida(
+    nome_acao: str,
+    passos_playwright: list,
+    dados_variaveis: dict | None = None,
+    converter_pdf_excel: bool = False,
+) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Fast-Track), repetindo os passos técnicos.
     """
@@ -842,7 +890,11 @@ async def executar_acao_rapida(nome_acao: str, passos_playwright: list, dados_va
                         download = await download_info.value
                         caminho_arquivo = f"downloads/{download.suggested_filename}"
                         await download.save_as(caminho_arquivo)
-                        arquivos_baixados.append(caminho_arquivo)
+                        if converter_pdf_excel:
+                            caminho_convertido = _converter_pdf_para_excel(caminho_arquivo)
+                            arquivos_baixados.append(caminho_convertido)
+                        else:
+                            arquivos_baixados.append(caminho_arquivo)
 
                 except Exception as e:
                     raise Exception(

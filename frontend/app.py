@@ -488,6 +488,15 @@ elif menu_selecionado == "Agendamentos e Filas":
                 # 4. Botões de Disparo
                 if todas_mapeadas:
                     st.divider()
+                    st.markdown("### 🛠️ Opções de Processamento")
+                    converter_pdfs = st.checkbox(
+                        "🔄 Tentar converter PDFs de relatórios para Excel (.xlsx)?",
+                        help=(
+                            "Marque se a rotina baixa um relatório em PDF que você deseja transformar em planilha. "
+                            "Deixe desmarcado para boletos/faturas normais."
+                        ),
+                    )
+                    st.divider()
                     col1, col2 = st.columns(2)
                     
                     with col1:
@@ -504,7 +513,8 @@ elif menu_selecionado == "Agendamentos e Filas":
                                     chave_acao=chave_acao_selecionada, 
                                     lista_linhas=lista_dados, 
                                     mapeamento=mapeamento_colunas, 
-                                    max_concorrencia=5
+                                    max_concorrencia=5,
+                                    converter_pdf_excel=converter_pdfs
                                 ))
                                 
                             df_resultado = df_lote.copy()
@@ -560,6 +570,7 @@ elif menu_selecionado == "Agendamentos e Filas":
                                 "caminho_csv": caminho_csv,
                                 "data_execucao": data_agendamento.strftime("%Y-%m-%d"),
                                 "hora_execucao": hora_agendamento.strftime("%H:%M"),
+                                "converter_pdf_excel": converter_pdfs,
                                 "status": "pendente",
                                 "criado_em": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             }
