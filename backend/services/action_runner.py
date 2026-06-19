@@ -59,15 +59,20 @@ def _mask_scalar(value: Any, *, reveal_last: int = 4) -> str:
     return f"{'*' * (len(text) - reveal_last)}{text[-reveal_last:]}"
 
 
+def mask_value_for_key(key: str, value: Any) -> Any:
+    if not _is_sensitive_key(key):
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return "[valor estruturado omitido]"
+
+    reveal_last = 2 if str(key or "").lower() == "cpf" else 4
+    return _mask_scalar(value, reveal_last=reveal_last)
+
+
 def mask_variables(variables: dict[str, Any]) -> dict[str, Any]:
     masked: dict[str, Any] = {}
     for key, value in variables.items():
-        if _is_sensitive_key(key):
-            masked[str(key)] = _mask_scalar(value)
-        elif isinstance(value, (str, int, float, bool)) or value is None:
-            masked[str(key)] = value
-        else:
-            masked[str(key)] = "[valor estruturado omitido]"
+        masked[str(key)] = mask_value_for_key(str(key), value)
     return masked
 
 
@@ -78,6 +83,15 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         if value:
             payload[key] = value
     return payload or None
+
+
+def _is_local_fixture(action: ActionDetail) -> bool:
+    return action.test_mode or str(action.execution_type or "").lower() == "local_fixture"
+
+
+def _run_local_fixture(action: ActionDetail, variables: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    echo = {variable.key: mask_value_for_key(variable.key, variables.get(variable.key)) for variable in action.variables}
+    return "Execucao local de teste concluida.", {"echo": echo, "fixture": True, "action_id": action.id}
 
 
 async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
@@ -99,17 +113,22 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
     update_run(run)
 
     try:
-        if action.steps_count <= 0:
+        if _is_local_fixture(action):
+            summary, payload = _run_local_fixture(action, request.variables)
+            run.status = "success"
+            run.result_summary = summary
+            run.result_payload = payload
+        elif action.steps_count <= 0:
             raise RuntimeError("Acao aprendida nao possui passos para execucao.")
+        else:
+            result = await executar_acao_fast_track(action.key, request.variables)
+            text = str(result.get("texto") or "").strip()
+            if text.startswith("❌") or "Falha" in text or "falha" in text:
+                raise RuntimeError(text or "Falha na execucao da acao.")
 
-        result = await executar_acao_fast_track(action.key, request.variables)
-        text = str(result.get("texto") or "").strip()
-        if text.startswith("❌") or "Falha" in text or "falha" in text:
-            raise RuntimeError(text or "Falha na execucao da acao.")
-
-        run.status = "success"
-        run.result_summary = text or "Execucao concluida."
-        run.result_payload = _safe_result_payload(result)
+            run.status = "success"
+            run.result_summary = text or "Execucao concluida."
+            run.result_payload = _safe_result_payload(result)
     except Exception as exc:
         logger.info("Run %s finalizada com erro: %s", run.id, exc)
         run.status = "error"

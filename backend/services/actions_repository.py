@@ -116,6 +116,8 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
     raw_steps = data.get("passos_playwright", [])
     steps_count = len(raw_steps) if isinstance(raw_steps, list) else 0
     action_id = _unique_action_id(slugify_action_id(name or key), used_ids)
+    execution_type_raw = data.get("tipo_execucao")
+    execution_type = str(execution_type_raw).strip() if execution_type_raw is not None else None
 
     summary = ActionSummary(
         id=action_id,
@@ -125,6 +127,8 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         variables=_normalize_variables(data.get("variaveis_necessarias", [])),
         steps_count=steps_count,
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
+        test_mode=bool(data.get("modo_teste", False)),
+        execution_type=execution_type or None,
         source=SOURCE_LABEL,
     )
     return ActionDetail(**summary.model_dump(), steps_preview=_steps_preview(raw_steps))

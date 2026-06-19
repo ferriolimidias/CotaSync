@@ -1,0 +1,15 @@
+{
+  "acoes_conhecidas": {
+    "Teste Local Eco CPF": {
+      "nome_amigavel": "Teste Local Eco CPF",
+      "descricao": "Fixture segura para testar contrato de actions/runs sem acessar sistema externo.",
+      "url_inicial": "about:blank",
+      "modo_teste": true,
+      "tipo_execucao": "local_fixture",
+      "passos_playwright": [],
+      "variaveis_necessarias": [
+        "cpf"
+      ]
+    }
+  }
+}

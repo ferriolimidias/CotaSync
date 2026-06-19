@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE_URL="${COTASYNC_API_BASE_URL:-http://127.0.0.1:8100}"
+TEST_CPF="123456789""00"
 
 curl -fsS "$BASE_URL/health" | python3 -m json.tool
 curl -fsS "$BASE_URL/api/actions" | python3 -m json.tool
@@ -16,7 +17,7 @@ ACTION_404_BODY="$(mktemp)"
 ACTION_404_STATUS="$(
   curl -sS -o "$ACTION_404_BODY" -w "%{http_code}" \
     -H "Content-Type: application/json" \
-    -d '{"variables":{"cpf":"12345678900"},"mode":"sync","requested_by":"api"}' \
+    -d "{\"variables\":{\"cpf\":\"$TEST_CPF\"},\"mode\":\"sync\",\"requested_by\":\"api\"}" \
     "$BASE_URL/api/actions/nao-existe/run"
 )"
 python3 -m json.tool "$ACTION_404_BODY"
@@ -26,7 +27,7 @@ if [ -n "${COTASYNC_RUN_FIXTURE_ACTION_ID:-}" ]; then
   RUN_BODY="$(mktemp)"
   curl -fsS -o "$RUN_BODY" \
     -H "Content-Type: application/json" \
-    -d "${COTASYNC_RUN_FIXTURE_PAYLOAD:-{\"variables\":{\"cpf\":\"12345678900\"},\"mode\":\"sync\",\"requested_by\":\"api\"}}" \
+    -d "${COTASYNC_RUN_FIXTURE_PAYLOAD:-{\"variables\":{\"cpf\":\"$TEST_CPF\"},\"mode\":\"sync\",\"requested_by\":\"api\"}}" \
     "$BASE_URL/api/actions/$COTASYNC_RUN_FIXTURE_ACTION_ID/run"
   python3 -m json.tool "$RUN_BODY"
   RUN_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run"]["id"])' "$RUN_BODY")"
