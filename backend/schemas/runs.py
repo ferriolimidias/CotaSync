@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+RunStatus = Literal["pending", "running", "success", "error"]
+RunMode = Literal["sync"]
+
+
+class ActionRunRequest(BaseModel):
+    variables: dict[str, Any] = Field(default_factory=dict)
+    mode: RunMode = "sync"
+    requested_by: str = "api"
+
+
+class RunRecord(BaseModel):
+    id: str
+    action_id: str
+    action_key: str
+    status: RunStatus
+    mode: RunMode = "sync"
+    requested_by: str = "api"
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    variables: dict[str, Any] = Field(default_factory=dict)
+    result_summary: str | None = None
+    result_payload: dict[str, Any] | None = None
+    error_message: str | None = None
+
+
+class ActionRunResponse(BaseModel):
+    status: str = "ok"
+    run: RunRecord
+
+
+class RunsListResponse(BaseModel):
+    status: str = "ok"
+    count: int
+    runs: list[RunRecord]
+
+
+class RunDetailResponse(BaseModel):
+    status: str = "ok"
+    run: RunRecord

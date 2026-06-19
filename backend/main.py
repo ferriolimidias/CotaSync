@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from backend.api.actions import router as actions_router
+from backend.api.runs import actions_run_router, runs_router
 from backend.motor_browser import processar_lote_com_semaforo, verificar_browserless
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
@@ -55,6 +56,8 @@ app = FastAPI(
 )
 
 app.include_router(actions_router)
+app.include_router(actions_run_router)
+app.include_router(runs_router)
 
 
 async def verificar_fila_agendamentos():

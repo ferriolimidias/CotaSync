@@ -22,5 +22,7 @@ data/*.xlsx
 data/agendamentos/
 data/chat_history.json
 data/erp_config.json
+data/runs/*.json
+!data/runs/.gitkeep
 
 reports/
