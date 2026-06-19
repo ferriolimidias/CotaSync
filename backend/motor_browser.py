@@ -16,6 +16,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -224,13 +225,81 @@ def _raiz_projeto() -> Path:
 
 def _ws_browserless() -> str:
     """
-    URL WebSocket do Browserless. No Docker Compose usamos `ws://browserless:3000`;
-    em desenvolvimento local, `BROWSERLESS_URL=ws://localhost:3000` no `.env`.
+    URL WebSocket do Browserless.
+
+    O compose de teste usa `ws://cotasync_test_browserless:3000`.
+    O compose original sobrescreve a variável para `ws://browserless:3000`.
     """
-    ws_url = os.getenv("BROWSERLESS_URL", "ws://localhost:3000").strip()
+    ws_url = os.getenv("BROWSERLESS_URL", "ws://cotasync_test_browserless:3000").strip()
     if not ws_url.startswith("ws"):
         ws_url = ws_url.replace("http://", "ws://").replace("https://", "wss://")
     return ws_url
+
+
+def browserless_url_segura() -> str:
+    """Retorna BROWSERLESS_URL sem credenciais ou query string."""
+    ws_url = _ws_browserless()
+    try:
+        parsed = urlsplit(ws_url)
+        hostname = parsed.hostname or ""
+        if parsed.port:
+            hostname = f"{hostname}:{parsed.port}"
+        if parsed.username or parsed.password:
+            hostname = f"***:***@{hostname}"
+        query = "***" if parsed.query else ""
+        return urlunsplit((parsed.scheme, hostname, parsed.path, query, ""))
+    except Exception:
+        return "ws://***"
+
+
+async def verificar_browserless(screenshot_path: str | None = None) -> dict[str, Any]:
+    """Valida a conexão CDP com Browserless sem acessar sistemas externos."""
+    inicio = time.monotonic()
+    ws_url = _ws_browserless()
+    playwright = None
+    browser: Browser | None = None
+    context = None
+    try:
+        playwright = await async_playwright().start()
+        browser = await playwright.chromium.connect_over_cdp(ws_url)
+        context = await browser.new_context(viewport={"width": 1280, "height": 720})
+        page = await context.new_page()
+        await page.goto("about:blank")
+        if screenshot_path:
+            destino = Path(screenshot_path)
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(destino), full_page=True)
+        elapsed_ms = int((time.monotonic() - inicio) * 1000)
+        return {
+            "status": "ok",
+            "browserless_url": browserless_url_segura(),
+            "elapsed_ms": elapsed_ms,
+            "screenshot": screenshot_path or "",
+        }
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - inicio) * 1000)
+        return {
+            "status": "erro",
+            "browserless_url": browserless_url_segura(),
+            "elapsed_ms": elapsed_ms,
+            "erro": str(exc),
+        }
+    finally:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        if playwright is not None:
+            try:
+                await playwright.stop()
+            except Exception:
+                pass
 
 
 def _carregar_ui_map() -> dict:
@@ -681,7 +750,7 @@ async def acionar_ia_cartografa(
     _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp("ws://browserless:3000")
+            browser = await p.chromium.connect_over_cdp(_ws_browserless())
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
             try:
@@ -942,7 +1011,7 @@ async def executar_acao_rapida(
     _LOGGER.info(f"[FAST-TRACK] Iniciando execução rápida da ação: {nome_acao}")
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp("ws://browserless:3000")
+            browser = await p.chromium.connect_over_cdp(_ws_browserless())
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = await context.new_page()
 

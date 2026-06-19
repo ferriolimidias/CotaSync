@@ -1,0 +1,101 @@
+name: cotasync_test
+
+services:
+  cotasync_test_browserless:
+    image: ghcr.io/browserless/chromium:latest
+    container_name: cotasync_test_browserless
+    ports:
+      - "${BROWSERLESS_PORT:-3010}:3000"
+    environment:
+      TIMEOUT: "600000"
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
+  cotasync_test_postgres:
+    image: postgres:15-alpine
+    container_name: cotasync_test_postgres
+    environment:
+      POSTGRES_USER: cotasync_test
+      POSTGRES_PASSWORD: cotasync_test_password
+      POSTGRES_DB: cotasync_test
+    volumes:
+      - cotasync_test_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cotasync_test -d cotasync_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
+  cotasync_test_redis:
+    image: redis:7-alpine
+    container_name: cotasync_test_redis
+    volumes:
+      - cotasync_test_redis_data:/data
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
+  cotasync_test_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cotasync_test_backend
+    command: backend
+    depends_on:
+      cotasync_test_browserless:
+        condition: service_started
+      cotasync_test_postgres:
+        condition: service_healthy
+      cotasync_test_redis:
+        condition: service_started
+    env_file:
+      - .env.test
+    environment:
+      BROWSERLESS_URL: ws://cotasync_test_browserless:3000
+      DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
+      REDIS_URL: redis://cotasync_test_redis:6379/0
+    ports:
+      - "${BACKEND_PORT:-8100}:8000"
+    volumes:
+      - .:/app
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
+  cotasync_test_frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cotasync_test_frontend
+    command: frontend
+    depends_on:
+      cotasync_test_backend:
+        condition: service_started
+    env_file:
+      - .env.test
+    environment:
+      BROWSERLESS_URL: ws://cotasync_test_browserless:3000
+      BACKEND_URL: http://cotasync_test_backend:8000
+      DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
+      REDIS_URL: redis://cotasync_test_redis:6379/0
+    ports:
+      - "${FRONTEND_PORT:-3100}:8501"
+    volumes:
+      - .:/app
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
+networks:
+  cotasync_test_net:
+    name: cotasync_test_net
+
+volumes:
+  cotasync_test_postgres_data:
+    name: cotasync_test_postgres_data
+  cotasync_test_redis_data:
+    name: cotasync_test_redis_data

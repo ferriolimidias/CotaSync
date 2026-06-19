@@ -18,7 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
-from backend.motor_browser import processar_lote_com_semaforo
+from backend.motor_browser import processar_lote_com_semaforo, verificar_browserless
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
 
@@ -123,6 +123,11 @@ async def startup_event():
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "cotasync"}
+
+
+@app.get("/api/health/browserless")
+async def health_browserless() -> dict[str, Any]:
+    return await verificar_browserless()
 
 
 def _extrair_remetente_e_texto_simulado(body: dict[str, Any]) -> tuple[str, str]:
