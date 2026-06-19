@@ -2,6 +2,7 @@ __pycache__
 *.py[cod]
 .git
 .env
+.env.*
 *.log
 .venv
 venv
@@ -9,3 +10,10 @@ venv
 .mypy_cache
 .ruff_cache
 OneDrive
+data/health
+data/agendamentos
+data/chat_history.json
+data/erp_config.json
+downloads
+logs
+reports

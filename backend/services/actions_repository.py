@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
+
+logger = logging.getLogger("cotasync.actions")
+
+SOURCE_LABEL = "data/ui_map.json"
+
+
+class ActionsRepositoryError(Exception):
+    """Erro seguro de leitura/parsing do catalogo de acoes."""
+
+
+@dataclass(frozen=True)
+class ActionsCatalog:
+    actions: list[ActionDetail]
+    exists: bool
+    warning: str | None = None
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def default_ui_map_path() -> Path:
+    return project_root() / "data" / "ui_map.json"
+
+
+def slugify_action_id(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    lowered = ascii_value.lower().strip()
+    slug = re.sub(r"[^a-z0-9]+", "-", lowered)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug or "acao"
+
+
+def _normalize_variable(raw: Any) -> ActionVariable | None:
+    if isinstance(raw, str):
+        key = raw.strip()
+        if not key:
+            return None
+        return ActionVariable(key=key, label=key, required=True)
+
+    if isinstance(raw, dict):
+        key = str(raw.get("key") or raw.get("name") or raw.get("id") or "").strip()
+        if not key:
+            return None
+        label = str(raw.get("label") or raw.get("nome") or key).strip() or key
+        required_raw = raw.get("required", raw.get("obrigatorio", True))
+        return ActionVariable(key=key, label=label, required=bool(required_raw))
+
+    return None
+
+
+def _normalize_variables(raw_variables: Any) -> list[ActionVariable]:
+    if not isinstance(raw_variables, list):
+        return []
+
+    variables: list[ActionVariable] = []
+    seen: set[str] = set()
+    for raw in raw_variables:
+        variable = _normalize_variable(raw)
+        if variable is None or variable.key in seen:
+            continue
+        variables.append(variable)
+        seen.add(variable.key)
+    return variables
+
+
+def _steps_preview(raw_steps: Any, limit: int = 10) -> list[ActionStepPreview]:
+    if not isinstance(raw_steps, list):
+        return []
+
+    preview: list[ActionStepPreview] = []
+    for index, raw_step in enumerate(raw_steps[:limit], start=1):
+        if not isinstance(raw_step, dict):
+            preview.append(
+                ActionStepPreview(index=index, type="desconhecido", has_selector=False, has_variable=False)
+            )
+            continue
+        step_type = str(raw_step.get("tipo") or raw_step.get("type") or "desconhecido").strip() or "desconhecido"
+        preview.append(
+            ActionStepPreview(
+                index=index,
+                type=step_type,
+                has_selector=bool(str(raw_step.get("seletor") or raw_step.get("selector") or "").strip()),
+                has_variable=bool(str(raw_step.get("variavel") or raw_step.get("variable") or "").strip()),
+            )
+        )
+    return preview
+
+
+def _unique_action_id(base_id: str, used_ids: set[str]) -> str:
+    candidate = base_id
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base_id}-{suffix}"
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
+def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDetail:
+    data = raw_action if isinstance(raw_action, dict) else {}
+    name = str(data.get("nome_amigavel") or data.get("name") or key).strip() or key
+    description = str(data.get("descricao") or data.get("description") or "").strip()
+    raw_steps = data.get("passos_playwright", [])
+    steps_count = len(raw_steps) if isinstance(raw_steps, list) else 0
+    action_id = _unique_action_id(slugify_action_id(name or key), used_ids)
+
+    summary = ActionSummary(
+        id=action_id,
+        key=key,
+        name=name,
+        description=description,
+        variables=_normalize_variables(data.get("variaveis_necessarias", [])),
+        steps_count=steps_count,
+        has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
+        source=SOURCE_LABEL,
+    )
+    return ActionDetail(**summary.model_dump(), steps_preview=_steps_preview(raw_steps))
+
+
+def _load_ui_map(path: Path) -> tuple[dict[str, Any], bool, str | None]:
+    if not path.is_file():
+        logger.info("ui_map nao encontrado em %s; retornando catalogo vazio.", path)
+        return {"acoes_conhecidas": {}}, False, "data/ui_map.json nao encontrado; catalogo vazio."
+
+    try:
+        raw = path.read_text(encoding="utf-8")
+        payload = json.loads(raw) if raw.strip() else {"acoes_conhecidas": {}}
+    except json.JSONDecodeError as exc:
+        logger.exception("JSON invalido em data/ui_map.json: %s", exc)
+        raise ActionsRepositoryError("data/ui_map.json invalido.") from exc
+    except OSError as exc:
+        logger.exception("Falha ao ler data/ui_map.json: %s", exc)
+        raise ActionsRepositoryError("Nao foi possivel ler data/ui_map.json.") from exc
+
+    if not isinstance(payload, dict):
+        raise ActionsRepositoryError("data/ui_map.json deve conter um objeto JSON.")
+    return payload, True, None
+
+
+def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
+    ui_map_path = path or default_ui_map_path()
+    payload, exists, warning = _load_ui_map(ui_map_path)
+    raw_actions = payload.get("acoes_conhecidas", {})
+    if raw_actions is None:
+        raw_actions = {}
+    if not isinstance(raw_actions, dict):
+        raise ActionsRepositoryError("Campo acoes_conhecidas deve ser um objeto.")
+
+    used_ids: set[str] = set()
+    actions = [
+        _normalize_action(str(key), raw_action, used_ids)
+        for key, raw_action in raw_actions.items()
+    ]
+    logger.info("Catalogo de acoes carregado: %s acoes encontradas.", len(actions))
+    return ActionsCatalog(actions=actions, exists=exists, warning=warning)
+
+
+def find_action(action_id: str, path: Path | None = None) -> ActionDetail | None:
+    wanted = str(action_id or "").strip()
+    wanted_slug = slugify_action_id(wanted)
+    catalog = load_actions_catalog(path)
+
+    for action in catalog.actions:
+        candidates = {
+            action.id,
+            action.key,
+            slugify_action_id(action.key),
+            action.name,
+            slugify_action_id(action.name),
+        }
+        if wanted in candidates or wanted_slug in candidates:
+            return action
+    return None
