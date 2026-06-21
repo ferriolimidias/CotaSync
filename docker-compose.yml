@@ -3,7 +3,7 @@
 
 services:
   browserless:
-    image: ghcr.io/browserless/chromium:latest
+    image: ghcr.io/browserless/chromium@sha256:18d3e547a04941e57665b8f38a695177c4ddc89aad8d62483341643b59032e0a
     ports:
       - "3000:3000"
     environment:
@@ -67,6 +67,8 @@ services:
       # Dentro da rede Docker o host `localhost` do .env aponta para o próprio container;
       # sobrescrevemos para alcançar o serviço Browserless.
       BROWSERLESS_URL: ws://browserless:3000
+      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://127.0.0.1:3000}
+      COTASYNC_DEMO_TARGET_URL: http://cotasync_app:8000/demo/alvo
     restart: unless-stopped
 
 volumes:

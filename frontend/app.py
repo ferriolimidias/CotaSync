@@ -16,6 +16,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from time import sleep
+from urllib.parse import quote
 
 import pandas as pd
 import streamlit as st
@@ -39,7 +40,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.agente import executar_acao_fast_track, processar_mensagem  # noqa: E402
-from frontend.api_client import get_actions_for_ui  # noqa: E402
+from frontend.api_client import DemoApiError, demo_api_request, get_actions_for_ui  # noqa: E402
 
 _EVIDENCIA = "data/print_teste.png"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
@@ -125,6 +126,212 @@ def _normalizar_nome_arquivo(texto: str) -> str:
 
 def _screenshot_por_acao(chave_acao: str) -> Path:
     return _DATA_DIR / f"mapeamento_{_normalizar_nome_arquivo(chave_acao)}.png"
+
+
+def _nome_variavel_sugerida(selector: str, index: int) -> str:
+    tokens = [
+        token.lower()
+        for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", str(selector or ""))
+        if token.lower() not in {"input", "textarea", "name", "nth", "of", "type"}
+    ]
+    return "_".join(tokens[-2:]) or f"campo_{index + 1}"
+
+
+def _render_demo_v01() -> None:
+    with st.expander("🎬 Demo v0.1 — Aprender e executar", expanded=True):
+        st.caption("Login manual, gravação da rotina e replay na mesma sessão do navegador.")
+        session_id = str(st.session_state.get("demo_session_id", "") or "")
+
+        if not session_id:
+            if st.button("Abrir sessão de navegador", type="primary", key="demo_open_session"):
+                try:
+                    with st.spinner("Abrindo navegador seguro..."):
+                        response = demo_api_request("POST", "/api/demo/sessions", api_base_url=API_BASE_URL)
+                    session = response.get("session", {})
+                    st.session_state.demo_session_id = str(session.get("id", ""))
+                    st.session_state.pop("demo_recorded_steps", None)
+                    st.session_state.pop("demo_saved_action", None)
+                    st.session_state.pop("demo_last_run", None)
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+            return
+
+        encoded_session = quote(session_id, safe="")
+        try:
+            response = demo_api_request(
+                "GET",
+                f"/api/demo/sessions/{encoded_session}",
+                api_base_url=API_BASE_URL,
+            )
+            session = response.get("session", {})
+        except DemoApiError as exc:
+            st.error(str(exc))
+            if st.button("Descartar sessão local", key="demo_forget_session"):
+                st.session_state.pop("demo_session_id", None)
+                st.rerun()
+            return
+
+        status = str(session.get("status", "desconhecida"))
+        status_labels = {
+            "aguardando_login": "Aguardando login manual",
+            "autenticada": "Sessão autenticada",
+            "gravando": "Gravando rotina",
+            "expirada": "Sessão expirada",
+        }
+        st.write(f"**Status:** {status_labels.get(status, status)}")
+        st.caption(f"Sessão: `{session_id}` · Página: {session.get('page_title', '')}")
+
+        live_url = str(session.get("live_url", "") or "")
+        if live_url:
+            st.link_button("Abrir navegador da sessão", live_url, use_container_width=True)
+
+        if status == "aguardando_login":
+            st.info("Faça o login na janela do navegador. No alvo local, use as credenciais fictícias `demo` / `demo`.")
+            if st.button("Login concluído", key="demo_confirm_login", use_container_width=True):
+                try:
+                    demo_api_request(
+                        "POST",
+                        f"/api/demo/sessions/{encoded_session}/confirm-login",
+                        api_base_url=API_BASE_URL,
+                    )
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.warning(str(exc))
+
+        recorded_steps = st.session_state.get("demo_recorded_steps")
+        if status == "autenticada" and not recorded_steps:
+            st.markdown("**Aprendizado**")
+            if st.button("Iniciar gravação", key="demo_start_recording", type="primary", use_container_width=True):
+                try:
+                    demo_api_request(
+                        "POST",
+                        f"/api/demo/sessions/{encoded_session}/recording/start",
+                        api_base_url=API_BASE_URL,
+                    )
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+
+        if status == "gravando":
+            st.warning("Gravação ativa. Execute agora a rotina na janela do navegador.")
+            if st.button("Parar gravação", key="demo_stop_recording", type="primary", use_container_width=True):
+                try:
+                    result = demo_api_request(
+                        "POST",
+                        f"/api/demo/sessions/{encoded_session}/recording/stop",
+                        api_base_url=API_BASE_URL,
+                    )
+                    st.session_state.demo_recorded_steps = result.get("steps", [])
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+
+        if isinstance(recorded_steps, list) and recorded_steps:
+            st.markdown("**Passos capturados**")
+            variable_names: dict[str, str] = {}
+            for step in recorded_steps:
+                if not isinstance(step, dict):
+                    continue
+                index = int(step.get("index", 0))
+                step_type = str(step.get("tipo", "ação"))
+                selector = str(step.get("seletor", ""))
+                st.code(f"{index + 1}. {step_type} → {selector}", language=None)
+                if step_type == "preencher":
+                    variable_names[str(index)] = st.text_input(
+                        f"Nome da variável do passo {index + 1}",
+                        value=_nome_variavel_sugerida(selector, index),
+                        key=f"demo_variable_{session_id}_{index}",
+                    )
+
+            action_name = st.text_input(
+                "Nome da nova ação",
+                value="Consultar status do pedido",
+                key=f"demo_action_name_{session_id}",
+            )
+            if st.button("Salvar ação aprendida", key="demo_save_action", type="primary", use_container_width=True):
+                try:
+                    result = demo_api_request(
+                        "POST",
+                        f"/api/demo/sessions/{encoded_session}/actions",
+                        {
+                            "name": action_name,
+                            "description": "Consulta um pedido fictício e extrai seu status.",
+                            "variable_names": variable_names,
+                        },
+                        api_base_url=API_BASE_URL,
+                    )
+                    st.session_state.demo_saved_action = result.get("action", {})
+                    st.session_state.pop("demo_recorded_steps", None)
+                    st.success("Ação aprendida e salva no catálogo.")
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+
+        saved_action = st.session_state.get("demo_saved_action")
+        if isinstance(saved_action, dict) and saved_action:
+            st.markdown(f"**Replay autônomo:** {saved_action.get('name', '')}")
+            run_variables: dict[str, str] = {}
+            for variable in saved_action.get("variables", []):
+                variable_name = str(variable)
+                run_variables[variable_name] = st.text_input(
+                    f"Valor para {variable_name}",
+                    placeholder="Ex.: PED-2002",
+                    key=f"demo_run_variable_{session_id}_{variable_name}",
+                )
+            if st.button("Executar ação aprendida", key="demo_run_action", type="primary", use_container_width=True):
+                try:
+                    action_id = quote(str(saved_action.get("id", "")), safe="")
+                    result = demo_api_request(
+                        "POST",
+                        f"/api/actions/{action_id}/run",
+                        {
+                            "variables": run_variables,
+                            "mode": "sync",
+                            "requested_by": "streamlit-demo",
+                            "session_id": session_id,
+                        },
+                        api_base_url=API_BASE_URL,
+                        timeout=30,
+                    )
+                    st.session_state.demo_last_run = result.get("run", {})
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+
+        last_run = st.session_state.get("demo_last_run")
+        if isinstance(last_run, dict) and last_run:
+            if last_run.get("status") == "success":
+                st.success(f"Execução concluída. Run `{last_run.get('id', '')}`")
+            else:
+                st.error(str(last_run.get("error_message") or "Execução não concluída."))
+            payload = last_run.get("result_payload", {})
+            if isinstance(payload, dict):
+                extracted = payload.get("dados_extraidos")
+                steps_executed = payload.get("passos_executados")
+                if steps_executed:
+                    st.caption(f"Passos executados: {steps_executed}")
+                if extracted:
+                    st.write("**Resultado extraído:**")
+                    st.json(extracted)
+                evidence = str(payload.get("evidencia") or "")
+                evidence_path = _ROOT / evidence
+                if evidence and evidence_path.is_file():
+                    st.image(str(evidence_path), caption="Evidência do replay", use_container_width=True)
+
+        st.divider()
+        if st.button("Encerrar sessão da demo", key="demo_close_session", use_container_width=True):
+            try:
+                demo_api_request(
+                    "DELETE",
+                    f"/api/demo/sessions/{encoded_session}",
+                    api_base_url=API_BASE_URL,
+                )
+            except DemoApiError:
+                pass
+            for key in ("demo_session_id", "demo_recorded_steps", "demo_saved_action", "demo_last_run"):
+                st.session_state.pop(key, None)
+            st.rerun()
 
 
 def _normalizar_resposta_assistente(resposta: object) -> dict:
@@ -393,6 +600,7 @@ with st.sidebar:
             st.info("Audio gravado. Proximo passo: transcrever e enviar ao modelo.")
 
 if menu_selecionado == "Chat & Ações":
+    _render_demo_v01()
     st.subheader("Conversa com o Agente")
     st.caption("Chat operacional com execucao assincrona e evidencias visuais.")
 

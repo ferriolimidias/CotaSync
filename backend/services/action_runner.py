@@ -78,7 +78,7 @@ def mask_variables(variables: dict[str, Any]) -> dict[str, Any]:
 
 def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
-    for key in ("evidencia", "arquivos", "dados_extraidos"):
+    for key in ("evidencia", "arquivos", "dados_extraidos", "passos_executados"):
         value = result.get(key)
         if value:
             payload[key] = value
@@ -103,6 +103,7 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
         status="pending",
         mode=request.mode,
         requested_by=request.requested_by.strip() or "api",
+        session_id=request.session_id,
         created_at=created_at,
         variables=mask_variables(request.variables),
     )
@@ -120,6 +121,18 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             run.result_payload = payload
         elif action.steps_count <= 0:
             raise RuntimeError("Acao aprendida nao possui passos para execucao.")
+        elif request.session_id:
+            from backend.services.demo_session import demo_session_manager
+
+            result = await demo_session_manager.execute_action(
+                request.session_id,
+                action.key,
+                request.variables,
+                run.id,
+            )
+            run.status = "success"
+            run.result_summary = str(result.get("texto") or "Execucao concluida.")
+            run.result_payload = _safe_result_payload(result)
         else:
             result = await executar_acao_fast_track(action.key, request.variables)
             text = str(result.get("texto") or "").strip()

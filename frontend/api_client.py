@@ -19,6 +19,10 @@ class ActionsCatalogError(RuntimeError):
     """Falha controlada ao obter ou normalizar o catalogo de acoes."""
 
 
+class DemoApiError(RuntimeError):
+    """Falha controlada no ciclo assistido da demonstracao."""
+
+
 @dataclass(frozen=True)
 class ActionsUiResult:
     actions: list[dict[str, Any]]
@@ -182,3 +186,38 @@ def get_actions_for_ui(
             source="fallback_local",
             api_error=str(api_exc),
         )
+
+
+def demo_api_request(
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 20.0,
+) -> dict[str, Any]:
+    """Executa uma chamada controlada aos endpoints da demo v0.1."""
+
+    url = f"{_api_base_url(api_base_url)}/{str(path).lstrip('/')}"
+    try:
+        response = requests.request(
+            method.upper(),
+            url,
+            json=payload,
+            timeout=timeout,
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if not response.ok:
+            detail = body.get("detail") if isinstance(body, dict) else None
+            raise DemoApiError(str(detail or "Operacao da demonstracao indisponivel."))
+    except DemoApiError:
+        raise
+    except requests.RequestException as exc:
+        raise DemoApiError("API da demonstracao indisponivel.") from exc
+
+    if not isinstance(body, dict):
+        raise DemoApiError("Resposta invalida da API da demonstracao.")
+    return body

@@ -2,7 +2,7 @@ name: cotasync_test
 
 services:
   cotasync_test_browserless:
-    image: ghcr.io/browserless/chromium:latest
+    image: ghcr.io/browserless/chromium@sha256:18d3e547a04941e57665b8f38a695177c4ddc89aad8d62483341643b59032e0a
     container_name: cotasync_test_browserless
     ports:
       - "${BROWSERLESS_PORT:-3010}:3000"
@@ -56,6 +56,8 @@ services:
       - .env.test
     environment:
       BROWSERLESS_URL: ws://cotasync_test_browserless:3000
+      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://127.0.0.1:3010}
+      COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       REDIS_URL: redis://cotasync_test_redis:6379/0
     ports:

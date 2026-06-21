@@ -19,8 +19,10 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from backend.api.actions import router as actions_router
+from backend.api.demo import router as demo_router
 from backend.api.runs import actions_run_router, runs_router
 from backend.motor_browser import processar_lote_com_semaforo, verificar_browserless
+from backend.services.demo_session import demo_session_manager
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
 
@@ -44,6 +46,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("APScheduler iniciado.")
     yield
+    await demo_session_manager.close_all()
     scheduler.shutdown(wait=False)
     logger.info("APScheduler encerrado.")
 
@@ -58,6 +61,7 @@ app = FastAPI(
 app.include_router(actions_router)
 app.include_router(actions_run_router)
 app.include_router(runs_router)
+app.include_router(demo_router)
 
 
 async def verificar_fila_agendamentos():
