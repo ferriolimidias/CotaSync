@@ -39,6 +39,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.agente import executar_acao_fast_track, processar_mensagem  # noqa: E402
+from frontend.api_client import get_actions_for_ui  # noqa: E402
 
 _EVIDENCIA = "data/print_teste.png"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
@@ -47,10 +48,12 @@ _ERP_CONFIG_PATH = _DATA_DIR / "erp_config.json"
 _LOG_PATH = _ROOT / "logs" / "operation.log"
 _CHAT_HISTORY_PATH = _DATA_DIR / "chat_history.json"
 
-try:
-    API_BASE_URL = st.secrets["API_BASE_URL"]
-except Exception:
-    API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = os.getenv("COTASYNC_API_BASE_URL", "").strip()
+if not API_BASE_URL:
+    try:
+        API_BASE_URL = str(st.secrets["API_BASE_URL"]).strip()
+    except Exception:
+        API_BASE_URL = "http://cotasync_test_backend:8000"
 
 
 def _defaults_sessao_agendamentos() -> None:
@@ -75,6 +78,26 @@ def _carregar_ui_map() -> dict:
 def _obter_acoes_conhecidas(ui_map: dict) -> dict:
     acoes = ui_map.get("acoes_conhecidas", {})
     return acoes if isinstance(acoes, dict) else {}
+
+
+def _acoes_ui_por_chave(actions: list[dict]) -> dict[str, dict]:
+    return {
+        str(action["key"]): action
+        for action in actions
+        if isinstance(action, dict) and str(action.get("key", "")).strip()
+    }
+
+
+def _excluir_acao_local(chave_acao: str) -> None:
+    memoria = _carregar_ui_map()
+    acoes = memoria.get("acoes_conhecidas", {})
+    if not isinstance(acoes, dict) or chave_acao not in acoes:
+        raise KeyError(chave_acao)
+    del acoes[chave_acao]
+    _UI_MAP_PATH.write_text(
+        json.dumps(memoria, ensure_ascii=False, indent=4) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _ler_ultimas_linhas_log(limite: int = 50) -> str:
@@ -202,9 +225,8 @@ if "messages" not in st.session_state:
 st.session_state.setdefault("estado_agente", "NORMAL")
 
 _defaults_sessao_agendamentos()
-ui_map_data = _carregar_ui_map()
-acoes_conhecidas = _obter_acoes_conhecidas(ui_map_data)
-nomes_acoes = sorted(acoes_conhecidas.keys())
+acoes_ui_result = get_actions_for_ui(API_BASE_URL, _UI_MAP_PATH)
+acoes_ui = _acoes_ui_por_chave(acoes_ui_result.actions)
 
 # Permite injetar comando no chat por botao dinamico.
 if comando_rapido := st.session_state.pop("_queued_chat_prompt", None):
@@ -229,7 +251,11 @@ if st.session_state.pop("_pending_agent", False):
 
 st.title("CotaSync")
 st.markdown("### Painel de Controle *(Backoffice)* · Assistente Operacional Omnichannel")
-st.caption(f"🔗 API REST (FastAPI · proximas integracoes): `{API_BASE_URL}`")
+st.caption(f"🔗 API REST (FastAPI): `{API_BASE_URL}`")
+if acoes_ui_result.fallback_error:
+    st.error("Não foi possível carregar as ações aprendidas no momento.")
+elif acoes_ui_result.source == "fallback_local":
+    st.caption("⚠️ API indisponível, usando leitura local temporária.")
 
 with st.sidebar:
     st.title("CotaSync")
@@ -260,10 +286,10 @@ with st.sidebar:
     )
     st.divider()
     st.markdown("#### ⚡ Execução Rápida")
-    acoes_sidebar = _obter_acoes_conhecidas(_carregar_ui_map())
+    acoes_sidebar = acoes_ui
     if acoes_sidebar:
         opcoes_sidebar = {
-            dados.get("nome_amigavel", chave): chave
+            dados.get("name", chave): chave
             for chave, dados in acoes_sidebar.items()
             if isinstance(dados, dict)
         }
@@ -278,7 +304,11 @@ with st.sidebar:
         chave_acao = opcoes_sidebar[acao_sidebar_nome]
         acao_sidebar_dados = acoes_sidebar.get(chave_acao, {}) if isinstance(acoes_sidebar, dict) else {}
         variaveis_necessarias = (
-            acao_sidebar_dados.get("variaveis_necessarias", [])
+            [
+                variable.get("key")
+                for variable in acao_sidebar_dados.get("variables", [])
+                if isinstance(variable, dict) and variable.get("required", True) and variable.get("key")
+            ]
             if isinstance(acao_sidebar_dados, dict)
             else []
         )
@@ -328,7 +358,7 @@ with st.sidebar:
                 salvar_historico_disco(st.session_state.messages)
                 st.rerun()
     else:
-        st.caption("Sem ações aprendidas no momento.")
+        st.caption("Nenhuma ação aprendida ainda.")
 
     st.divider()
     st.markdown("### 🎓 Mapeamento")
@@ -673,30 +703,18 @@ elif menu_selecionado == "Agendamentos e Filas":
 
 elif menu_selecionado == "Catálogo de Ações":
     st.markdown("##### 📚 Catálogo de Ações")
-    try:
-        if not _UI_MAP_PATH.is_file():
-            memoria = {"acoes_conhecidas": {}}
-        else:
-            bruto = _UI_MAP_PATH.read_text(encoding="utf-8").strip()
-            memoria = json.loads(bruto) if bruto else {"acoes_conhecidas": {}}
-            if not isinstance(memoria, dict):
-                memoria = {"acoes_conhecidas": {}}
-    except (json.JSONDecodeError, OSError) as exc:
-        st.warning(f"Falha ao ler `ui_map.json`: {exc}")
-        memoria = {"acoes_conhecidas": {}}
-
-    acoes_memoria = memoria.get("acoes_conhecidas", {})
-    if not isinstance(acoes_memoria, dict) or not acoes_memoria:
-        st.info("Ainda não há rotinas aprendidas para exibir.")
+    if not acoes_ui:
+        st.info("Nenhuma ação aprendida ainda.")
     else:
-        for chave_acao, dados_acao in list(acoes_memoria.items()):
+        for chave_acao, dados_acao in list(acoes_ui.items()):
             if not isinstance(dados_acao, dict):
                 continue
-            nome_amigavel = str(dados_acao.get("nome_amigavel", chave_acao))
-            descricao = str(dados_acao.get("descricao", "Sem descrição"))
-            passos = dados_acao.get("passos_playwright", [])
-            if not isinstance(passos, list):
-                passos = []
+            nome_amigavel = str(dados_acao.get("name", chave_acao))
+            descricao = str(dados_acao.get("description") or "Sem descrição")
+            variables = dados_acao.get("variables", [])
+            if not isinstance(variables, list):
+                variables = []
+            steps_count = int(dados_acao.get("steps_count", 0) or 0)
 
             with st.expander(f"🧠 {nome_amigavel}", expanded=False):
                 col_info, col_btn = st.columns([4, 1])
@@ -705,12 +723,7 @@ elif menu_selecionado == "Catálogo de Ações":
                 with col_btn:
                     if st.button("🗑️ Excluir", key=f"del_{chave_acao}"):
                         try:
-                            if isinstance(memoria.get("acoes_conhecidas"), dict):
-                                del memoria["acoes_conhecidas"][chave_acao]
-                            _UI_MAP_PATH.write_text(
-                                json.dumps(memoria, ensure_ascii=False, indent=4) + "\n",
-                                encoding="utf-8",
-                            )
+                            _excluir_acao_local(chave_acao)
                             if hasattr(st, "toast"):
                                 st.toast(f"Ação '{nome_amigavel}' removida com sucesso.")
                             else:
@@ -718,21 +731,16 @@ elif menu_selecionado == "Catálogo de Ações":
                             st.rerun()
                         except (KeyError, OSError, TypeError) as exc:
                             st.error(f"Não foi possível excluir a ação: {exc}")
-                if passos:
-                    timeline_linhas: list[str] = []
-                    for passo in passos:
-                        if not isinstance(passo, dict):
-                            continue
-                        tipo = str(passo.get("tipo", "ação")).lower()
-                        seletor = str(passo.get("seletor", "sem seletor"))
-                        valor = str(passo.get("valor", passo.get("variavel", ""))).strip()
-                        if tipo == "clicar":
-                            timeline_linhas.append(f"🖱️ Clique em: `{valor or seletor}`")
-                        elif tipo == "preencher":
-                            timeline_linhas.append(f"⌨️ Preencher: `{seletor}` com `{valor or 'valor dinâmico'}`")
-                        else:
-                            timeline_linhas.append(f"➡️ {tipo.title()}: `{valor or seletor}`")
-                    st.markdown(" ➔ ".join(timeline_linhas) if timeline_linhas else "Sem passos válidos no replay.")
+                if variables:
+                    variable_labels = [
+                        str(variable.get("label") or variable.get("key"))
+                        for variable in variables
+                        if isinstance(variable, dict) and variable.get("key")
+                    ]
+                    if variable_labels:
+                        st.caption(f"Variáveis: {', '.join(variable_labels)}")
+                if steps_count:
+                    st.caption(f"Passos técnicos registrados: {steps_count}")
                 else:
                     st.info("Esta rotina ainda não possui passos técnicos registrados.")
 

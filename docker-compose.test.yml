@@ -80,6 +80,7 @@ services:
     environment:
       BROWSERLESS_URL: ws://cotasync_test_browserless:3000
       BACKEND_URL: http://cotasync_test_backend:8000
+      COTASYNC_API_BASE_URL: http://cotasync_test_backend:8000
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       REDIS_URL: redis://cotasync_test_redis:6379/0
     ports:
