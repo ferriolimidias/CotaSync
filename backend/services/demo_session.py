@@ -862,6 +862,7 @@ class DemoSessionManager:
             "ai_observer_summary": str(learned_action.get("ai_observer_summary") or ""),
             "replay_hints": learned_action.get("replay_hints", []),
             "waits": learned_action.get("waits", []),
+            "wait_strategies": learned_action.get("wait_strategies", []),
             "variable_schema": learned_action.get("variable_schema", []),
             "extraction_target": str(learned_action.get("extraction_target") or ""),
             "robust_steps_count": len(robust_steps),

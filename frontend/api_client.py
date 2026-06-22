@@ -96,6 +96,9 @@ def _normalize_api_action(raw: Any) -> dict[str, Any] | None:
         "ai_reviewed": bool(raw.get("ai_reviewed", False)),
         "ai_observer_summary": str(raw.get("ai_observer_summary") or "").strip(),
         "replay_hints": raw.get("replay_hints", []) if isinstance(raw.get("replay_hints"), list) else [],
+        "wait_strategies": (
+            raw.get("wait_strategies", []) if isinstance(raw.get("wait_strategies"), list) else []
+        ),
         "source": str(raw.get("source") or "api"),
     }
 
@@ -119,6 +122,9 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
         "ai_reviewed": bool(data.get("ai_reviewed", False)),
         "ai_observer_summary": str(data.get("ai_observer_summary") or "").strip(),
         "replay_hints": data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
+        "wait_strategies": (
+            data.get("wait_strategies", []) if isinstance(data.get("wait_strategies"), list) else []
+        ),
         "source": "data/ui_map.json",
     }
 

@@ -134,6 +134,9 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ai_observer_summary=str(data.get("ai_observer_summary") or "").strip() or None,
         replay_hints=data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
         waits=data.get("waits", []) if isinstance(data.get("waits"), list) else [],
+        wait_strategies=(
+            data.get("wait_strategies", []) if isinstance(data.get("wait_strategies"), list) else []
+        ),
         variable_schema=data.get("variable_schema", []) if isinstance(data.get("variable_schema"), list) else [],
         extraction_target=str(data.get("extraction_target") or "").strip() or None,
         source=SOURCE_LABEL,

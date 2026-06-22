@@ -262,7 +262,7 @@ def _render_demo_v01() -> None:
                                 "variable_names": variable_names,
                             },
                             api_base_url=API_BASE_URL,
-                            timeout=15,
+                            timeout=30,
                         )
                     st.session_state.demo_saved_action = result.get("action", {})
                     st.session_state.pop("demo_recorded_steps", None)
@@ -275,11 +275,12 @@ def _render_demo_v01() -> None:
         if isinstance(saved_action, dict) and saved_action:
             st.markdown(f"**Replay determinístico:** {saved_action.get('name', '')}")
             observer_summary = str(saved_action.get("ai_observer_summary") or "").strip()
-            if observer_summary:
-                if saved_action.get("ai_reviewed") is True:
-                    st.success(f"Revisada pela IA: {observer_summary}")
-                else:
-                    st.info(observer_summary)
+            if saved_action.get("ai_reviewed") is True:
+                st.success("Observador IA ativo")
+                st.write(f"Síntese IA: {observer_summary or 'Ação demonstrada revisada pela IA.'}")
+                st.caption("Modo: aprendizado demonstrado observado por IA")
+            elif observer_summary:
+                st.info(observer_summary)
             run_variables: dict[str, str] = {}
             for variable in saved_action.get("variables", []):
                 variable_name = str(variable)
@@ -964,10 +965,14 @@ elif menu_selecionado == "Catálogo de Ações":
                     st.info("Esta rotina ainda não possui passos técnicos registrados.")
                 observer_summary = str(dados_acao.get("ai_observer_summary") or "").strip()
                 if dados_acao.get("learning_mode") == "human_demo_live_ai_observed":
-                    review_label = "Revisão de IA concluída" if dados_acao.get("ai_reviewed") else "Análise local (IA não configurada)"
-                    st.caption(f"Aprendizado demonstrado · {review_label}")
-                if observer_summary:
-                    st.write(observer_summary)
+                    if dados_acao.get("ai_reviewed"):
+                        st.success("Observador IA ativo")
+                        st.write(f"Síntese IA: {observer_summary or 'Ação demonstrada revisada pela IA.'}")
+                        st.caption("Modo: aprendizado demonstrado observado por IA")
+                    else:
+                        st.caption("Aprendizado demonstrado · Análise local (IA não configurada ou indisponível)")
+                        if observer_summary:
+                            st.write(observer_summary)
 
                 caminho_print = _screenshot_por_acao(chave_acao)
                 if caminho_print.is_file():

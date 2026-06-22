@@ -40,6 +40,83 @@ class LiveStepReview(BaseModel):
     modal_risk: bool = False
 
 
+def _openai_response_text(response: Any) -> str:
+    """Extrai texto de AIMessage sem depender de um formato de content especifico."""
+
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+    return "\n".join(parts).strip()
+
+
+def _parse_review_json(response: Any) -> ObserverReview | None:
+    """Aceita JSON puro, cercado por markdown ou acompanhado de texto curto."""
+
+    text = _openai_response_text(response)
+    if not text:
+        return None
+    candidates = [text]
+    if text.startswith("```") and text.endswith("```"):
+        fenced = text[3:-3].strip()
+        if fenced.lower().startswith("json"):
+            fenced = fenced[4:].lstrip()
+        candidates.insert(0, fenced)
+
+    decoder = json.JSONDecoder()
+    payload: dict[str, Any] | None = None
+    for candidate in candidates:
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            decoded = None
+            for start, character in enumerate(candidate):
+                if character != "{":
+                    continue
+                try:
+                    possible, _ = decoder.raw_decode(candidate[start:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(possible, dict):
+                    decoded = possible
+                    break
+        if isinstance(decoded, dict):
+            payload = decoded
+            break
+    if payload is None:
+        return None
+
+    def string_list(key: str) -> list[str]:
+        raw = payload.get(key, [])
+        if not isinstance(raw, list):
+            return []
+        return [str(item).strip() for item in raw if str(item).strip()]
+
+    def object_list(key: str, alternate: str | None = None) -> list[dict[str, Any]]:
+        raw = payload.get(key, payload.get(alternate, []) if alternate else [])
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    return ObserverReview(
+        summary=str(payload.get("summary") or payload.get("ai_observer_summary") or "").strip()
+        or "Ação demonstrada revisada pela IA.",
+        replay_hints=string_list("replay_hints"),
+        waits=object_list("waits", "wait_strategies"),
+        variable_schema=object_list("variable_schema"),
+        extraction_target=str(payload.get("extraction_target") or "").strip(),
+        slow_system_notes=string_list("slow_system_notes"),
+        risk_notes=string_list("risk_notes"),
+    )
+
+
 def openai_configuration_status() -> dict[str, Any]:
     """Status seguro para UI; nunca devolve a chave."""
 
@@ -248,7 +325,12 @@ async def analyze_recorded_action_with_ai(
         "Revise a receita sem criar navegação autônoma e sem modificar os passos determinísticos. "
         "Produza estratégias de espera por índice, dicas de replay, rótulos claros de variáveis, "
         "alvo de extração, notas para sistemas lentos e riscos de popup/nova aba. "
-        "Não invente credenciais, valores de campos nem seletores. Contexto sanitizado: "
+        "Não invente credenciais, valores de campos nem seletores. "
+        "Responda somente com um objeto JSON válido, sem markdown, com estas chaves: "
+        '"summary" (string), "replay_hints" (array de strings), "waits" (array de objetos), '
+        '"variable_schema" (array de objetos), "extraction_target" (string), '
+        '"slow_system_notes" (array de strings) e "risk_notes" (array de strings). '
+        "Contexto sanitizado: "
         + json.dumps(safe_context, ensure_ascii=False)
     )
     try:
@@ -258,10 +340,14 @@ async def analyze_recorded_action_with_ai(
             api_key=api_key,
             timeout=_AI_TIMEOUT_SECONDS,
             max_retries=0,
-        ).with_structured_output(ObserverReview)
-        review = await asyncio.wait_for(llm.ainvoke(prompt), timeout=_AI_TIMEOUT_SECONDS + 1)
-        if not isinstance(review, ObserverReview):
-            return fallback
+        )
+        response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=_AI_TIMEOUT_SECONDS + 1)
+        review = _parse_review_json(response)
+        if review is None:
+            logger.warning("Revisao da IA retornou JSON invalido; usando analise local")
+            failed = dict(fallback)
+            failed["ai_observer_summary"] = "Revisão por IA indisponível; ação salva com análise local básica."
+            return failed
         reviewed = review.model_dump()
         return {
             "ai_reviewed": True,

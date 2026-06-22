@@ -141,6 +141,9 @@ async def run_cycle(
         assert persisted["learning_mode"] == "human_demo_live_ai_observed"
         assert isinstance(persisted["ai_reviewed"], bool)
         assert str(persisted["ai_observer_summary"]).strip()
+        if os.getenv("OPENAI_API_KEY", "").strip():
+            assert persisted["ai_reviewed"] is True
+            assert "indisponível" not in persisted["ai_observer_summary"].lower()
         assert isinstance(persisted["replay_hints"], list) and persisted["replay_hints"]
         assert isinstance(persisted["waits"], list) and persisted["waits"]
         assert isinstance(persisted["variable_schema"], list) and persisted["variable_schema"]
@@ -159,6 +162,10 @@ async def run_cycle(
         assert "PED-1001" not in json.dumps(persisted)
         assert saved["learning_mode"] == "human_demo_live_ai_observed"
         assert str(saved["ai_observer_summary"]).strip()
+        assert saved["wait_strategies"]
+        if os.getenv("OPENAI_API_KEY", "").strip():
+            assert saved["ai_reviewed"] is True
+            assert "indisponível" not in saved["ai_observer_summary"].lower()
 
         catalog = api("GET", "/api/actions")
         assert any(
@@ -323,6 +330,58 @@ async def run_ai_observer_fallback_regression() -> None:
             os.environ["OPENAI_API_KEY"] = previous_key
 
 
+async def run_ai_observer_json_regression() -> None:
+    import backend.services.ai_observer as ai_observer
+
+    class FakeResponse:
+        content = """```json
+        {
+          "summary": "A IA validou a demonstração e os pontos de sincronização.",
+          "replay_hints": ["Confirmar o resultado após o clique."],
+          "wait_strategies": [{"step_index": 0, "strategy": "visible"}],
+          "variable_schema": [{"key": "codigo_pedido", "label": "Código do pedido", "required": true}],
+          "extraction_target": "status_pedido",
+          "slow_system_notes": ["Aguardar conteúdo não vazio."],
+          "risk_notes": ["Validar a página ativa."]
+        }
+        ```"""
+
+    class FakeChatOpenAI:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def with_structured_output(self, *_: Any, **__: Any) -> Any:
+            raise AssertionError("A síntese final não deve usar with_structured_output")
+
+        async def ainvoke(self, _: str) -> FakeResponse:
+            return FakeResponse()
+
+    previous_key = os.environ.get("OPENAI_API_KEY")
+    original_chat_openai = ai_observer.ChatOpenAI
+    os.environ["OPENAI_API_KEY"] = "sk-test-not-sent"
+    ai_observer.ChatOpenAI = FakeChatOpenAI
+    try:
+        review = await ai_observer.analyze_recorded_action_with_ai(
+            {
+                "nome_amigavel": "Consulta genérica",
+                "passos_playwright": [
+                    {"tipo": "preencher", "seletor": "#codigo", "variavel": "codigo_pedido"}
+                ],
+            }
+        )
+        assert review["ai_reviewed"] is True
+        assert review["ai_observer_summary"].startswith("A IA validou")
+        assert review["waits"][0]["strategy"] == "visible"
+        assert "indisponível" not in review["ai_observer_summary"].lower()
+        print("Regressao: sintese final usou JSON defensivo sem structured output.")
+    finally:
+        ai_observer.ChatOpenAI = original_chat_openai
+        if previous_key is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = previous_key
+
+
 async def main(
     *,
     cycle_count: int = 3,
@@ -339,6 +398,7 @@ async def main(
     run_evidence_before = set((ROOT / "data" / "runs").glob("*.png"))
     try:
         await run_ai_observer_fallback_regression()
+        await run_ai_observer_json_regression()
         for cycle in range(1, cycle_count + 1):
             await run_cycle(
                 cycle,
