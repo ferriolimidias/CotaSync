@@ -20,6 +20,15 @@ class SaveDemoActionRequest(BaseModel):
     variable_names: dict[str, str] = Field(default_factory=dict)
 
 
+class OperatorFillRequest(BaseModel):
+    selector: str
+    value: str = ""
+
+
+class OperatorClickRequest(BaseModel):
+    selector: str
+
+
 def _raise_safe(exc: DemoSessionError, status_code: int = 409) -> None:
     raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
@@ -40,6 +49,33 @@ async def get_demo_session(session_id: str) -> dict[str, Any]:
     except DemoSessionError as exc:
         _raise_safe(exc, 404)
     return {"status": "ok", "session": session}
+
+
+@router.get("/api/demo/sessions/{session_id}/operator-diagnostics")
+async def get_operator_diagnostics(session_id: str) -> dict[str, Any]:
+    try:
+        diagnostics = await demo_session_manager.operator_diagnostics(session_id)
+    except DemoSessionError as exc:
+        _raise_safe(exc, 404)
+    return {"status": "ok", "operator": diagnostics}
+
+
+@router.post("/api/demo/sessions/{session_id}/operator/fill")
+async def operator_fill(session_id: str, payload: OperatorFillRequest) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.operator_fill(session_id, payload.selector, payload.value)
+    except DemoSessionError as exc:
+        _raise_safe(exc)
+    return {"status": "ok", "operator": result}
+
+
+@router.post("/api/demo/sessions/{session_id}/operator/click")
+async def operator_click(session_id: str, payload: OperatorClickRequest) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.operator_click(session_id, payload.selector)
+    except DemoSessionError as exc:
+        _raise_safe(exc)
+    return {"status": "ok", "operator": result}
 
 
 @router.post("/api/demo/sessions/{session_id}/confirm-login")

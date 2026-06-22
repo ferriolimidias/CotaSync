@@ -51,6 +51,7 @@ async def run_cycle(
     *,
     replace_live_page: bool = False,
     emulate_devtools_live_view: bool = False,
+    use_operator_controls: bool = False,
 ) -> str:
     created = api("POST", "/api/demo/sessions")
     session = created["session"]
@@ -66,6 +67,16 @@ async def run_cycle(
         )
         assert live_response.status_code == 200
         assert "DevTools" in live_response.text
+        operator_diagnostics = api(
+            "GET", f"/api/demo/sessions/{session_id}/operator-diagnostics"
+        )["operator"]
+        assert operator_diagnostics["session_id"] == session_id
+        assert operator_diagnostics["target_id"] == operator_diagnostics["page_id"]
+        assert operator_diagnostics["target_id"]
+        assert operator_diagnostics["current_url"].endswith("/demo/alvo")
+        assert operator_diagnostics["pages_count"] >= 1
+        assert operator_diagnostics["live_url_kind"] == "devtools_inspector"
+        assert isinstance(operator_diagnostics["browserless_public_url_set"], bool)
 
         premature = requests.post(
             f"{API_BASE}/api/demo/sessions/{session_id}/confirm-login",
@@ -93,11 +104,26 @@ async def run_cycle(
 
         started = api("POST", f"/api/demo/sessions/{session_id}/recording/start")
         assert started["session"]["status"] == "gravando"
-        await page.fill("#pedido-codigo", "PED-1001")
-        if emulate_devtools_live_view:
+        if use_operator_controls:
+            filled = api(
+                "POST",
+                f"/api/demo/sessions/{session_id}/operator/fill",
+                {"selector": "#pedido-codigo", "value": "PED-1001"},
+            )["operator"]
+            assert filled["operation"] == "fill" and filled["recording"] is True
+            assert await page.locator("#pedido-codigo").input_value() == "PED-1001"
+            clicked = api(
+                "POST",
+                f"/api/demo/sessions/{session_id}/operator/click",
+                {"selector": "#buscar-pedido"},
+            )["operator"]
+            assert clicked["operation"] == "click" and clicked["recording"] is True
+        else:
+            await page.fill("#pedido-codigo", "PED-1001")
+        if emulate_devtools_live_view and not use_operator_controls:
             # O gesto humano na live view nao aguarda o ack de Input.dispatchMouseEvent.
             await page.locator("#buscar-pedido").evaluate("element => element.click()")
-        else:
+        elif not use_operator_controls:
             await page.click("#buscar-pedido")
         await page.wait_for_timeout(700)
 
@@ -404,6 +430,7 @@ async def main(
                 cycle,
                 replace_live_page=replace_live_page,
                 emulate_devtools_live_view=emulate_devtools_live_view,
+                use_operator_controls=cycle == 1,
             )
         if include_revalidation:
             await run_revalidation_regression()

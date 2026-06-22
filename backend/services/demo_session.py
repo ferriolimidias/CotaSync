@@ -217,6 +217,13 @@ def _live_url(target_id: str) -> str:
     return f"{public_base}/devtools/inspector.html?ws={websocket_url.split('://', 1)[1]}"
 
 
+def _live_url_kind(live_url: str) -> str:
+    path = urlsplit(str(live_url or "")).path.rstrip("/")
+    if path.endswith("/devtools/inspector.html"):
+        return "devtools_inspector"
+    return "unknown"
+
+
 def _safe_page_url(url: str) -> str:
     parsed = urlsplit(str(url or ""))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
@@ -654,7 +661,15 @@ class DemoSessionManager:
             for current_page in context.pages:
                 watch_download(current_page)
             context.on("page", watch_download)
-            logger.info("Sessao assistida criada: %s", session_id)
+            logger.info(
+                "Sessao assistida criada: session=%s target=%s pages=%s live_url_kind=%s "
+                "browserless_public_url_set=%s",
+                session_id,
+                target_id,
+                len(context.pages),
+                _live_url_kind(session.live_url),
+                bool(os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()),
+            )
             return await self.status(session_id)
         except Exception as exc:
             if browser is not None:
@@ -685,6 +700,80 @@ class DemoSessionManager:
             "page_title": title,
             "recording": session.recording,
             "steps_count": len(session.steps),
+        }
+
+    async def operator_diagnostics(self, session_id: str) -> dict[str, Any]:
+        """Diagnostico seguro do target usado pela janela remota e pelo modo operador."""
+
+        session = self._get(session_id)
+        live_pages = [page for page in session.context.pages if not page.is_closed()]
+        return {
+            "session_id": session.id,
+            "target_id": session.target_id,
+            "page_id": session.target_id,
+            "current_url": _safe_page_url(session.page.url),
+            "pages_count": len(live_pages),
+            "live_url": session.live_url,
+            "live_url_kind": _live_url_kind(session.live_url),
+            "browserless_public_url_set": bool(
+                os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
+            ),
+        }
+
+    async def _operator_locator(self, session: DemoBrowserSession, selector: str) -> Locator:
+        if not session.recording or session.status != "gravando":
+            raise DemoSessionError("Inicie a gravação antes de usar o Modo operador.")
+        safe_selector = str(selector or "").strip()
+        if not safe_selector or len(safe_selector) > 500 or _is_sensitive_selector(safe_selector):
+            raise DemoSessionError("Seletor inválido ou protegido para o Modo operador.")
+        try:
+            locator = session.page.locator(safe_selector)
+            count = await locator.count()
+            if count == 1:
+                visible = await locator.first.is_visible()
+                enabled = await locator.first.is_enabled()
+            else:
+                visible = False
+                enabled = False
+        except Exception as exc:
+            raise DemoSessionError("Seletor inválido para a página ativa.") from exc
+        if count != 1:
+            raise DemoSessionError(f"O seletor deve identificar exatamente um elemento; encontrados: {count}.")
+        locator = locator.first
+        if not visible or not enabled:
+            raise DemoSessionError("O elemento precisa estar visível e habilitado.")
+        return locator
+
+    async def operator_fill(self, session_id: str, selector: str, value: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        locator = await self._operator_locator(session, selector)
+        try:
+            await locator.fill(str(value or ""), timeout=_REPLAY_STEP_TIMEOUT_MS)
+            await asyncio.sleep(0.4)
+        except Exception as exc:
+            raise DemoSessionError("Não foi possível preencher o campo na página ativa.") from exc
+        logger.info("Modo operador preencheu elemento: session=%s selector=%s", session.id, selector)
+        return {
+            "session_id": session.id,
+            "selector": str(selector).strip(),
+            "operation": "fill",
+            "recording": session.recording,
+        }
+
+    async def operator_click(self, session_id: str, selector: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        locator = await self._operator_locator(session, selector)
+        try:
+            await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
+            await asyncio.sleep(1.1)
+        except Exception as exc:
+            raise DemoSessionError("Não foi possível clicar no elemento da página ativa.") from exc
+        logger.info("Modo operador clicou em elemento: session=%s selector=%s", session.id, selector)
+        return {
+            "session_id": session.id,
+            "selector": str(selector).strip(),
+            "operation": "click",
+            "recording": session.recording,
         }
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:

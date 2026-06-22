@@ -186,6 +186,7 @@ def _render_demo_v01() -> None:
         live_url = str(session.get("live_url", "") or "")
         if live_url:
             st.link_button("Abrir navegador da sessão", live_url, use_container_width=True)
+            st.caption("Se a janela remota não aceitar teclado, use Modo operador.")
 
         if status == "aguardando_login":
             st.info("Faça o login na janela do navegador. No alvo local, use as credenciais fictícias `demo` / `demo`.")
@@ -216,6 +217,54 @@ def _render_demo_v01() -> None:
 
         if status == "gravando":
             st.warning("Gravação ativa. Execute agora a rotina na janela do navegador.")
+            with st.expander("Modo operador", expanded=False):
+                st.caption("Envia ações à página ativa da sessão e mantém a captura pelo gravador.")
+                fill_selector = st.text_input(
+                    "Seletor do campo",
+                    value="#pedido-codigo",
+                    key=f"demo_operator_fill_selector_{session_id}",
+                )
+                fill_value = st.text_input(
+                    "Valor para campo ativo/selector",
+                    value="",
+                    key=f"demo_operator_fill_value_{session_id}",
+                )
+                if st.button(
+                    "Preencher campo no navegador",
+                    key=f"demo_operator_fill_{session_id}",
+                    use_container_width=True,
+                ):
+                    try:
+                        demo_api_request(
+                            "POST",
+                            f"/api/demo/sessions/{encoded_session}/operator/fill",
+                            {"selector": fill_selector, "value": fill_value},
+                            api_base_url=API_BASE_URL,
+                        )
+                        st.success("Campo preenchido na página ativa e capturado pela gravação.")
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+
+                click_selector = st.text_input(
+                    "Seletor do elemento para clique",
+                    value="#buscar-pedido",
+                    key=f"demo_operator_click_selector_{session_id}",
+                )
+                if st.button(
+                    "Clicar elemento",
+                    key=f"demo_operator_click_{session_id}",
+                    use_container_width=True,
+                ):
+                    try:
+                        demo_api_request(
+                            "POST",
+                            f"/api/demo/sessions/{encoded_session}/operator/click",
+                            {"selector": click_selector},
+                            api_base_url=API_BASE_URL,
+                        )
+                        st.success("Clique enviado à página ativa e capturado pela gravação.")
+                    except DemoApiError as exc:
+                        st.error(str(exc))
             if st.button("Parar gravação", key="demo_stop_recording", type="primary", use_container_width=True):
                 try:
                     result = demo_api_request(
