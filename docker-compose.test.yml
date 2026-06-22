@@ -12,6 +12,29 @@ services:
       - cotasync_test_net
     restart: unless-stopped
 
+  cotasync_test_desktop_browser:
+    build:
+      context: .
+      dockerfile: desktop-browser/Dockerfile
+    container_name: cotasync_test_desktop_browser
+    environment:
+      DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
+    ports:
+      - "127.0.0.1:${DESKTOP_BROWSER_VIEW_PORT:-3200}:6080"
+      - "127.0.0.1:${DESKTOP_BROWSER_CDP_PORT:-9222}:9222"
+    volumes:
+      - cotasync_test_desktop_browser_profile:${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9222/json/version >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
   cotasync_test_postgres:
     image: postgres:15-alpine
     container_name: cotasync_test_postgres
@@ -48,6 +71,8 @@ services:
     depends_on:
       cotasync_test_browserless:
         condition: service_started
+      cotasync_test_desktop_browser:
+        condition: service_healthy
       cotasync_test_postgres:
         condition: service_healthy
       cotasync_test_redis:
@@ -56,6 +81,10 @@ services:
       - .env.test
     environment:
       BROWSERLESS_URL: ws://cotasync_test_browserless:3000
+      COTASYNC_BROWSER_MODE: ${COTASYNC_BROWSER_MODE:-browserless}
+      DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://cotasync_test_desktop_browser:9222}
+      DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
+      DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
       COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
@@ -82,6 +111,10 @@ services:
       - .env.test
     environment:
       BROWSERLESS_URL: ws://cotasync_test_browserless:3000
+      COTASYNC_BROWSER_MODE: ${COTASYNC_BROWSER_MODE:-browserless}
+      DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://cotasync_test_desktop_browser:9222}
+      DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
+      DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
       BACKEND_URL: http://cotasync_test_backend:8000
       COTASYNC_API_BASE_URL: http://cotasync_test_backend:8000
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
@@ -105,3 +138,5 @@ volumes:
     name: cotasync_test_postgres_data
   cotasync_test_redis_data:
     name: cotasync_test_redis_data
+  cotasync_test_desktop_browser_profile:
+    name: cotasync_test_desktop_browser_profile

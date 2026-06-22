@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from backend.api.actions import router as actions_router
+from backend.api.browser import router as browser_router
 from backend.api.demo import router as demo_router
 from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
@@ -60,6 +61,7 @@ app = FastAPI(
 )
 
 app.include_router(actions_router)
+app.include_router(browser_router)
 app.include_router(actions_run_router)
 app.include_router(runs_router)
 app.include_router(demo_router)
@@ -140,6 +142,14 @@ async def health() -> dict[str, str]:
 @app.get("/api/health/browserless")
 async def health_browserless() -> dict[str, Any]:
     return await verificar_browserless()
+
+
+@app.get("/api/health/desktop-browser")
+async def health_desktop_browser() -> dict[str, Any]:
+    from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
+
+    result = await desktop_browser_health()
+    return {"status": "ok" if result["cdp_reachable"] else "error", "browser_mode": configured_browser_mode(), **result}
 
 
 def _extrair_remetente_e_texto_simulado(body: dict[str, Any]) -> tuple[str, str]:

@@ -142,6 +142,15 @@ def _render_demo_v01() -> None:
         st.caption("Humano demonstra a rotina; a IA revisa esperas, variáveis e riscos antes do replay determinístico.")
         session_id = str(st.session_state.get("demo_session_id", "") or "")
 
+        try:
+            browser_status = demo_api_request(
+                "GET", "/api/browser/status", api_base_url=API_BASE_URL
+            ).get("browser", {})
+        except DemoApiError:
+            browser_status = {}
+        selected_browser_mode = str(browser_status.get("browser_mode") or "browserless")
+        st.caption(f"Modo de navegador: `{selected_browser_mode}`")
+
         if not session_id:
             if st.button("Abrir sessão de navegador", type="primary", key="demo_open_session"):
                 try:
@@ -191,7 +200,12 @@ def _render_demo_v01() -> None:
 
         live_url = str(session.get("live_url", "") or "")
         if live_url:
-            st.link_button("Abrir navegador da sessão", live_url, use_container_width=True)
+            link_label = (
+                "Abrir Navegador Desktop"
+                if session.get("browser_mode") == "desktop_browser"
+                else "Abrir navegador da sessão"
+            )
+            st.link_button(link_label, live_url, use_container_width=True)
             public_devtools_host = str(session.get("public_devtools_host", "") or "")
             if public_devtools_host:
                 st.caption(f"DevTools público: `{public_devtools_host}`")
@@ -398,7 +412,7 @@ def _render_demo_v01() -> None:
             if saved_action.get("ai_reviewed") is True:
                 st.success("Observador IA ativo")
                 st.write(f"Síntese IA: {observer_summary or 'Ação demonstrada revisada pela IA.'}")
-                st.caption("Modo: aprendizado demonstrado observado por IA")
+                st.caption(f"Modo: {saved_action.get('learning_mode') or 'aprendizado demonstrado observado por IA'}")
             elif observer_summary:
                 st.info(observer_summary)
             run_variables: dict[str, str] = {}
@@ -1084,7 +1098,10 @@ elif menu_selecionado == "Catálogo de Ações":
                 else:
                     st.info("Esta rotina ainda não possui passos técnicos registrados.")
                 observer_summary = str(dados_acao.get("ai_observer_summary") or "").strip()
-                if dados_acao.get("learning_mode") == "human_demo_live_ai_observed":
+                if dados_acao.get("learning_mode") in {
+                    "human_demo_live_ai_observed",
+                    "desktop_browser_live_ai_observed",
+                }:
                     if dados_acao.get("ai_reviewed"):
                         st.success("Observador IA ativo")
                         st.write(f"Síntese IA: {observer_summary or 'Ação demonstrada revisada pela IA.'}")
@@ -1157,6 +1174,50 @@ elif menu_selecionado == "Configurações":
     st.caption("Configure `OPENAI_API_KEY` e, opcionalmente, `OPENAI_MODEL` no ambiente. A chave não é exibida nem persistida.")
     st.divider()
 
+    st.markdown("##### Navegador")
+    try:
+        browser_payload = demo_api_request(
+            "GET", "/api/browser/status", api_base_url=API_BASE_URL
+        ).get("browser", {})
+    except DemoApiError as exc:
+        browser_payload = {}
+        st.error(str(exc))
+    current_browser_mode = str(browser_payload.get("browser_mode") or "browserless")
+    available_browser_modes = browser_payload.get("available_modes") or ["browserless", "desktop_browser"]
+    if current_browser_mode not in available_browser_modes:
+        current_browser_mode = "browserless"
+    with st.form("browser_mode_config_form"):
+        selected_browser_mode = st.selectbox(
+            "browser_mode",
+            options=available_browser_modes,
+            index=available_browser_modes.index(current_browser_mode),
+            format_func=lambda value: "Browserless" if value == "browserless" else "Desktop Browser",
+        )
+        if st.form_submit_button("Salvar modo de navegador", type="primary", use_container_width=True):
+            try:
+                demo_api_request(
+                    "PUT",
+                    "/api/browser/config",
+                    {"browser_mode": selected_browser_mode},
+                    api_base_url=API_BASE_URL,
+                )
+                st.success("Modo salvo. Novas sessões usarão este provider.")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+
+    desktop_status = browser_payload.get("desktop_browser", {})
+    if isinstance(desktop_status, dict):
+        status_left, status_right = st.columns(2)
+        status_left.metric("Desktop Browser", "rodando" if desktop_status.get("running") else "parado")
+        status_right.metric("CDP", "acessível" if desktop_status.get("cdp_reachable") else "indisponível")
+        st.caption(f"CDP interno: `{desktop_status.get('cdp_url') or 'não configurado'}`")
+        view_url = str(desktop_status.get("view_url") or "")
+        if view_url:
+            st.link_button("Abrir Navegador Desktop", view_url, use_container_width=True)
+        st.caption(f"Perfil persistente no worker: `{desktop_status.get('profile_dir') or '/data/profile'}`")
+    st.divider()
+
     st.markdown("##### Sistema externo")
     st.caption("A próxima sessão de navegador usará esta URL. Campos de autenticação são opcionais e não armazenam credenciais.")
     try:
@@ -1206,8 +1267,10 @@ elif menu_selecionado == "Configurações":
                 st.error(str(exc))
     public_base_url = os.getenv("COTASYNC_PUBLIC_BASE_URL", "").strip()
     browserless_public_url = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
+    desktop_browser_view_url = os.getenv("DESKTOP_BROWSER_VIEW_URL", "").strip()
     st.caption(f"URL pública do app: `{public_base_url or 'não configurada'}`")
     st.caption(f"URL pública do navegador: `{browserless_public_url or 'não configurada'}`")
+    st.caption(f"Visualização local do Desktop Browser: `{desktop_browser_view_url or 'não configurada'}`")
     st.divider()
 
     st.markdown("##### Segurança WhatsApp *(whitelist)*")

@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from playwright.async_api import (
@@ -27,7 +27,13 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from backend.services.browserless_urls import public_devtools_host, public_devtools_url
+from backend.services.browserless_urls import public_devtools_host
+from backend.services.browser_providers import (
+    BrowserMode,
+    BrowserProviderError,
+    browser_provider,
+    configured_browser_mode,
+)
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -192,14 +198,6 @@ def _tracking_id(session_id: str) -> str:
     return f"cotasync-{str(session_id).replace('-', '')[:16]}"
 
 
-def _browserless_ws_url(session_id: str) -> str:
-    raw = os.getenv("BROWSERLESS_URL", "ws://cotasync_test_browserless:3000").strip()
-    parsed = urlsplit(raw)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.update({"trackingId": _tracking_id(session_id), "timeout": "600000"})
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
-
-
 def _demo_target_url() -> str:
     return os.getenv(
         "COTASYNC_DEMO_TARGET_URL",
@@ -207,19 +205,12 @@ def _demo_target_url() -> str:
     ).strip()
 
 
-def _live_url(target_id: str) -> str:
-    public_base = os.getenv(
-        "COTASYNC_BROWSERLESS_PUBLIC_URL",
-        "http://localhost:3010",
-    ).strip().rstrip("/")
-    internal_websocket = f"ws://0.0.0.0:3000/devtools/page/{target_id}"
-    return public_devtools_url(internal_websocket, public_base)
-
-
 def _live_url_kind(live_url: str) -> str:
     path = urlsplit(str(live_url or "")).path.rstrip("/")
     if path.endswith("/devtools/inspector.html"):
         return "devtools_inspector"
+    if path.endswith("/vnc.html") or path.endswith("/index.html"):
+        return "novnc"
     return "unknown"
 
 
@@ -299,6 +290,7 @@ class DemoBrowserSession:
     live_url: str
     created_at: str
     tracking_id: str
+    browser_mode: BrowserMode = "browserless"
     external_system_name: str = ""
     external_login_url: str = ""
     auth_success_text: str = ""
@@ -488,19 +480,20 @@ class DemoSessionManager:
             await cdp.detach()
         if target_id:
             session.target_id = target_id
-            session.live_url = _live_url(target_id)
+            session.live_url = browser_provider(session.browser_mode).live_url(target_id)
 
     async def _reconnect_live_browser(self, session: DemoBrowserSession) -> bool:
         if session.browser.is_connected():
             return True
         try:
-            browser = await session.playwright.chromium.connect_over_cdp(_browserless_ws_url(session.id))
-            context = browser.contexts[0] if browser.contexts else await browser.new_context(
-                viewport={"width": 1280, "height": 800}
-            )
+            connection = await browser_provider(session.browser_mode).connect(session.playwright, session.id)
+            browser = connection.browser
+            context = connection.context
             await self._prepare_reconnected_context(session.id, context)
             session.browser = browser
             session.context = context
+            if session.page.is_closed() or session.page.context != context:
+                session.page = connection.page
             return True
         except Exception as exc:
             logger.info("Pagina CDP da sessao %s indisponivel: %s", session.id, type(exc).__name__)
@@ -679,26 +672,20 @@ class DemoSessionManager:
         )
         playwright = await async_playwright().start()
         browser: Browser | None = None
+        selected_mode = configured_browser_mode()
+        provider = browser_provider(selected_mode)
         try:
-            browser = await playwright.chromium.connect_over_cdp(_browserless_ws_url(session_id))
-            context = browser.contexts[0] if browser.contexts else await browser.new_context(
-                viewport={"width": 1280, "height": 800}
-            )
-            page = context.pages[0] if context.pages else await context.new_page()
-
-            async def record_binding(source: Any, payload: Any) -> None:
-                current = self._sessions.get(session_id)
-                if current is not None:
-                    await self._record_live_step(current, payload, source)
-
-            await context.expose_binding("__cotasyncRecord", record_binding)
-            await context.add_init_script(_RECORDER_SCRIPT)
+            connection = await provider.connect(playwright, session_id)
+            browser = connection.browser
+            context = connection.context
+            page = connection.page
+            await self._prepare_reconnected_context(session_id, context)
             await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
             cdp = await context.new_cdp_session(page)
             target_info = await cdp.send("Target.getTargetInfo")
             target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
             if not target_id:
-                raise DemoSessionError("Browserless nao informou o identificador da pagina.")
+                raise DemoSessionError("O provider nao informou o identificador da pagina.")
 
             session = DemoBrowserSession(
                 id=session_id,
@@ -707,9 +694,10 @@ class DemoSessionManager:
                 context=context,
                 page=page,
                 target_id=target_id,
-                live_url=_live_url(target_id),
+                live_url=provider.live_url(target_id),
                 created_at=_utc_now(),
                 tracking_id=_tracking_id(session_id),
+                browser_mode=selected_mode,
                 external_system_name=external_system_name,
                 external_login_url=external_login_url,
                 auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
@@ -729,20 +717,21 @@ class DemoSessionManager:
                 watch_download(current_page)
             context.on("page", watch_download)
             logger.info(
-                "Sessao assistida criada: session=%s target=%s pages=%s live_url_kind=%s "
-                "browserless_public_url_set=%s",
+                "Sessao assistida criada: session=%s mode=%s target=%s pages=%s live_url_kind=%s",
                 session_id,
+                selected_mode,
                 target_id,
                 len(context.pages),
                 _live_url_kind(session.live_url),
-                bool(os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()),
             )
             return await self.status(session_id)
         except Exception as exc:
-            if browser is not None:
+            if browser is not None and provider.close_browser_on_session_end:
                 await browser.close()
             await playwright.stop()
-            if isinstance(exc, DemoSessionError):
+            if isinstance(exc, (DemoSessionError, BrowserProviderError)):
+                if isinstance(exc, BrowserProviderError):
+                    raise DemoSessionError(str(exc)) from exc
                 raise
             logger.exception("Falha ao criar sessao assistida")
             raise DemoSessionError("Nao foi possivel abrir a sessao do navegador.") from exc
@@ -762,8 +751,11 @@ class DemoSessionManager:
             "status": session.status,
             "created_at": session.created_at,
             "tracking_id": session.tracking_id,
+            "browser_mode": session.browser_mode,
             "live_url": session.live_url,
-            "public_devtools_host": public_devtools_host(session.live_url),
+            "public_devtools_host": (
+                public_devtools_host(session.live_url) if session.browser_mode == "browserless" else ""
+            ),
             "page_url": _safe_page_url(session.page.url),
             "page_title": title,
             "recording": session.recording,
@@ -792,6 +784,7 @@ class DemoSessionManager:
         live_pages = [page for page in session.context.pages if not page.is_closed()]
         return {
             "session_id": session.id,
+            "browser_mode": session.browser_mode,
             "target_id": session.target_id,
             "page_id": session.target_id,
             "current_url": _safe_page_url(session.page.url),
@@ -800,10 +793,10 @@ class DemoSessionManager:
             "learning_events_count": len(session.learning_events),
             "live_url": session.live_url,
             "live_url_kind": _live_url_kind(session.live_url),
-            "public_devtools_host": public_devtools_host(session.live_url),
-            "browserless_public_url_set": bool(
-                os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
+            "public_devtools_host": (
+                public_devtools_host(session.live_url) if session.browser_mode == "browserless" else ""
             ),
+            "browserless_public_url_set": bool(os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()),
         }
 
     def _prepare_operator_utility(self, session: DemoBrowserSession, duration: float = 2.0) -> None:
@@ -1109,7 +1102,12 @@ class DemoSessionManager:
             "learning_events": learning_events,
             "variaveis_necessarias": variables,
             "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
-            "learning_mode": "human_demo_live_ai_observed",
+            "learning_mode": (
+                "desktop_browser_live_ai_observed"
+                if session.browser_mode == "desktop_browser"
+                else "human_demo_live_ai_observed"
+            ),
+            "browser_mode": session.browser_mode,
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
         }
@@ -1402,7 +1400,9 @@ class DemoSessionManager:
             task.cancel()
         session.observer_tasks.clear()
         try:
-            await session.browser.close()
+            provider = browser_provider(session.browser_mode)
+            if provider.close_browser_on_session_end:
+                await session.browser.close()
         finally:
             await session.playwright.stop()
             if not session.external_login_url:
