@@ -27,6 +27,8 @@ class ActionSummary(BaseModel):
     wait_strategies: list[dict] = Field(default_factory=list)
     variable_schema: list[dict] = Field(default_factory=list)
     extraction_target: str | None = None
+    external_system_name: str | None = None
+    external_login_url: str | None = None
     source: str = "data/ui_map.json"
 
 

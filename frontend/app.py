@@ -46,7 +46,6 @@ from frontend.api_client import DemoApiError, demo_api_request, get_actions_for_
 _EVIDENCIA = "data/print_teste.png"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _WHITELIST_PATH = _DATA_DIR / "usuarios_autorizados.json"
-_ERP_CONFIG_PATH = _DATA_DIR / "erp_config.json"
 _LOG_PATH = _ROOT / "logs" / "operation.log"
 _CHAT_HISTORY_PATH = _DATA_DIR / "chat_history.json"
 
@@ -182,6 +181,13 @@ def _render_demo_v01() -> None:
         }
         st.write(f"**Status:** {status_labels.get(status, status)}")
         st.caption(f"Sessão: `{session_id}` · Página: {session.get('page_title', '')}")
+        if session.get("using_external_system"):
+            st.caption(
+                f"Sistema externo: {session.get('external_system_name', '')} · "
+                f"Validação: {session.get('auth_validation_mode', '')}"
+            )
+        else:
+            st.caption("Alvo local de demonstração (fallback).")
 
         live_url = str(session.get("live_url", "") or "")
         if live_url:
@@ -189,7 +195,10 @@ def _render_demo_v01() -> None:
             st.caption("Se a janela remota não aceitar teclado, use Modo operador.")
 
         if status == "aguardando_login":
-            st.info("Faça o login na janela do navegador. No alvo local, use as credenciais fictícias `demo` / `demo`.")
+            if session.get("using_external_system"):
+                st.info("Faça o login manual no sistema externo e clique em Login concluído.")
+            else:
+                st.info("Faça o login na janela do navegador. No alvo local, use as credenciais fictícias `demo` / `demo`.")
             if st.button("Login concluído", key="demo_confirm_login", use_container_width=True):
                 try:
                     demo_api_request(
@@ -1086,6 +1095,59 @@ elif menu_selecionado == "Configurações":
     st.caption("Configure `OPENAI_API_KEY` e, opcionalmente, `OPENAI_MODEL` no ambiente. A chave não é exibida nem persistida.")
     st.divider()
 
+    st.markdown("##### Sistema externo")
+    st.caption("A próxima sessão de navegador usará esta URL. Campos de autenticação são opcionais e não armazenam credenciais.")
+    try:
+        external_config = demo_api_request(
+            "GET", "/api/external-systems/current", api_base_url=API_BASE_URL
+        ).get("external_system", {})
+    except DemoApiError as exc:
+        external_config = {}
+        st.error(str(exc))
+    with st.form("external_system_config_form"):
+        external_system_name = st.text_input(
+            "external_system_name",
+            value=str(external_config.get("external_system_name") or ""),
+            placeholder="Ex.: ERP do cliente",
+        )
+        external_login_url = st.text_input(
+            "external_login_url",
+            value=str(external_config.get("external_login_url") or ""),
+            placeholder="https://erp.cliente.com/login",
+        )
+        auth_success_text = st.text_input(
+            "auth_success_text (opcional)",
+            value=str(external_config.get("auth_success_text") or ""),
+            help="Texto que só aparece após autenticação.",
+        )
+        auth_success_selector = st.text_input(
+            "auth_success_selector (opcional)",
+            value=str(external_config.get("auth_success_selector") or ""),
+            help="Tem prioridade sobre auth_success_text e deve estar visível após o login.",
+        )
+        if st.form_submit_button("Salvar sistema externo", type="primary", use_container_width=True):
+            try:
+                demo_api_request(
+                    "PUT",
+                    "/api/external-systems/current",
+                    {
+                        "external_system_name": external_system_name,
+                        "external_login_url": external_login_url,
+                        "auth_success_text": auth_success_text,
+                        "auth_success_selector": auth_success_selector,
+                    },
+                    api_base_url=API_BASE_URL,
+                )
+                st.success("Sistema externo salvo. A próxima sessão usará esta configuração.")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+    public_base_url = os.getenv("COTASYNC_PUBLIC_BASE_URL", "").strip()
+    browserless_public_url = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
+    st.caption(f"URL pública do app: `{public_base_url or 'não configurada'}`")
+    st.caption(f"URL pública do navegador: `{browserless_public_url or 'não configurada'}`")
+    st.divider()
+
     st.markdown("##### Segurança WhatsApp *(whitelist)*")
     st.caption(
         "Numeros autorizados a acionar o webhook Evolution. "
@@ -1159,42 +1221,3 @@ elif menu_selecionado == "Configurações":
     with col_disconnect:
         if st.button("❌ Desconectar", use_container_width=True):
             st.info("Simulacao: sessao WhatsApp marcada para desconexao.")
-
-    st.divider()
-    st.subheader("Credenciais do Sistema Externo (ERP)")
-
-    def _carregar_erp_config() -> dict:
-        try:
-            if not _ERP_CONFIG_PATH.is_file():
-                return {"url_sistema": "", "usuario": "", "senha": ""}
-            data = json.loads(_ERP_CONFIG_PATH.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                return {"url_sistema": "", "usuario": "", "senha": ""}
-            return {
-                "url_sistema": str(data.get("url_sistema", "")),
-                "usuario": str(data.get("usuario", "")),
-                "senha": str(data.get("senha", "")),
-            }
-        except (json.JSONDecodeError, OSError):
-            return {"url_sistema": "", "usuario": "", "senha": ""}
-
-    dados_erp = _carregar_erp_config()
-    with st.form("erp_config_form"):
-        url_sistema = st.text_input("URL do Sistema", value=dados_erp["url_sistema"])
-        usuario_erp = st.text_input("Usuário", value=dados_erp["usuario"])
-        senha_erp = st.text_input("Senha", value=dados_erp["senha"], type="password")
-        salvar_erp = st.form_submit_button("Salvar Credenciais ERP", use_container_width=True)
-        if salvar_erp:
-            try:
-                payload = {
-                    "url_sistema": url_sistema.strip(),
-                    "usuario": usuario_erp.strip(),
-                    "senha": senha_erp,
-                }
-                _ERP_CONFIG_PATH.write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                st.success("Credenciais do ERP salvas com sucesso.")
-            except OSError as exc:
-                st.error(f"Nao foi possivel salvar `erp_config.json`: {exc}")

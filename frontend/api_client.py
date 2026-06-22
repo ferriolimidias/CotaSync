@@ -99,6 +99,8 @@ def _normalize_api_action(raw: Any) -> dict[str, Any] | None:
         "wait_strategies": (
             raw.get("wait_strategies", []) if isinstance(raw.get("wait_strategies"), list) else []
         ),
+        "external_system_name": str(raw.get("external_system_name") or "").strip(),
+        "external_login_url": str(raw.get("external_login_url") or "").strip(),
         "source": str(raw.get("source") or "api"),
     }
 
@@ -125,6 +127,8 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
         "wait_strategies": (
             data.get("wait_strategies", []) if isinstance(data.get("wait_strategies"), list) else []
         ),
+        "external_system_name": str(data.get("external_system_name") or "").strip(),
+        "external_login_url": str(data.get("external_login_url") or "").strip(),
         "source": "data/ui_map.json",
     }
 

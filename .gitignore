@@ -22,6 +22,8 @@ data/*.xlsx
 data/agendamentos/
 data/demo_sessions/**
 !data/demo_sessions/.gitkeep
+data/external_systems/sessions/**
+!data/external_systems/sessions/.gitkeep
 data/chat_history.json
 data/erp_config.json
 data/runs/*.json

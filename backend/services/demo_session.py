@@ -252,6 +252,17 @@ def _storage_state_path(session_id: str) -> Path:
     return _DEMO_SESSIONS_DIR / str(session_id) / "storage_state.json"
 
 
+def _external_storage_state_path(system_name: str, session_id: str) -> Path:
+    return (
+        _DATA_DIR
+        / "external_systems"
+        / "sessions"
+        / _safe_file_name(system_name).lower()
+        / str(session_id)
+        / "storage_state.json"
+    )
+
+
 def _load_ui_map() -> dict[str, Any]:
     if not _UI_MAP_PATH.is_file():
         return {"acoes_conhecidas": {}}
@@ -289,6 +300,12 @@ class DemoBrowserSession:
     live_url: str
     created_at: str
     tracking_id: str
+    external_system_name: str = ""
+    external_login_url: str = ""
+    auth_success_text: str = ""
+    auth_success_selector: str = ""
+    storage_state_path: Path = field(default_factory=Path)
+    manual_login_confirmed: bool = False
     status: str = "aguardando_login"
     recording: bool = False
     steps: list[dict[str, str]] = field(default_factory=list)
@@ -356,7 +373,7 @@ class DemoSessionManager:
             await self._set_active_page(session, page)
 
         event_number = len(session.learning_events)
-        screenshot_after = _storage_state_path(session.id).parent / "learning" / f"step_{event_number}_after.png"
+        screenshot_after = session.storage_state_path.parent / "learning" / f"step_{event_number}_after.png"
         screenshot_after.parent.mkdir(parents=True, exist_ok=True)
         screenshot_after_path = ""
         try:
@@ -414,12 +431,25 @@ class DemoSessionManager:
         session.observer_tasks.add(task)
         task.add_done_callback(session.observer_tasks.discard)
 
-    async def _page_is_authenticated(self, page: Page) -> bool:
+    async def _page_is_authenticated(self, session: DemoBrowserSession, page: Page) -> bool:
         """Valida os sinais publicos aceitos pela demo sem depender do status em memoria."""
 
         try:
             if page.is_closed():
                 return False
+            if session.external_login_url:
+                if session.auth_success_selector:
+                    locator = page.locator(session.auth_success_selector)
+                    return await locator.count() > 0 and await locator.first.is_visible()
+                if session.auth_success_text:
+                    body_text = await page.locator("body").inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    return session.auth_success_text in body_text
+                parsed = urlsplit(str(page.url or ""))
+                return (
+                    session.manual_login_confirmed
+                    and parsed.scheme in {"http", "https"}
+                    and bool(parsed.netloc)
+                )
             if await page.locator("[data-cotasync-authenticated='true']").count() > 0:
                 return True
             if await page.get_by_text("Consulta de Pedidos", exact=False).count() > 0:
@@ -490,7 +520,17 @@ class DemoSessionManager:
             if identity in seen:
                 continue
             seen.add(identity)
-            if _page_matches_url(page, expected_url) and await self._page_is_authenticated(page):
+            url_matches = _page_matches_url(page, expected_url)
+            if session.external_login_url and (session.auth_success_selector or session.auth_success_text):
+                url_matches = True
+            elif session.external_login_url:
+                expected_origin = urlsplit(session.external_login_url)
+                page_origin = urlsplit(str(page.url or ""))
+                url_matches = (page_origin.scheme, page_origin.netloc) == (
+                    expected_origin.scheme,
+                    expected_origin.netloc,
+                )
+            if url_matches and await self._page_is_authenticated(session, page):
                 valid_candidates.append(page)
 
         if not valid_candidates:
@@ -498,7 +538,7 @@ class DemoSessionManager:
         return next((page for page in valid_candidates if page is session.page), valid_candidates[0])
 
     async def _save_storage_state(self, session: DemoBrowserSession, *, required: bool) -> bool:
-        path = _storage_state_path(session.id)
+        path = session.storage_state_path
         tmp_path: Path | None = None
         try:
             state = await session.context.storage_state()
@@ -530,7 +570,7 @@ class DemoSessionManager:
         await context.add_init_script(_RECORDER_SCRIPT)
 
     async def _restore_storage_state(self, session: DemoBrowserSession, expected_url: str) -> Page | None:
-        path = _storage_state_path(session.id)
+        path = session.storage_state_path
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -578,7 +618,7 @@ class DemoSessionManager:
             if page is None:
                 page = await context.new_page()
             await page.goto(expected_url, wait_until="domcontentloaded", timeout=15000)
-            if not await self._page_is_authenticated(page):
+            if not await self._page_is_authenticated(session, page):
                 return None
             return page
         except Exception as exc:
@@ -615,6 +655,23 @@ class DemoSessionManager:
 
     async def create(self) -> dict[str, Any]:
         session_id = str(uuid4())
+        from backend.services.external_systems import (
+            ExternalSystemConfigError,
+            load_current_external_system,
+        )
+
+        try:
+            external_config = load_current_external_system()
+        except ExternalSystemConfigError as exc:
+            raise DemoSessionError(str(exc)) from exc
+        external_login_url = str(external_config.get("external_login_url") or "").strip()
+        external_system_name = str(external_config.get("external_system_name") or "").strip()
+        target_url = external_login_url or _demo_target_url()
+        storage_state_path = (
+            _external_storage_state_path(external_system_name, session_id)
+            if external_login_url
+            else _storage_state_path(session_id)
+        )
         playwright = await async_playwright().start()
         browser: Browser | None = None
         try:
@@ -631,7 +688,7 @@ class DemoSessionManager:
 
             await context.expose_binding("__cotasyncRecord", record_binding)
             await context.add_init_script(_RECORDER_SCRIPT)
-            await page.goto(_demo_target_url(), wait_until="domcontentloaded", timeout=15000)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
             cdp = await context.new_cdp_session(page)
             target_info = await cdp.send("Target.getTargetInfo")
             target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
@@ -648,6 +705,11 @@ class DemoSessionManager:
                 live_url=_live_url(target_id),
                 created_at=_utc_now(),
                 tracking_id=_tracking_id(session_id),
+                external_system_name=external_system_name,
+                external_login_url=external_login_url,
+                auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
+                auth_success_selector=str(external_config.get("auth_success_selector") or "").strip(),
+                storage_state_path=storage_state_path,
             )
             self._sessions[session_id] = session
             session.last_page_count = len(context.pages)
@@ -700,6 +762,20 @@ class DemoSessionManager:
             "page_title": title,
             "recording": session.recording,
             "steps_count": len(session.steps),
+            "external_system_name": session.external_system_name,
+            "external_login_url": session.external_login_url,
+            "using_external_system": bool(session.external_login_url),
+            "auth_validation_mode": (
+                "selector"
+                if session.auth_success_selector
+                else "text"
+                if session.auth_success_text
+                else "manual_confirmation"
+                if session.external_login_url
+                else "demo_target_markers"
+            ),
+            "storage_state_saved": session.storage_state_path.is_file(),
+            "manual_confirmed": session.manual_login_confirmed,
         }
 
     async def operator_diagnostics(self, session_id: str) -> dict[str, Any]:
@@ -778,8 +854,12 @@ class DemoSessionManager:
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
-        page = await self._find_authenticated_live_page(session, _safe_page_url(_demo_target_url()))
+        if session.external_login_url and not (session.auth_success_selector or session.auth_success_text):
+            session.manual_login_confirmed = True
+        expected_url = session.external_login_url or _demo_target_url()
+        page = await self._find_authenticated_live_page(session, _safe_page_url(expected_url))
         if page is None:
+            session.manual_login_confirmed = False
             raise DemoSessionError("O login ainda nao foi concluido na pagina aberta.")
         await self._set_active_page(session, page)
         session.status = "autenticada"
@@ -799,7 +879,7 @@ class DemoSessionManager:
         session.recording = True
         session.status = "gravando"
         await session.page.evaluate(_RECORDER_SCRIPT)
-        baseline_path = _storage_state_path(session.id).parent / "learning" / "recording_before.png"
+        baseline_path = session.storage_state_path.parent / "learning" / "recording_before.png"
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             await session.page.screenshot(path=str(baseline_path), full_page=False)
@@ -916,6 +996,8 @@ class DemoSessionManager:
             "variaveis_necessarias": variables,
             "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
             "learning_mode": "human_demo_live_ai_observed",
+            "external_system_name": session.external_system_name,
+            "external_login_url": session.external_login_url,
         }
         from backend.services.ai_observer import analyze_recorded_action_with_ai
 
@@ -956,6 +1038,8 @@ class DemoSessionManager:
             "extraction_target": str(learned_action.get("extraction_target") or ""),
             "robust_steps_count": len(robust_steps),
             "learning_events_count": len(learning_events),
+            "external_system_name": learned_action["external_system_name"],
+            "external_login_url": learned_action["external_login_url"],
         }
 
     async def execute_action(
@@ -977,6 +1061,10 @@ class DemoSessionManager:
         if not isinstance(steps, list) or not steps:
             raise DemoSessionError("A acao aprendida nao possui passos executaveis.")
 
+        action_external_url = str(action.get("external_login_url") or "").strip()
+        if action_external_url != session.external_login_url:
+            raise DemoSessionError("Selecione a sessao do sistema externo usada por esta acao.")
+
         expected_url = _expected_replay_url(action.get("url_inicial"))
         extracted: dict[str, str] = {}
         selector_diagnostics: list[dict[str, Any]] = []
@@ -994,7 +1082,7 @@ class DemoSessionManager:
                     raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
                 page = session.page
                 await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
-                if not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(page):
+                if not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(session, page):
                     raise DemoSessionError("A pagina CDP da sessao nao esta pronta para o replay.")
 
                 locator: Locator | None = None
@@ -1203,7 +1291,8 @@ class DemoSessionManager:
             await session.browser.close()
         finally:
             await session.playwright.stop()
-            shutil.rmtree(_storage_state_path(session_id).parent, ignore_errors=True)
+            if not session.external_login_url:
+                shutil.rmtree(session.storage_state_path.parent, ignore_errors=True)
         logger.info("Sessao assistida encerrada: %s", session_id)
 
     async def close_all(self) -> None:

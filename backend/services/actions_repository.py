@@ -139,6 +139,8 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ),
         variable_schema=data.get("variable_schema", []) if isinstance(data.get("variable_schema"), list) else [],
         extraction_target=str(data.get("extraction_target") or "").strip() or None,
+        external_system_name=str(data.get("external_system_name") or "").strip() or None,
+        external_login_url=str(data.get("external_login_url") or "").strip() or None,
         source=SOURCE_LABEL,
     )
     return ActionDetail(**summary.model_dump(), steps_preview=_steps_preview(raw_steps))

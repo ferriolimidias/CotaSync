@@ -20,6 +20,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from backend.api.actions import router as actions_router
 from backend.api.demo import router as demo_router
+from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
 from backend.motor_browser import processar_lote_com_semaforo, verificar_browserless
 from backend.services.demo_session import demo_session_manager
@@ -62,6 +63,7 @@ app.include_router(actions_router)
 app.include_router(actions_run_router)
 app.include_router(runs_router)
 app.include_router(demo_router)
+app.include_router(external_systems_router)
 
 
 async def verificar_fila_agendamentos():
