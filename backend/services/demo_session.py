@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -312,6 +313,7 @@ class DemoBrowserSession:
     last_screenshot_path: str = ""
     last_page_count: int = 0
     download_detected: bool = False
+    operator_recording_suppressed_until: float = 0.0
 
 
 class DemoSessionManager:
@@ -325,7 +327,12 @@ class DemoSessionManager:
         return session
 
     def _append_step(self, session: DemoBrowserSession, raw: Any) -> int | None:
-        if not session.recording or not isinstance(raw, dict) or len(session.steps) >= _MAX_RECORDED_STEPS:
+        if (
+            not session.recording
+            or time.monotonic() < session.operator_recording_suppressed_until
+            or not isinstance(raw, dict)
+            or len(session.steps) >= _MAX_RECORDED_STEPS
+        ):
             return None
         step_type = str(raw.get("tipo") or "").strip().lower()
         selector = str(raw.get("seletor") or "").strip()
@@ -761,6 +768,7 @@ class DemoSessionManager:
             "page_title": title,
             "recording": session.recording,
             "steps_count": len(session.steps),
+            "learning_events_count": len(session.learning_events),
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
             "using_external_system": bool(session.external_login_url),
@@ -788,6 +796,8 @@ class DemoSessionManager:
             "page_id": session.target_id,
             "current_url": _safe_page_url(session.page.url),
             "pages_count": len(live_pages),
+            "steps_count": len(session.steps),
+            "learning_events_count": len(session.learning_events),
             "live_url": session.live_url,
             "live_url_kind": _live_url_kind(session.live_url),
             "public_devtools_host": public_devtools_host(session.live_url),
@@ -796,17 +806,39 @@ class DemoSessionManager:
             ),
         }
 
-    async def _operator_locator(self, session: DemoBrowserSession, selector: str) -> Locator:
-        if not session.recording or session.status != "gravando":
-            raise DemoSessionError("Inicie a gravação antes de usar o Modo operador.")
+    def _prepare_operator_utility(self, session: DemoBrowserSession, duration: float = 2.0) -> None:
+        session.operator_recording_suppressed_until = max(
+            session.operator_recording_suppressed_until,
+            time.monotonic() + duration,
+        )
+
+    def _validate_operator_session(self, session: DemoBrowserSession) -> None:
+        if session.status == "expirada" or session.page.is_closed() or not session.browser.is_connected():
+            raise DemoSessionError("A sessão do navegador não está disponível.")
+
+    async def _operator_locator(
+        self,
+        session: DemoBrowserSession,
+        selector: str,
+        *,
+        record_action: bool,
+    ) -> Locator:
+        self._validate_operator_session(session)
+        if record_action and (not session.recording or session.status != "gravando"):
+            raise DemoSessionError("Inicie a gravação antes de capturar ações do Modo operador.")
         safe_selector = str(selector or "").strip()
-        if not safe_selector or len(safe_selector) > 500 or _is_sensitive_selector(safe_selector):
+        if (
+            not safe_selector
+            or len(safe_selector) > 500
+            or (record_action and _is_sensitive_selector(safe_selector))
+        ):
             raise DemoSessionError("Seletor inválido ou protegido para o Modo operador.")
         try:
             locator = session.page.locator(safe_selector)
+            await locator.first.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
             count = await locator.count()
             if count == 1:
-                visible = await locator.first.is_visible()
+                visible = True
                 enabled = await locator.first.is_enabled()
             else:
                 visible = False
@@ -820,36 +852,117 @@ class DemoSessionManager:
             raise DemoSessionError("O elemento precisa estar visível e habilitado.")
         return locator
 
-    async def operator_fill(self, session_id: str, selector: str, value: str) -> dict[str, Any]:
+    async def operator_insert_active(self, session_id: str, value: str) -> dict[str, Any]:
         session = self._get(session_id)
-        locator = await self._operator_locator(session, selector)
+        self._validate_operator_session(session)
+        safe_value = str(value or "")
+        if len(safe_value) > 20_000:
+            raise DemoSessionError("O texto excede o limite do Modo operador.")
+        self._prepare_operator_utility(session)
         try:
-            await locator.fill(str(value or ""), timeout=_REPLAY_STEP_TIMEOUT_MS)
+            editable = await session.page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (!el) return false;
+                    const tag = String(el.tagName || '').toLowerCase();
+                    return tag === 'input' || tag === 'textarea' || el.isContentEditable;
+                }"""
+            )
+            if not editable:
+                raise DemoSessionError("Foque um campo editável no navegador remoto antes de inserir.")
+            try:
+                await session.page.keyboard.insert_text(safe_value)
+            except Exception:
+                await session.page.evaluate(
+                    """text => {
+                        const el = document.activeElement;
+                        if (!el) throw new Error('active element unavailable');
+                        const tag = String(el.tagName || '').toLowerCase();
+                        if (tag === 'input' || tag === 'textarea') {
+                            const prototype = tag === 'input'
+                                ? HTMLInputElement.prototype
+                                : HTMLTextAreaElement.prototype;
+                            const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+                            setter.call(el, text);
+                        } else if (el.isContentEditable) {
+                            el.textContent = text;
+                        } else {
+                            throw new Error('active element is not editable');
+                        }
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }""",
+                    safe_value,
+                )
+            await asyncio.sleep(0.4)
+        except DemoSessionError:
+            raise
+        except Exception as exc:
+            raise DemoSessionError("Não foi possível inserir texto no campo ativo.") from exc
+        logger.info("Modo operador inseriu texto no campo ativo: session=%s", session.id)
+        return {
+            "session_id": session.id,
+            "operation": "insert_active_text",
+            "recorded": False,
+        }
+
+    async def operator_fill(
+        self,
+        session_id: str,
+        selector: str,
+        value: str,
+        *,
+        record_action: bool = True,
+    ) -> dict[str, Any]:
+        session = self._get(session_id)
+        safe_value = str(value or "")
+        if len(safe_value) > 20_000:
+            raise DemoSessionError("O texto excede o limite do Modo operador.")
+        locator = await self._operator_locator(session, selector, record_action=record_action)
+        if not record_action:
+            self._prepare_operator_utility(session)
+        try:
+            await locator.fill(safe_value, timeout=_REPLAY_STEP_TIMEOUT_MS)
+            await locator.evaluate(
+                "element => element.dispatchEvent(new Event('change', {bubbles: true}))"
+            )
             await asyncio.sleep(0.4)
         except Exception as exc:
             raise DemoSessionError("Não foi possível preencher o campo na página ativa.") from exc
-        logger.info("Modo operador preencheu elemento: session=%s selector=%s", session.id, selector)
+        logger.info(
+            "Modo operador preencheu elemento: session=%s recorded=%s",
+            session.id,
+            record_action,
+        )
         return {
             "session_id": session.id,
-            "selector": str(selector).strip(),
             "operation": "fill",
             "recording": session.recording,
+            "recorded": bool(record_action and session.recording),
         }
 
-    async def operator_click(self, session_id: str, selector: str) -> dict[str, Any]:
+    async def operator_click(
+        self,
+        session_id: str,
+        selector: str,
+        *,
+        record_action: bool = True,
+    ) -> dict[str, Any]:
         session = self._get(session_id)
-        locator = await self._operator_locator(session, selector)
+        locator = await self._operator_locator(session, selector, record_action=record_action)
+        if not record_action:
+            self._prepare_operator_utility(session, duration=2.5)
         try:
             await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
             await asyncio.sleep(1.1)
         except Exception as exc:
             raise DemoSessionError("Não foi possível clicar no elemento da página ativa.") from exc
-        logger.info("Modo operador clicou em elemento: session=%s selector=%s", session.id, selector)
+        logger.info("Modo operador clicou em elemento: session=%s recorded=%s", session.id, record_action)
         return {
             "session_id": session.id,
-            "selector": str(selector).strip(),
             "operation": "click",
             "recording": session.recording,
+            "recorded": bool(record_action and session.recording),
         }
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:
@@ -876,6 +989,7 @@ class DemoSessionManager:
         for task in list(session.observer_tasks):
             task.cancel()
         session.observer_tasks.clear()
+        session.operator_recording_suppressed_until = 0.0
         session.recording = True
         session.status = "gravando"
         await session.page.evaluate(_RECORDER_SCRIPT)

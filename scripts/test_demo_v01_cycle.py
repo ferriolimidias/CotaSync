@@ -107,19 +107,52 @@ async def run_cycle(
         started = api("POST", f"/api/demo/sessions/{session_id}/recording/start")
         assert started["session"]["status"] == "gravando"
         if use_operator_controls:
+            await page.locator("#pedido-codigo").focus()
+            inserted = api(
+                "POST",
+                f"/api/demo/sessions/{session_id}/operator/insert-active",
+                {"value": "PED-1001"},
+            )["operator"]
+            assert inserted == {
+                "session_id": session_id,
+                "operation": "insert_active_text",
+                "recorded": False,
+            }
+            assert await page.locator("#pedido-codigo").input_value() == "PED-1001"
+            utility_click = api(
+                "POST",
+                f"/api/demo/sessions/{session_id}/operator/click",
+                {"selector": "#buscar-pedido", "record_action": False},
+            )["operator"]
+            assert utility_click["operation"] == "click" and utility_click["recorded"] is False
+            await page.wait_for_function(
+                "document.querySelector('#pedido-status').textContent.includes('Em separação')"
+            )
+            utility_status = api("GET", f"/api/demo/sessions/{session_id}")["session"]
+            assert utility_status["steps_count"] == 0
+            assert utility_status["learning_events_count"] == 0
+            assert "PED-1001" not in json.dumps(utility_status)
+            for json_path in (DEMO_SESSIONS / session_id).rglob("*.json"):
+                assert "PED-1001" not in json_path.read_text(encoding="utf-8")
+            await page.locator("#pedido-status").evaluate("element => { element.textContent = ''; }")
+            await page.wait_for_timeout(2600)
             filled = api(
                 "POST",
                 f"/api/demo/sessions/{session_id}/operator/fill",
-                {"selector": "#pedido-codigo", "value": "PED-1001"},
+                {
+                    "selector": "#pedido-codigo",
+                    "value": "PED-2002",
+                    "record_action": True,
+                },
             )["operator"]
-            assert filled["operation"] == "fill" and filled["recording"] is True
-            assert await page.locator("#pedido-codigo").input_value() == "PED-1001"
+            assert filled["operation"] == "fill" and filled["recorded"] is True
+            assert await page.locator("#pedido-codigo").input_value() == "PED-2002"
             clicked = api(
                 "POST",
                 f"/api/demo/sessions/{session_id}/operator/click",
-                {"selector": "#buscar-pedido"},
+                {"selector": "#buscar-pedido", "record_action": True},
             )["operator"]
-            assert clicked["operation"] == "click" and clicked["recording"] is True
+            assert clicked["operation"] == "click" and clicked["recorded"] is True
         else:
             await page.fill("#pedido-codigo", "PED-1001")
         if emulate_devtools_live_view and not use_operator_controls:
@@ -144,8 +177,8 @@ async def run_cycle(
             assert event["elapsed_ms"] >= 0
             assert event["url_before"].endswith("/demo/alvo")
             assert event["url_after"].endswith("/demo/alvo")
-            assert isinstance(event["dom_summary_before"], dict) and event["dom_summary_before"]
-            assert isinstance(event["dom_summary_after"], dict) and event["dom_summary_after"]
+            assert isinstance(event["dom_summary_before"], dict) and event["dom_summary_before"], event
+            assert isinstance(event["dom_summary_after"], dict) and event["dom_summary_after"], event
             assert event["screenshot_before_path"]
             assert event["screenshot_after_path"]
             assert event["wait_hint"] and event["replay_hint"] and event["ai_note"]

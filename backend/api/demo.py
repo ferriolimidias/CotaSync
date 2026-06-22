@@ -23,10 +23,16 @@ class SaveDemoActionRequest(BaseModel):
 class OperatorFillRequest(BaseModel):
     selector: str
     value: str = ""
+    record_action: bool = True
+
+
+class OperatorInsertActiveRequest(BaseModel):
+    value: str = ""
 
 
 class OperatorClickRequest(BaseModel):
     selector: str
+    record_action: bool = True
 
 
 def _raise_safe(exc: DemoSessionError, status_code: int = 409) -> None:
@@ -63,7 +69,24 @@ async def get_operator_diagnostics(session_id: str) -> dict[str, Any]:
 @router.post("/api/demo/sessions/{session_id}/operator/fill")
 async def operator_fill(session_id: str, payload: OperatorFillRequest) -> dict[str, Any]:
     try:
-        result = await demo_session_manager.operator_fill(session_id, payload.selector, payload.value)
+        result = await demo_session_manager.operator_fill(
+            session_id,
+            payload.selector,
+            payload.value,
+            record_action=payload.record_action,
+        )
+    except DemoSessionError as exc:
+        _raise_safe(exc)
+    return {"status": "ok", "operator": result}
+
+
+@router.post("/api/demo/sessions/{session_id}/operator/insert-active")
+async def operator_insert_active(
+    session_id: str,
+    payload: OperatorInsertActiveRequest,
+) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.operator_insert_active(session_id, payload.value)
     except DemoSessionError as exc:
         _raise_safe(exc)
     return {"status": "ok", "operator": result}
@@ -72,7 +95,11 @@ async def operator_fill(session_id: str, payload: OperatorFillRequest) -> dict[s
 @router.post("/api/demo/sessions/{session_id}/operator/click")
 async def operator_click(session_id: str, payload: OperatorClickRequest) -> dict[str, Any]:
     try:
-        result = await demo_session_manager.operator_click(session_id, payload.selector)
+        result = await demo_session_manager.operator_click(
+            session_id,
+            payload.selector,
+            record_action=payload.record_action,
+        )
     except DemoSessionError as exc:
         _raise_safe(exc)
     return {"status": "ok", "operator": result}

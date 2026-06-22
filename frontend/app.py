@@ -213,6 +213,113 @@ def _render_demo_v01() -> None:
                 except DemoApiError as exc:
                     st.warning(str(exc))
 
+        if status in {"aguardando_login", "autenticada", "gravando"}:
+            with st.expander("Modo operador", expanded=status == "aguardando_login"):
+                records_business_action = status == "gravando"
+                st.caption(
+                    "Insira texto sem depender da área de transferência do navegador remoto. "
+                    + (
+                        "Ações por seletor serão capturadas pela gravação."
+                        if records_business_action
+                        else "Durante o login, estas ações não entram no aprendizado."
+                    )
+                )
+                text_key = f"demo_operator_text_{session_id}"
+                selector_key = f"demo_operator_selector_{session_id}"
+                flash_key = f"demo_operator_flash_{session_id}"
+
+                def run_operator_request(operation: str) -> None:
+                    text_value = str(st.session_state.get(text_key, "") or "")
+                    selector_value = str(st.session_state.get(selector_key, "") or "").strip()
+                    try:
+                        if operation == "insert_active":
+                            demo_api_request(
+                                "POST",
+                                f"/api/demo/sessions/{encoded_session}/operator/insert-active",
+                                {"value": text_value},
+                                api_base_url=API_BASE_URL,
+                            )
+                            message = "Texto inserido no campo ativo sem entrar no aprendizado."
+                        elif operation == "fill":
+                            demo_api_request(
+                                "POST",
+                                f"/api/demo/sessions/{encoded_session}/operator/fill",
+                                {
+                                    "selector": selector_value,
+                                    "value": text_value,
+                                    "record_action": records_business_action,
+                                },
+                                api_base_url=API_BASE_URL,
+                            )
+                            message = (
+                                "Campo preenchido e capturado pela gravação."
+                                if records_business_action
+                                else "Campo preenchido sem entrar no aprendizado."
+                            )
+                        else:
+                            demo_api_request(
+                                "POST",
+                                f"/api/demo/sessions/{encoded_session}/operator/click",
+                                {
+                                    "selector": selector_value,
+                                    "record_action": records_business_action,
+                                },
+                                api_base_url=API_BASE_URL,
+                            )
+                            message = (
+                                "Clique enviado e capturado pela gravação."
+                                if records_business_action
+                                else "Clique enviado sem entrar no aprendizado."
+                            )
+                        st.session_state[flash_key] = ("success", message)
+                    except DemoApiError as exc:
+                        st.session_state[flash_key] = ("error", str(exc))
+                    finally:
+                        if operation in {"insert_active", "fill"}:
+                            st.session_state[text_key] = ""
+
+                st.text_input(
+                    "Texto para inserir no campo ativo",
+                    value="",
+                    type="password",
+                    key=text_key,
+                    help="O texto é mascarado, enviado somente à sessão atual e limpo após o envio.",
+                )
+                st.button(
+                    "Inserir no campo ativo",
+                    key=f"demo_operator_insert_active_{session_id}",
+                    on_click=run_operator_request,
+                    args=("insert_active",),
+                    use_container_width=True,
+                )
+                st.text_input(
+                    "Seletor do campo",
+                    value="",
+                    placeholder="#pedido-codigo ou input[type='email']",
+                    key=selector_key,
+                )
+                left, right = st.columns(2)
+                left.button(
+                    "Preencher seletor",
+                    key=f"demo_operator_fill_{session_id}",
+                    on_click=run_operator_request,
+                    args=("fill",),
+                    use_container_width=True,
+                )
+                right.button(
+                    "Clicar elemento por seletor",
+                    key=f"demo_operator_click_{session_id}",
+                    on_click=run_operator_request,
+                    args=("click",),
+                    use_container_width=True,
+                )
+                flash = st.session_state.pop(flash_key, None)
+                if isinstance(flash, tuple) and len(flash) == 2:
+                    if flash[0] == "success":
+                        st.success(flash[1])
+                    else:
+                        st.error(flash[1])
+
         recorded_steps = st.session_state.get("demo_recorded_steps")
         if status == "autenticada" and not recorded_steps:
             st.markdown("**Aprendizado**")
@@ -229,54 +336,6 @@ def _render_demo_v01() -> None:
 
         if status == "gravando":
             st.warning("Gravação ativa. Execute agora a rotina na janela do navegador.")
-            with st.expander("Modo operador", expanded=False):
-                st.caption("Envia ações à página ativa da sessão e mantém a captura pelo gravador.")
-                fill_selector = st.text_input(
-                    "Seletor do campo",
-                    value="#pedido-codigo",
-                    key=f"demo_operator_fill_selector_{session_id}",
-                )
-                fill_value = st.text_input(
-                    "Valor para campo ativo/selector",
-                    value="",
-                    key=f"demo_operator_fill_value_{session_id}",
-                )
-                if st.button(
-                    "Preencher campo no navegador",
-                    key=f"demo_operator_fill_{session_id}",
-                    use_container_width=True,
-                ):
-                    try:
-                        demo_api_request(
-                            "POST",
-                            f"/api/demo/sessions/{encoded_session}/operator/fill",
-                            {"selector": fill_selector, "value": fill_value},
-                            api_base_url=API_BASE_URL,
-                        )
-                        st.success("Campo preenchido na página ativa e capturado pela gravação.")
-                    except DemoApiError as exc:
-                        st.error(str(exc))
-
-                click_selector = st.text_input(
-                    "Seletor do elemento para clique",
-                    value="#buscar-pedido",
-                    key=f"demo_operator_click_selector_{session_id}",
-                )
-                if st.button(
-                    "Clicar elemento",
-                    key=f"demo_operator_click_{session_id}",
-                    use_container_width=True,
-                ):
-                    try:
-                        demo_api_request(
-                            "POST",
-                            f"/api/demo/sessions/{encoded_session}/operator/click",
-                            {"selector": click_selector},
-                            api_base_url=API_BASE_URL,
-                        )
-                        st.success("Clique enviado à página ativa e capturado pela gravação.")
-                    except DemoApiError as exc:
-                        st.error(str(exc))
             if st.button("Parar gravação", key="demo_stop_recording", type="primary", use_container_width=True):
                 try:
                     result = demo_api_request(
