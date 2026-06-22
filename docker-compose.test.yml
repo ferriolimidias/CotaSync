@@ -56,7 +56,7 @@ services:
       - .env.test
     environment:
       BROWSERLESS_URL: ws://cotasync_test_browserless:3000
-      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://127.0.0.1:3010}
+      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
@@ -85,7 +85,7 @@ services:
       BACKEND_URL: http://cotasync_test_backend:8000
       COTASYNC_API_BASE_URL: http://cotasync_test_backend:8000
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
-      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://127.0.0.1:3010}
+      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       REDIS_URL: redis://cotasync_test_redis:6379/0
     ports:

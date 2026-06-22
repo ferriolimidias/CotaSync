@@ -26,6 +26,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from backend.services.browserless_urls import public_devtools_host, public_devtools_url
+
 
 logger = logging.getLogger("cotasync.demo")
 _ROOT = Path(__file__).resolve().parents[2]
@@ -207,14 +209,10 @@ def _demo_target_url() -> str:
 def _live_url(target_id: str) -> str:
     public_base = os.getenv(
         "COTASYNC_BROWSERLESS_PUBLIC_URL",
-        "http://127.0.0.1:3010",
+        "http://localhost:3010",
     ).strip().rstrip("/")
-    parsed = urlsplit(public_base)
-    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
-    ws_host = parsed.netloc
-    ws_path = f"{parsed.path.rstrip('/')}/devtools/page/{target_id}"
-    websocket_url = f"{ws_scheme}://{ws_host}{ws_path}"
-    return f"{public_base}/devtools/inspector.html?ws={websocket_url.split('://', 1)[1]}"
+    internal_websocket = f"ws://0.0.0.0:3000/devtools/page/{target_id}"
+    return public_devtools_url(internal_websocket, public_base)
 
 
 def _live_url_kind(live_url: str) -> str:
@@ -758,6 +756,7 @@ class DemoSessionManager:
             "created_at": session.created_at,
             "tracking_id": session.tracking_id,
             "live_url": session.live_url,
+            "public_devtools_host": public_devtools_host(session.live_url),
             "page_url": _safe_page_url(session.page.url),
             "page_title": title,
             "recording": session.recording,
@@ -791,6 +790,7 @@ class DemoSessionManager:
             "pages_count": len(live_pages),
             "live_url": session.live_url,
             "live_url_kind": _live_url_kind(session.live_url),
+            "public_devtools_host": public_devtools_host(session.live_url),
             "browserless_public_url_set": bool(
                 os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
             ),

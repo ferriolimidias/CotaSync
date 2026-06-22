@@ -24,6 +24,7 @@ ACTION_NAME = "Consultar status do pedido"
 ACTION_VARIABLE = "pedido_codigo"
 MAPPING_EVIDENCE = ROOT / "data" / "mapeamento_Consultar_status_do_pedido.png"
 DEMO_SESSIONS = ROOT / "data" / "demo_sessions"
+EXTERNAL_CONFIG = ROOT / "data" / "external_systems" / "current.json"
 
 
 def api(method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 30) -> dict[str, Any]:
@@ -76,6 +77,7 @@ async def run_cycle(
         assert operator_diagnostics["current_url"].endswith("/demo/alvo")
         assert operator_diagnostics["pages_count"] >= 1
         assert operator_diagnostics["live_url_kind"] == "devtools_inspector"
+        assert operator_diagnostics["public_devtools_host"] == live_parts.hostname
         assert isinstance(operator_diagnostics["browserless_public_url_set"], bool)
 
         premature = requests.post(
@@ -421,8 +423,11 @@ async def main(
     runs_backup = RUNS.read_bytes() if runs_existed else b""
     mapping_existed = MAPPING_EVIDENCE.exists()
     mapping_backup = MAPPING_EVIDENCE.read_bytes() if mapping_existed else b""
+    external_config_existed = EXTERNAL_CONFIG.exists()
+    external_config_backup = EXTERNAL_CONFIG.read_bytes() if external_config_existed else b""
     run_evidence_before = set((ROOT / "data" / "runs").glob("*.png"))
     try:
+        EXTERNAL_CONFIG.unlink(missing_ok=True)
         await run_ai_observer_fallback_regression()
         await run_ai_observer_json_regression()
         for cycle in range(1, cycle_count + 1):
@@ -450,6 +455,11 @@ async def main(
             MAPPING_EVIDENCE.write_bytes(mapping_backup)
         else:
             MAPPING_EVIDENCE.unlink(missing_ok=True)
+        if external_config_existed:
+            EXTERNAL_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            EXTERNAL_CONFIG.write_bytes(external_config_backup)
+        else:
+            EXTERNAL_CONFIG.unlink(missing_ok=True)
         for evidence in (ROOT / "data" / "runs").glob("*.png"):
             if evidence not in run_evidence_before:
                 evidence.unlink(missing_ok=True)

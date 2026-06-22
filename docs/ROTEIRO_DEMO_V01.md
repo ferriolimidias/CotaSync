@@ -19,7 +19,7 @@ curl -fsS http://127.0.0.1:3100/_stcore/health
 docker exec cotasync_test_backend python scripts/test_demo_v01_cycle.py
 ```
 
-Se a apresentação abrir o CotaSync a partir de outra máquina, configure antes `COTASYNC_BROWSERLESS_PUBLIC_URL` com o endereço público do host e a porta publicada do Browserless. O valor padrão `http://127.0.0.1:3010` serve para apresentação local.
+Se a apresentação abrir o CotaSync a partir de outra máquina, configure antes `COTASYNC_BROWSERLESS_PUBLIC_URL` com o endereço público do host e a porta publicada do Browserless. O valor padrão `http://localhost:3010` serve para apresentação local.
 
 O último comando executa três ciclos completos e restaura catálogo, runs e screenshots ao final. Só iniciar a apresentação se terminar com:
 

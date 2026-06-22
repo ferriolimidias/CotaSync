@@ -192,6 +192,9 @@ def _render_demo_v01() -> None:
         live_url = str(session.get("live_url", "") or "")
         if live_url:
             st.link_button("Abrir navegador da sessão", live_url, use_container_width=True)
+            public_devtools_host = str(session.get("public_devtools_host", "") or "")
+            if public_devtools_host:
+                st.caption(f"DevTools público: `{public_devtools_host}`")
             st.caption("Se a janela remota não aceitar teclado, use Modo operador.")
 
         if status == "aguardando_login":

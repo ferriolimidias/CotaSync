@@ -67,7 +67,7 @@ services:
       # Dentro da rede Docker o host `localhost` do .env aponta para o próprio container;
       # sobrescrevemos para alcançar o serviço Browserless.
       BROWSERLESS_URL: ws://browserless:3000
-      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://127.0.0.1:3000}
+      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3000}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_app:8000/demo/alvo
     restart: unless-stopped
 
