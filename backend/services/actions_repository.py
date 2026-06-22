@@ -129,6 +129,13 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
         test_mode=bool(data.get("modo_teste", False)),
         execution_type=execution_type or None,
+        learning_mode=str(data.get("learning_mode") or "").strip() or None,
+        ai_reviewed=bool(data.get("ai_reviewed", False)),
+        ai_observer_summary=str(data.get("ai_observer_summary") or "").strip() or None,
+        replay_hints=data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
+        waits=data.get("waits", []) if isinstance(data.get("waits"), list) else [],
+        variable_schema=data.get("variable_schema", []) if isinstance(data.get("variable_schema"), list) else [],
+        extraction_target=str(data.get("extraction_target") or "").strip() or None,
         source=SOURCE_LABEL,
     )
     return ActionDetail(**summary.model_dump(), steps_preview=_steps_preview(raw_steps))

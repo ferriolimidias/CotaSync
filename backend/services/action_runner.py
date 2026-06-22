@@ -78,7 +78,14 @@ def mask_variables(variables: dict[str, Any]) -> dict[str, Any]:
 
 def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
-    for key in ("evidencia", "arquivos", "dados_extraidos", "passos_executados", "session_revalidated"):
+    for key in (
+        "evidencia",
+        "arquivos",
+        "dados_extraidos",
+        "passos_executados",
+        "session_revalidated",
+        "selector_diagnostics",
+    ):
         value = result.get(key)
         if value:
             payload[key] = value
@@ -147,7 +154,8 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
         run.status = "error"
         run.result_summary = "Execucao finalizada com erro."
         run.error_message = str(exc)
-        run.result_payload = None
+        diagnostics = getattr(exc, "diagnostics", None)
+        run.result_payload = {"selector_diagnostics": [diagnostics]} if isinstance(diagnostics, dict) else None
     finally:
         run.finished_at = utc_now_iso()
         update_run(run)

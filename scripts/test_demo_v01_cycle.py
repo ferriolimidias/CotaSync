@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 UI_MAP = ROOT / "data" / "ui_map.json"
 RUNS = ROOT / "data" / "runs" / "runs.json"
 ACTION_NAME = "Consultar status do pedido"
+ACTION_VARIABLE = "pedido_codigo"
 MAPPING_EVIDENCE = ROOT / "data" / "mapeamento_Consultar_status_do_pedido.png"
 DEMO_SESSIONS = ROOT / "data" / "demo_sessions"
 
@@ -45,12 +46,18 @@ def browser_id_for(tracking_id: str) -> str:
     raise AssertionError("Sessao criada nao apareceu no Browserless.")
 
 
-async def run_cycle(number: int) -> str:
+async def run_cycle(
+    number: int,
+    *,
+    replace_live_page: bool = False,
+    emulate_devtools_live_view: bool = False,
+) -> str:
     created = api("POST", "/api/demo/sessions")
     session = created["session"]
     session_id = session["id"]
     playwright = await async_playwright().start()
     browser = None
+    viewer_browser = None
     try:
         live_parts = urlsplit(session["live_url"])
         live_response = requests.get(
@@ -87,12 +94,33 @@ async def run_cycle(number: int) -> str:
         started = api("POST", f"/api/demo/sessions/{session_id}/recording/start")
         assert started["session"]["status"] == "gravando"
         await page.fill("#pedido-codigo", "PED-1001")
-        await page.click("#buscar-pedido")
+        if emulate_devtools_live_view:
+            # O gesto humano na live view nao aguarda o ack de Input.dispatchMouseEvent.
+            await page.locator("#buscar-pedido").evaluate("element => element.click()")
+        else:
+            await page.click("#buscar-pedido")
         await page.wait_for_timeout(700)
 
         stopped = api("POST", f"/api/demo/sessions/{session_id}/recording/stop")
         steps = stopped["steps"]
+        learning_events = stopped["learning_events"]
         assert [step["tipo"] for step in steps] == ["preencher", "clicar", "extrair_texto"]
+        assert len(learning_events) >= 3
+        meaningful_events = {
+            event["event_type"]: event
+            for event in learning_events
+            if event.get("event_type") in {"fill", "click", "extract"}
+        }
+        assert set(meaningful_events) == {"fill", "click", "extract"}
+        for event in meaningful_events.values():
+            assert event["elapsed_ms"] >= 0
+            assert event["url_before"].endswith("/demo/alvo")
+            assert event["url_after"].endswith("/demo/alvo")
+            assert isinstance(event["dom_summary_before"], dict) and event["dom_summary_before"]
+            assert isinstance(event["dom_summary_after"], dict) and event["dom_summary_after"]
+            assert event["screenshot_before_path"]
+            assert event["screenshot_after_path"]
+            assert event["wait_hint"] and event["replay_hint"] and event["ai_note"]
         assert all("password" not in step.get("seletor", "").lower() for step in steps)
         assert all(step.get("valor") != "demo" for step in steps)
 
@@ -103,26 +131,72 @@ async def run_cycle(number: int) -> str:
             {
                 "name": ACTION_NAME,
                 "description": "Consulta um pedido ficticio e extrai seu status.",
-                "variable_names": {str(fill_index): "codigo_pedido"},
+                "variable_names": {str(fill_index): ACTION_VARIABLE},
             },
         )["action"]
         assert saved["steps_count"] == 3
-        assert saved["variables"] == ["codigo_pedido"]
+        assert saved["variables"] == [ACTION_VARIABLE]
         persisted = json.loads(UI_MAP.read_text(encoding="utf-8"))["acoes_conhecidas"][ACTION_NAME]
-        assert persisted["modo_aprendizado"] == "gravacao_manual"
-        assert persisted["variaveis_necessarias"] == ["codigo_pedido"]
-        assert persisted["passos_playwright"][0]["variavel"] == "codigo_pedido"
+        assert persisted["modo_aprendizado"] == "gravacao_manual_observada_por_ia_em_tempo_real"
+        assert persisted["learning_mode"] == "human_demo_live_ai_observed"
+        assert isinstance(persisted["ai_reviewed"], bool)
+        assert str(persisted["ai_observer_summary"]).strip()
+        assert isinstance(persisted["replay_hints"], list) and persisted["replay_hints"]
+        assert isinstance(persisted["waits"], list) and persisted["waits"]
+        assert isinstance(persisted["variable_schema"], list) and persisted["variable_schema"]
+        assert persisted["extraction_target"]
+        assert len(persisted["robust_steps"]) == 3
+        assert len(persisted["learning_events"]) >= 3
+        assert persisted["wait_strategies"]
+        assert persisted["risks_detected"]
+        assert persisted["slow_system_notes"]
+        assert persisted["new_tab_or_popup_notes"]
+        assert persisted["variaveis_necessarias"] == [ACTION_VARIABLE]
+        assert persisted["passos_playwright"][0]["variavel"] == ACTION_VARIABLE
         assert persisted["passos_playwright"][0]["valor"] == ""
+        assert persisted["url_inicial"].endswith("/demo/alvo")
         assert "demo-password" not in json.dumps(persisted)
+        assert "PED-1001" not in json.dumps(persisted)
+        assert saved["learning_mode"] == "human_demo_live_ai_observed"
+        assert str(saved["ai_observer_summary"]).strip()
 
         catalog = api("GET", "/api/actions")
-        assert any(action["id"] == saved["id"] and action["steps_count"] == 3 for action in catalog["actions"])
+        assert any(
+            action["id"] == saved["id"]
+            and action["steps_count"] == 3
+            and action["learning_mode"] == "human_demo_live_ai_observed"
+            and action["ai_observer_summary"]
+            for action in catalog["actions"]
+        )
+
+        if replace_live_page:
+            replacement_page = await page.context.new_page()
+            await replacement_page.goto(page.url, wait_until="domcontentloaded")
+            await replacement_page.wait_for_selector("[data-cotasync-authenticated='true']", timeout=5000)
+            await page.close()
+            page = replacement_page
+
+        if emulate_devtools_live_view:
+            cdp = await page.context.new_cdp_session(page)
+            target_info = await cdp.send("Target.getTargetInfo")
+            target_id = str(target_info["targetInfo"]["targetId"])
+            viewer_browser = await playwright.chromium.connect_over_cdp(
+                f"{BROWSERLESS_WS}?trackingId=cotasync-test-viewer-{session_id[:8]}&timeout=600000"
+            )
+            viewer_context = viewer_browser.contexts[0]
+            viewer_page = viewer_context.pages[0] if viewer_context.pages else await viewer_context.new_page()
+            inspector_url = (
+                f"{BROWSERLESS_HTTP}/devtools/inspector.html"
+                f"?ws=cotasync_test_browserless:3000/devtools/page/{target_id}"
+            )
+            await viewer_page.goto(inspector_url, wait_until="domcontentloaded", timeout=10000)
+            await viewer_page.wait_for_timeout(1000)
 
         replay = api(
             "POST",
             f"/api/actions/{saved['id']}/run",
             {
-                "variables": {"codigo_pedido": "PED-2002"},
+                "variables": {ACTION_VARIABLE: "PED-2002"},
                 "mode": "sync",
                 "requested_by": "demo-cycle-test",
                 "session_id": session_id,
@@ -130,8 +204,20 @@ async def run_cycle(number: int) -> str:
         )["run"]
         assert replay["status"] == "success", replay
         assert replay["session_id"] == session_id
+        if replace_live_page:
+            assert replay["result_payload"]["session_revalidated"] is True
         assert replay["result_payload"]["dados_extraidos"]["status_pedido"] == "Enviado"
         assert replay["result_payload"]["passos_executados"] == 3
+        diagnostics = replay["result_payload"]["selector_diagnostics"]
+        assert [item["selector"] for item in diagnostics] == [
+            "#pedido-codigo",
+            "#buscar-pedido",
+            "#pedido-status",
+        ]
+        assert all(item["count"] == 1 and item["visible"] and item["enabled"] for item in diagnostics)
+        assert diagnostics[1]["click_confirmation"] in {"cdp", "dom_event_after_cdp_timeout"}
+        assert diagnostics[1]["recorded_wait_ms"] >= 500
+        assert diagnostics[1]["wait_hint"] and diagnostics[1]["replay_hint"]
         evidence = ROOT / replay["result_payload"]["evidencia"]
         assert evidence.is_file() and evidence.stat().st_size > 0
         assert await page.locator("#pedido-codigo").input_value() == "PED-2002"
@@ -145,6 +231,8 @@ async def run_cycle(number: int) -> str:
         try:
             api("DELETE", f"/api/demo/sessions/{session_id}")
         finally:
+            if viewer_browser is not None:
+                await viewer_browser.close()
             await playwright.stop()
 
 
@@ -176,7 +264,7 @@ async def run_revalidation_regression() -> None:
         live_run = await run_action_sync(
             action,
             ActionRunRequest(
-                variables={"codigo_pedido": "PED-2002"},
+                variables={ACTION_VARIABLE: "PED-2002"},
                 requested_by="demo-revalidation-live-test",
                 session_id=session_id,
             ),
@@ -193,7 +281,7 @@ async def run_revalidation_regression() -> None:
         restored_run = await run_action_sync(
             action,
             ActionRunRequest(
-                variables={"codigo_pedido": "PED-2002"},
+                variables={ACTION_VARIABLE: "PED-2002"},
                 requested_by="demo-revalidation-storage-test",
                 session_id=session_id,
             ),
@@ -208,7 +296,40 @@ async def run_revalidation_regression() -> None:
         assert not storage_state.exists()
 
 
-async def main() -> None:
+async def run_ai_observer_fallback_regression() -> None:
+    from backend.services.ai_observer import analyze_recorded_action_with_ai
+
+    previous_key = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        review = await analyze_recorded_action_with_ai(
+            {
+                "nome_amigavel": "Consulta genérica",
+                "url_inicial": "https://sistema.exemplo.local/pedidos",
+                "passos_playwright": [
+                    {"tipo": "preencher", "seletor": "#codigo", "variavel": "codigo_pedido"},
+                    {"tipo": "clicar", "seletor": "#buscar"},
+                    {"tipo": "extrair_texto", "seletor": "#status", "nome": "status_pedido"},
+                ],
+            }
+        )
+        assert review["ai_reviewed"] is False
+        assert review["ai_observer_summary"] == "IA não configurada; ação salva com análise local básica."
+        assert len(review["waits"]) == 3
+        assert review["variable_schema"][0]["key"] == "codigo_pedido"
+        assert review["extraction_target"] == "status_pedido"
+        print("Regressao: observador sem OPENAI_API_KEY usou analise local sem impedir o salvamento.")
+    finally:
+        if previous_key is not None:
+            os.environ["OPENAI_API_KEY"] = previous_key
+
+
+async def main(
+    *,
+    cycle_count: int = 3,
+    include_revalidation: bool = True,
+    replace_live_page: bool = False,
+    emulate_devtools_live_view: bool = False,
+) -> None:
     ui_map_existed = UI_MAP.exists()
     runs_existed = RUNS.exists()
     ui_map_backup = UI_MAP.read_bytes() if ui_map_existed else b""
@@ -217,10 +338,16 @@ async def main() -> None:
     mapping_backup = MAPPING_EVIDENCE.read_bytes() if mapping_existed else b""
     run_evidence_before = set((ROOT / "data" / "runs").glob("*.png"))
     try:
-        for cycle in range(1, 4):
-            await run_cycle(cycle)
-        await run_revalidation_regression()
-        print("Demo v0.1 validada em 3 ciclos consecutivos sem sistema externo.")
+        await run_ai_observer_fallback_regression()
+        for cycle in range(1, cycle_count + 1):
+            await run_cycle(
+                cycle,
+                replace_live_page=replace_live_page,
+                emulate_devtools_live_view=emulate_devtools_live_view,
+            )
+        if include_revalidation:
+            await run_revalidation_regression()
+        print(f"Demo v0.1 validada em {cycle_count} ciclo(s) sem sistema externo.")
     finally:
         UI_MAP.parent.mkdir(parents=True, exist_ok=True)
         if ui_map_existed:

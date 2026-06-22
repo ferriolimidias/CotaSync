@@ -19,6 +19,13 @@ class ActionSummary(BaseModel):
     has_url: bool
     test_mode: bool = False
     execution_type: str | None = None
+    learning_mode: str | None = None
+    ai_reviewed: bool = False
+    ai_observer_summary: str | None = None
+    replay_hints: list[str] = Field(default_factory=list)
+    waits: list[dict] = Field(default_factory=list)
+    variable_schema: list[dict] = Field(default_factory=list)
+    extraction_target: str | None = None
     source: str = "data/ui_map.json"
 
 

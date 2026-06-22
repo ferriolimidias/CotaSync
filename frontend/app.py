@@ -40,6 +40,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from backend.agente import executar_acao_fast_track, processar_mensagem  # noqa: E402
+from backend.services.ai_observer import openai_configuration_status  # noqa: E402
 from frontend.api_client import DemoApiError, demo_api_request, get_actions_for_ui  # noqa: E402
 
 _EVIDENCIA = "data/print_teste.png"
@@ -139,7 +140,7 @@ def _nome_variavel_sugerida(selector: str, index: int) -> str:
 
 def _render_demo_v01() -> None:
     with st.expander("🎬 Demo v0.1 — Aprender e executar", expanded=True):
-        st.caption("Login manual, gravação da rotina e replay na mesma sessão do navegador.")
+        st.caption("Humano demonstra a rotina; a IA revisa esperas, variáveis e riscos antes do replay determinístico.")
         session_id = str(st.session_state.get("demo_session_id", "") or "")
 
         if not session_id:
@@ -251,16 +252,18 @@ def _render_demo_v01() -> None:
             )
             if st.button("Salvar ação aprendida", key="demo_save_action", type="primary", use_container_width=True):
                 try:
-                    result = demo_api_request(
-                        "POST",
-                        f"/api/demo/sessions/{encoded_session}/actions",
-                        {
-                            "name": action_name,
-                            "description": "Consulta um pedido fictício e extrai seu status.",
-                            "variable_names": variable_names,
-                        },
-                        api_base_url=API_BASE_URL,
-                    )
+                    with st.spinner("Revisando a demonstração e salvando a ação..."):
+                        result = demo_api_request(
+                            "POST",
+                            f"/api/demo/sessions/{encoded_session}/actions",
+                            {
+                                "name": action_name,
+                                "description": "Rotina demonstrada manualmente e revisada pelo observador de IA.",
+                                "variable_names": variable_names,
+                            },
+                            api_base_url=API_BASE_URL,
+                            timeout=15,
+                        )
                     st.session_state.demo_saved_action = result.get("action", {})
                     st.session_state.pop("demo_recorded_steps", None)
                     st.success("Ação aprendida e salva no catálogo.")
@@ -270,7 +273,13 @@ def _render_demo_v01() -> None:
 
         saved_action = st.session_state.get("demo_saved_action")
         if isinstance(saved_action, dict) and saved_action:
-            st.markdown(f"**Replay autônomo:** {saved_action.get('name', '')}")
+            st.markdown(f"**Replay determinístico:** {saved_action.get('name', '')}")
+            observer_summary = str(saved_action.get("ai_observer_summary") or "").strip()
+            if observer_summary:
+                if saved_action.get("ai_reviewed") is True:
+                    st.success(f"Revisada pela IA: {observer_summary}")
+                else:
+                    st.info(observer_summary)
             run_variables: dict[str, str] = {}
             for variable in saved_action.get("variables", []):
                 variable_name = str(variable)
@@ -953,6 +962,12 @@ elif menu_selecionado == "Catálogo de Ações":
                     st.caption(f"Passos técnicos registrados: {steps_count}")
                 else:
                     st.info("Esta rotina ainda não possui passos técnicos registrados.")
+                observer_summary = str(dados_acao.get("ai_observer_summary") or "").strip()
+                if dados_acao.get("learning_mode") == "human_demo_live_ai_observed":
+                    review_label = "Revisão de IA concluída" if dados_acao.get("ai_reviewed") else "Análise local (IA não configurada)"
+                    st.caption(f"Aprendizado demonstrado · {review_label}")
+                if observer_summary:
+                    st.write(observer_summary)
 
                 caminho_print = _screenshot_por_acao(chave_acao)
                 if caminho_print.is_file():
@@ -1010,6 +1025,13 @@ elif menu_selecionado == "Logs do Sistema":
                 st.caption(f"Ação: {nome_acao}")
 
 elif menu_selecionado == "Configurações":
+    openai_status = openai_configuration_status()
+    st.markdown("##### Observador OpenAI")
+    st.write(f"**OpenAI configurada:** {'sim' if openai_status['configured'] else 'não'}")
+    st.write(f"**Modelo atual:** `{openai_status['model']}`")
+    st.caption("Configure `OPENAI_API_KEY` e, opcionalmente, `OPENAI_MODEL` no ambiente. A chave não é exibida nem persistida.")
+    st.divider()
+
     st.markdown("##### Segurança WhatsApp *(whitelist)*")
     st.caption(
         "Numeros autorizados a acionar o webhook Evolution. "

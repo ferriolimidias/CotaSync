@@ -16,7 +16,15 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
 
-from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Locator,
+    Page,
+    Playwright,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -25,10 +33,19 @@ _DATA_DIR = _ROOT / "data"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _DEMO_SESSIONS_DIR = _DATA_DIR / "demo_sessions"
 _MAX_RECORDED_STEPS = 200
+_REPLAY_STEP_TIMEOUT_MS = 5000
 
 
 class DemoSessionError(RuntimeError):
     """Erro operacional seguro no fluxo da demonstracao."""
+
+
+class DemoReplayStepError(DemoSessionError):
+    """Falha de replay com diagnostico seguro para persistencia na run."""
+
+    def __init__(self, message: str, diagnostics: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 _RECORDER_SCRIPT = r"""
@@ -61,15 +78,54 @@ _RECORDER_SCRIPT = r"""
     return `${selectorFor(parent)} > ${tag}:nth-of-type(${Math.max(position, 1)})`;
   };
   window.__cotasyncSelectorFor = selectorFor;
-  const send = (payload) => {
+  const domSummary = () => ({
+    ready_state: document.readyState,
+    element_count: document.body ? document.body.querySelectorAll('*').length : 0,
+    interactive_count: document.querySelectorAll('button,input,select,textarea,a,[role="button"]').length,
+    modal_count: document.querySelectorAll('[role="dialog"],dialog[open],.modal.show,[aria-modal="true"]').length,
+    authenticated_marker: document.body?.dataset?.cotasyncAuthenticated === 'true'
+  });
+  const snapshot = () => ({
+    timestamp: new Date().toISOString(),
+    timestamp_ms: Date.now(),
+    url: String(location.href || '').split(/[?#]/, 1)[0],
+    title: String(document.title || '').slice(0, 200),
+    dom_summary: domSummary()
+  });
+  const send = (payload, before, delay = 0) => {
     if (!payload.seletor || typeof window.__cotasyncRecord !== 'function') return;
-    Promise.resolve(window.__cotasyncRecord(payload)).catch(() => {});
+    setTimeout(() => {
+      const after = snapshot();
+      Promise.resolve(window.__cotasyncRecord({
+        ...payload,
+        timestamp_before: before.timestamp,
+        timestamp_after: after.timestamp,
+        elapsed_ms: Math.max(0, after.timestamp_ms - before.timestamp_ms),
+        url_before: before.url,
+        url_after: after.url,
+        title_before: before.title,
+        title_after: after.title,
+        dom_summary_before: before.dom_summary,
+        dom_summary_after: after.dom_summary
+      })).catch(() => {});
+    }, delay);
   };
 
+  const inputBefore = new WeakMap();
+  const inputTimers = new WeakMap();
+  document.addEventListener('beforeinput', (event) => {
+    if (event.target && !sensitive(event.target)) inputBefore.set(event.target, snapshot());
+  }, true);
   document.addEventListener('input', (event) => {
     const el = event.target;
     if (!el || !['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || sensitive(el)) return;
-    send({tipo: 'preencher', seletor: selectorFor(el), valor: String(el.value || '')});
+    const previousTimer = inputTimers.get(el);
+    if (previousTimer) clearTimeout(previousTimer);
+    const before = inputBefore.get(el) || snapshot();
+    inputTimers.set(el, setTimeout(() => {
+      send({tipo: 'preencher', event_type: 'fill', seletor: selectorFor(el), valor: '', value_template: '{{input_value}}'}, before);
+      inputBefore.delete(el);
+    }, 250));
   }, true);
 
   document.addEventListener('click', (event) => {
@@ -79,14 +135,22 @@ _RECORDER_SCRIPT = r"""
     if (!el || sensitive(el)) return;
     const type = String(el.type || '').toLowerCase();
     if (['text', 'email', 'password', 'search', 'number'].includes(type)) return;
-    send({tipo: 'clicar', seletor: selectorFor(el), valor: ''});
-    setTimeout(captureOutputs, 100);
-    setTimeout(captureOutputs, 500);
+    const before = snapshot();
+    send({tipo: 'clicar', event_type: 'click', seletor: selectorFor(el), valor: ''}, before, 500);
+    setTimeout(captureOutputs, 650);
+    setTimeout(captureOutputs, 900);
   }, true);
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || sensitive(event.target)) return;
-    send({tipo: 'teclar', seletor: '', valor: 'Enter'});
+    const before = snapshot();
+    Promise.resolve(window.__cotasyncRecord({
+      tipo: 'teclar', event_type: 'wait', seletor: '', valor: 'Enter',
+      timestamp_before: before.timestamp, timestamp_after: before.timestamp,
+      elapsed_ms: 0, url_before: before.url, url_after: before.url,
+      title_before: before.title, title_after: before.title,
+      dom_summary_before: before.dom_summary, dom_summary_after: before.dom_summary
+    })).catch(() => {});
   }, true);
 
   const outputValues = new Map();
@@ -96,12 +160,14 @@ _RECORDER_SCRIPT = r"""
       const selector = selectorFor(el);
       if (!value || outputValues.get(selector) === value) return;
       outputValues.set(selector, value);
+      const before = snapshot();
       send({
         tipo: 'extrair_texto',
+        event_type: 'extract',
         seletor: selector,
         valor: '',
         nome: el.getAttribute('data-cotasync-output') || 'resultado'
-      });
+      }, before);
     });
   };
   new MutationObserver(captureOutputs).observe(document.documentElement, {
@@ -156,6 +222,17 @@ def _safe_page_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def _expected_replay_url(saved_url: Any) -> str:
+    candidate = str(saved_url or "").strip()
+    if urlsplit(candidate).scheme in {"http", "https"}:
+        return _safe_page_url(candidate)
+    return _safe_page_url(_demo_target_url())
+
+
+def _page_matches_url(page: Page, expected_url: str) -> bool:
+    return _safe_page_url(page.url) == _safe_page_url(expected_url)
+
+
 def _safe_file_name(value: str) -> str:
     return re.sub(r"[^\w\-]+", "_", str(value or "acao"), flags=re.UNICODE).strip("_") or "acao"
 
@@ -208,6 +285,11 @@ class DemoBrowserSession:
     status: str = "aguardando_login"
     recording: bool = False
     steps: list[dict[str, str]] = field(default_factory=list)
+    learning_events: list[dict[str, Any]] = field(default_factory=list)
+    observer_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    last_screenshot_path: str = ""
+    last_page_count: int = 0
+    download_detected: bool = False
 
 
 class DemoSessionManager:
@@ -220,15 +302,15 @@ class DemoSessionManager:
             raise DemoSessionError("Sessao de demonstracao nao encontrada ou encerrada.")
         return session
 
-    def _append_step(self, session: DemoBrowserSession, raw: Any) -> None:
+    def _append_step(self, session: DemoBrowserSession, raw: Any) -> int | None:
         if not session.recording or not isinstance(raw, dict) or len(session.steps) >= _MAX_RECORDED_STEPS:
-            return
+            return None
         step_type = str(raw.get("tipo") or "").strip().lower()
         selector = str(raw.get("seletor") or "").strip()
         if step_type not in {"clicar", "preencher", "teclar", "extrair_texto"}:
-            return
+            return None
         if step_type != "teclar" and (not selector or _is_sensitive_selector(selector)):
-            return
+            return None
         step = {
             "tipo": step_type,
             "seletor": selector,
@@ -242,10 +324,88 @@ class DemoSessionManager:
             previous = session.steps[-1]
             if previous.get("tipo") == "preencher" and previous.get("seletor") == selector:
                 session.steps[-1] = step
-                return
+                return len(session.steps) - 1
         if session.steps and session.steps[-1] == step:
-            return
+            return len(session.steps) - 1
         session.steps.append(step)
+        return len(session.steps) - 1
+
+    async def _record_live_step(self, session: DemoBrowserSession, raw: Any, source: Any = None) -> None:
+        step_index = self._append_step(session, raw)
+        if step_index is None or not isinstance(raw, dict):
+            return
+
+        page = source.get("page") if isinstance(source, dict) else None
+        if not isinstance(page, Page) or page.is_closed():
+            page = session.page
+        live_pages = [item for item in session.context.pages if not item.is_closed()]
+        opened_new_page = len(live_pages) > session.last_page_count
+        if opened_new_page and live_pages:
+            newest_page = live_pages[-1]
+            if newest_page is not page:
+                page = newest_page
+        active_page_changed = page is not session.page
+        if active_page_changed:
+            await self._set_active_page(session, page)
+
+        event_number = len(session.learning_events)
+        screenshot_after = _storage_state_path(session.id).parent / "learning" / f"step_{event_number}_after.png"
+        screenshot_after.parent.mkdir(parents=True, exist_ok=True)
+        screenshot_after_path = ""
+        try:
+            await page.screenshot(path=str(screenshot_after), full_page=False, timeout=_REPLAY_STEP_TIMEOUT_MS)
+            screenshot_after_path = str(screenshot_after.relative_to(_ROOT))
+        except Exception:
+            pass
+
+        elapsed_ms = max(0, int(raw.get("elapsed_ms") or 0))
+        event_type = str(raw.get("event_type") or "").strip().lower()
+        if event_type not in {"fill", "click", "extract", "download", "navigation", "popup", "new_tab", "modal", "wait"}:
+            event_type = {
+                "preencher": "fill",
+                "clicar": "click",
+                "extrair_texto": "extract",
+                "teclar": "wait",
+            }.get(str(raw.get("tipo") or ""), "wait")
+        event: dict[str, Any] = {
+            "step_index": step_index,
+            "event_type": event_type,
+            "selector": str(raw.get("seletor") or ""),
+            "value_template": str(raw.get("value_template") or "") if event_type == "fill" else "",
+            "variable_key": "",
+            "timestamp_before": str(raw.get("timestamp_before") or _utc_now()),
+            "timestamp_after": str(raw.get("timestamp_after") or _utc_now()),
+            "elapsed_ms": elapsed_ms,
+            "url_before": _safe_page_url(str(raw.get("url_before") or page.url)),
+            "url_after": _safe_page_url(str(raw.get("url_after") or page.url)),
+            "title_before": str(raw.get("title_before") or "")[:200],
+            "title_after": str(raw.get("title_after") or "")[:200],
+            "dom_summary_before": raw.get("dom_summary_before") if isinstance(raw.get("dom_summary_before"), dict) else {},
+            "dom_summary_after": raw.get("dom_summary_after") if isinstance(raw.get("dom_summary_after"), dict) else {},
+            "screenshot_before_path": session.last_screenshot_path,
+            "screenshot_after_path": screenshot_after_path,
+            "opened_new_page": opened_new_page,
+            "active_page_changed": active_page_changed,
+            "download_detected": session.download_detected,
+        }
+        from backend.services.ai_observer import deterministic_observe_learning_step, observe_learning_step_with_ai
+
+        event.update(deterministic_observe_learning_step(event))
+        session.learning_events.append(event)
+        session.last_screenshot_path = screenshot_after_path or session.last_screenshot_path
+        session.last_page_count = len(live_pages)
+        session.download_detected = False
+
+        async def apply_live_review() -> None:
+            review = await observe_learning_step_with_ai(
+                event,
+                {"previous_events": len(session.learning_events) - 1},
+            )
+            event.update(review)
+
+        task = asyncio.create_task(apply_live_review())
+        session.observer_tasks.add(task)
+        task.add_done_callback(session.observer_tasks.discard)
 
     async def _page_is_authenticated(self, page: Page) -> bool:
         """Valida os sinais publicos aceitos pela demo sem depender do status em memoria."""
@@ -262,11 +422,16 @@ class DemoSessionManager:
             if has_order_input and has_search_button:
                 return True
 
-            # No alvo local a tela de login usa a mesma URL. Por isso a URL so e
-            # sinal de pos-login quando o formulario de credenciais desapareceu.
+            # Sinal generico minimo para futuras paginas assistidas: depois da
+            # confirmacao humana, uma pagina HTTP carregada sem formulario de
+            # senha visivel pode continuar. Integracoes reais poderao fornecer
+            # marcadores de autenticacao mais fortes por sistema.
             is_demo_target = "/demo/alvo" in str(page.url or "")
-            has_login_form = await page.locator("input[type='password'], #demo-login").count() > 0
-            return is_demo_target and not has_login_form
+            has_login_form = await page.locator("input[type='password']:visible, #demo-login:visible").count() > 0
+            if is_demo_target:
+                return not has_login_form
+            parsed = urlsplit(str(page.url or ""))
+            return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not has_login_form
         except Exception:
             return False
 
@@ -274,14 +439,37 @@ class DemoSessionManager:
         session.page = page
         session.context = page.context
         cdp = await session.context.new_cdp_session(page)
-        target_info = await cdp.send("Target.getTargetInfo")
-        target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
+        try:
+            target_info = await cdp.send("Target.getTargetInfo")
+            target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
+        finally:
+            await cdp.detach()
         if target_id:
             session.target_id = target_id
             session.live_url = _live_url(target_id)
 
-    async def _find_authenticated_live_page(self, session: DemoBrowserSession) -> Page | None:
-        if not session.browser.is_connected():
+    async def _reconnect_live_browser(self, session: DemoBrowserSession) -> bool:
+        if session.browser.is_connected():
+            return True
+        try:
+            browser = await session.playwright.chromium.connect_over_cdp(_browserless_ws_url(session.id))
+            context = browser.contexts[0] if browser.contexts else await browser.new_context(
+                viewport={"width": 1280, "height": 800}
+            )
+            await self._prepare_reconnected_context(session.id, context)
+            session.browser = browser
+            session.context = context
+            return True
+        except Exception as exc:
+            logger.info("Pagina CDP da sessao %s indisponivel: %s", session.id, type(exc).__name__)
+            return False
+
+    async def _find_authenticated_live_page(
+        self,
+        session: DemoBrowserSession,
+        expected_url: str,
+    ) -> Page | None:
+        if not await self._reconnect_live_browser(session):
             return None
 
         candidates = [session.page]
@@ -289,14 +477,18 @@ class DemoSessionManager:
             candidates.extend(context.pages)
 
         seen: set[int] = set()
+        valid_candidates: list[Page] = []
         for page in candidates:
             identity = id(page)
             if identity in seen:
                 continue
             seen.add(identity)
-            if await self._page_is_authenticated(page):
-                return page
-        return None
+            if _page_matches_url(page, expected_url) and await self._page_is_authenticated(page):
+                valid_candidates.append(page)
+
+        if not valid_candidates:
+            return None
+        return next((page for page in valid_candidates if page is session.page), valid_candidates[0])
 
     async def _save_storage_state(self, session: DemoBrowserSession, *, required: bool) -> bool:
         path = _storage_state_path(session.id)
@@ -322,15 +514,15 @@ class DemoSessionManager:
                 tmp_path.unlink(missing_ok=True)
 
     async def _prepare_reconnected_context(self, session_id: str, context: BrowserContext) -> None:
-        async def record_binding(_source: Any, payload: Any) -> None:
+        async def record_binding(source: Any, payload: Any) -> None:
             current = self._sessions.get(session_id)
             if current is not None:
-                self._append_step(current, payload)
+                await self._record_live_step(current, payload, source)
 
         await context.expose_binding("__cotasyncRecord", record_binding)
         await context.add_init_script(_RECORDER_SCRIPT)
 
-    async def _restore_storage_state(self, session: DemoBrowserSession) -> Page | None:
+    async def _restore_storage_state(self, session: DemoBrowserSession, expected_url: str) -> Page | None:
         path = _storage_state_path(session.id)
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
@@ -340,17 +532,9 @@ class DemoSessionManager:
             return None
 
         try:
-            if session.browser.is_connected():
-                browser = session.browser
-                context = session.context
-            else:
-                browser = await session.playwright.chromium.connect_over_cdp(_browserless_ws_url(session.id))
-                context = browser.contexts[0] if browser.contexts else await browser.new_context(
-                    viewport={"width": 1280, "height": 800}
-                )
-                await self._prepare_reconnected_context(session.id, context)
-                session.browser = browser
-                session.context = context
+            if not await self._reconnect_live_browser(session):
+                return None
+            context = session.context
 
             cookies = state.get("cookies", [])
             if isinstance(cookies, list) and cookies:
@@ -386,7 +570,7 @@ class DemoSessionManager:
                 page = next((item for item in context.pages if not item.is_closed()), None)
             if page is None:
                 page = await context.new_page()
-            await page.goto(_demo_target_url(), wait_until="domcontentloaded", timeout=15000)
+            await page.goto(expected_url, wait_until="domcontentloaded", timeout=15000)
             if not await self._page_is_authenticated(page):
                 return None
             return page
@@ -394,12 +578,17 @@ class DemoSessionManager:
             logger.info("storage_state nao restaurou a sessao %s: %s", session.id, exc)
             return None
 
-    async def _revalidate_for_replay(self, session: DemoBrowserSession) -> tuple[bool, bool]:
+    async def _revalidate_for_replay(
+        self,
+        session: DemoBrowserSession,
+        expected_url: str,
+    ) -> tuple[bool, bool]:
         was_authenticated = session.status in {"autenticada", "gravando"}
-        page = await self._find_authenticated_live_page(session)
+        previous_page = session.page
+        page = await self._find_authenticated_live_page(session, expected_url)
         restored = False
         if page is None:
-            page = await self._restore_storage_state(session)
+            page = await self._restore_storage_state(session, expected_url)
             restored = page is not None
         if page is None:
             session.status = "expirada"
@@ -408,7 +597,7 @@ class DemoSessionManager:
         await self._set_active_page(session, page)
         session.status = "autenticada"
         await self._save_storage_state(session, required=False)
-        automatically_revalidated = not was_authenticated or restored
+        automatically_revalidated = not was_authenticated or restored or page is not previous_page
         if automatically_revalidated:
             logger.info(
                 "Sessao %s revalidada automaticamente via %s",
@@ -428,10 +617,10 @@ class DemoSessionManager:
             )
             page = context.pages[0] if context.pages else await context.new_page()
 
-            async def record_binding(_source: Any, payload: Any) -> None:
+            async def record_binding(source: Any, payload: Any) -> None:
                 current = self._sessions.get(session_id)
                 if current is not None:
-                    self._append_step(current, payload)
+                    await self._record_live_step(current, payload, source)
 
             await context.expose_binding("__cotasyncRecord", record_binding)
             await context.add_init_script(_RECORDER_SCRIPT)
@@ -454,6 +643,17 @@ class DemoSessionManager:
                 tracking_id=_tracking_id(session_id),
             )
             self._sessions[session_id] = session
+            session.last_page_count = len(context.pages)
+
+            def watch_download(item: Page) -> None:
+                item.on(
+                    "download",
+                    lambda _download: setattr(session, "download_detected", True),
+                )
+
+            for current_page in context.pages:
+                watch_download(current_page)
+            context.on("page", watch_download)
             logger.info("Sessao assistida criada: %s", session_id)
             return await self.status(session_id)
         except Exception as exc:
@@ -489,7 +689,7 @@ class DemoSessionManager:
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
-        page = await self._find_authenticated_live_page(session)
+        page = await self._find_authenticated_live_page(session, _safe_page_url(_demo_target_url()))
         if page is None:
             raise DemoSessionError("O login ainda nao foi concluido na pagina aberta.")
         await self._set_active_page(session, page)
@@ -503,9 +703,22 @@ class DemoSessionManager:
         if session.status != "autenticada":
             raise DemoSessionError("Confirme o login manual antes de iniciar o aprendizado.")
         session.steps = []
+        session.learning_events = []
+        for task in list(session.observer_tasks):
+            task.cancel()
+        session.observer_tasks.clear()
         session.recording = True
         session.status = "gravando"
         await session.page.evaluate(_RECORDER_SCRIPT)
+        baseline_path = _storage_state_path(session.id).parent / "learning" / "recording_before.png"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await session.page.screenshot(path=str(baseline_path), full_page=False)
+            session.last_screenshot_path = str(baseline_path.relative_to(_ROOT))
+        except Exception:
+            session.last_screenshot_path = ""
+        session.last_page_count = len([page for page in session.context.pages if not page.is_closed()])
+        session.download_detected = False
         logger.info("Gravacao iniciada na sessao %s", session_id)
         return await self.status(session_id)
 
@@ -513,7 +726,7 @@ class DemoSessionManager:
         session = self._get(session_id)
         if not session.recording:
             raise DemoSessionError("Nao existe gravacao ativa nesta sessao.")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.7)
         outputs = await session.page.evaluate(
             """() => Array.from(document.querySelectorAll('[data-cotasync-output]'))
               .map((el) => ({
@@ -535,7 +748,7 @@ class DemoSessionManager:
                     for step in session.steps
                 ):
                     continue
-                self._append_step(session, output)
+                await self._record_live_step(session, output)
         session.recording = False
         session.status = "autenticada"
         if not session.steps:
@@ -544,6 +757,7 @@ class DemoSessionManager:
         return {
             "session": await self.status(session_id),
             "steps": [dict(step, index=index) for index, step in enumerate(session.steps)],
+            "learning_events": [dict(event) for event in session.learning_events],
         }
 
     async def save_action(
@@ -561,6 +775,7 @@ class DemoSessionManager:
             raise DemoSessionError("Nao existem passos capturados para salvar.")
 
         steps = [dict(step) for step in session.steps]
+        learning_events = [dict(event) for event in session.learning_events]
         variables: list[str] = []
         for index_raw, variable_raw in variable_names.items():
             try:
@@ -572,18 +787,62 @@ class DemoSessionManager:
                 continue
             steps[index]["variavel"] = variable
             steps[index]["valor"] = ""
+            for event in learning_events:
+                if event.get("step_index") == index and event.get("event_type") == "fill":
+                    event["variable_key"] = variable
+                    event["value_template"] = f"{{{{{variable}}}}}"
             if variable not in variables:
                 variables.append(variable)
 
-        payload = _load_ui_map()
-        payload["acoes_conhecidas"][action_name] = {
+        robust_steps: list[dict[str, Any]] = []
+        for index, step in enumerate(steps):
+            event = next(
+                (item for item in reversed(learning_events) if item.get("step_index") == index),
+                {},
+            )
+            robust_step = dict(step)
+            robust_step.update(
+                {
+                    "elapsed_ms": max(0, int(event.get("elapsed_ms") or 0)),
+                    "wait_hint": str(event.get("wait_hint") or "Aguardar seletor visível e habilitado."),
+                    "replay_hint": str(event.get("replay_hint") or "Revalidar página ativa."),
+                    "expected_url_before": str(event.get("url_before") or ""),
+                    "expected_url_after": str(event.get("url_after") or ""),
+                    "opened_new_page": bool(event.get("opened_new_page")),
+                    "download_detected": bool(event.get("download_detected")),
+                    "expected_selector_after": str(
+                        steps[index + 1].get("seletor") if index + 1 < len(steps) else ""
+                    ),
+                }
+            )
+            robust_steps.append(robust_step)
+
+        learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
             "descricao": str(description or "Rotina aprendida por demonstracao manual.").strip(),
-            "url_inicial": "sessao_assistida",
+            "url_inicial": _safe_page_url(session.page.url),
             "passos_playwright": steps,
+            "robust_steps": robust_steps,
+            "learning_events": learning_events,
             "variaveis_necessarias": variables,
-            "modo_aprendizado": "gravacao_manual",
+            "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
+            "learning_mode": "human_demo_live_ai_observed",
         }
+        from backend.services.ai_observer import analyze_recorded_action_with_ai
+
+        ai_review = await analyze_recorded_action_with_ai(learned_action)
+        learned_action.update(ai_review)
+        learned_action["wait_strategies"] = learned_action.get("waits", [])
+        learned_action["risks_detected"] = learned_action.get("ai_risk_notes", [])
+        learned_action["slow_system_notes"] = learned_action.get("ai_slow_system_notes", [])
+        learned_action["new_tab_or_popup_notes"] = [
+            str(event.get("ai_note") or event.get("replay_hint") or "")
+            for event in learning_events
+            if event.get("opened_new_page") or event.get("event_type") in {"popup", "new_tab"}
+        ] or ["Nenhuma nova aba ou popup foi detectado durante esta demonstração."]
+
+        payload = _load_ui_map()
+        payload["acoes_conhecidas"][action_name] = learned_action
         screenshot_path = _DATA_DIR / f"mapeamento_{_safe_file_name(action_name)}.png"
         await session.page.screenshot(path=str(screenshot_path), full_page=False)
         _save_ui_map(payload)
@@ -598,6 +857,15 @@ class DemoSessionManager:
             "steps_count": len(steps),
             "variables": variables,
             "evidence": str(screenshot_path.relative_to(_ROOT)),
+            "learning_mode": learned_action["learning_mode"],
+            "ai_reviewed": bool(learned_action.get("ai_reviewed")),
+            "ai_observer_summary": str(learned_action.get("ai_observer_summary") or ""),
+            "replay_hints": learned_action.get("replay_hints", []),
+            "waits": learned_action.get("waits", []),
+            "variable_schema": learned_action.get("variable_schema", []),
+            "extraction_target": str(learned_action.get("extraction_target") or ""),
+            "robust_steps_count": len(robust_steps),
+            "learning_events_count": len(learning_events),
         }
 
     async def execute_action(
@@ -608,9 +876,6 @@ class DemoSessionManager:
         run_id: str,
     ) -> dict[str, Any]:
         session = self._get(session_id)
-        authenticated, automatically_revalidated = await self._revalidate_for_replay(session)
-        if not authenticated:
-            raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
         if session.recording:
             raise DemoSessionError("Pare a gravacao antes de executar a rotina aprendida.")
 
@@ -618,37 +883,124 @@ class DemoSessionManager:
         action = payload["acoes_conhecidas"].get(action_key)
         if not isinstance(action, dict):
             raise DemoSessionError("Acao aprendida nao encontrada.")
-        steps = action.get("passos_playwright", [])
+        steps = action.get("robust_steps") or action.get("passos_playwright", [])
         if not isinstance(steps, list) or not steps:
             raise DemoSessionError("A acao aprendida nao possui passos executaveis.")
 
+        expected_url = _expected_replay_url(action.get("url_inicial"))
         extracted: dict[str, str] = {}
-        for step in steps:
+        selector_diagnostics: list[dict[str, Any]] = []
+        automatically_revalidated = False
+        for step_index, step in enumerate(steps):
             if not isinstance(step, dict):
                 continue
             step_type = str(step.get("tipo") or "").strip().lower()
             selector = str(step.get("seletor") or "").strip()
             try:
+                step_expected_url = _expected_replay_url(step.get("expected_url_before") or expected_url)
+                authenticated, revalidated = await self._revalidate_for_replay(session, step_expected_url)
+                automatically_revalidated = automatically_revalidated or revalidated
+                if not authenticated:
+                    raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
+                page = session.page
+                await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                if not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(page):
+                    raise DemoSessionError("A pagina CDP da sessao nao esta pronta para o replay.")
+
+                locator: Locator | None = None
+                state: dict[str, Any] | None = None
+                if selector:
+                    locator, state = await self._wait_actionable_locator(page, selector)
+                    state.update({"step_index": step_index, "step_type": step_type})
+                    selector_diagnostics.append(state)
+
                 if step_type == "preencher":
                     variable = str(step.get("variavel") or "").strip()
                     value = variables.get(variable) if variable else step.get("valor", "")
                     if variable and (value is None or str(value) == ""):
                         raise DemoSessionError(f"Valor obrigatorio ausente: {variable}.")
-                    await session.page.locator(selector).first.fill(str(value), timeout=5000)
+                    assert locator is not None
+                    await locator.fill(str(value), timeout=_REPLAY_STEP_TIMEOUT_MS)
                 elif step_type == "clicar":
-                    await session.page.locator(selector).first.click(timeout=5000)
-                    await session.page.wait_for_timeout(500)
+                    assert locator is not None and state is not None
+                    pages_before = {id(item) for item in session.context.pages if not item.is_closed()}
+                    await locator.scroll_into_view_if_needed(timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    click_marker = f"__cotasyncReplayClick_{run_id.replace('-', '')}_{step_index}"
+                    await locator.evaluate(
+                        """(element, marker) => {
+                          delete window[marker];
+                          element.addEventListener('click', () => { window[marker] = true; }, {
+                            capture: true,
+                            once: true
+                          });
+                        }""",
+                        click_marker,
+                    )
+                    try:
+                        await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        state["click_confirmation"] = "cdp"
+                    except PlaywrightTimeoutError:
+                        click_observed = bool(await page.evaluate("marker => window[marker] === true", click_marker))
+                        state["click_event_observed"] = click_observed
+                        if not click_observed:
+                            raise
+                        state["click_confirmation"] = "dom_event_after_cdp_timeout"
+                        logger.warning(
+                            "Clique da sessao %s no seletor %s ocorreu no DOM sem confirmacao CDP",
+                            session.id,
+                            selector,
+                        )
+                    finally:
+                        try:
+                            await page.evaluate("marker => { delete window[marker]; }", click_marker)
+                        except Exception:
+                            pass
+                    recorded_wait_ms = min(max(int(step.get("elapsed_ms") or 0), 500), 5000)
+                    await page.wait_for_timeout(recorded_wait_ms)
+                    new_pages = [
+                        item
+                        for item in session.context.pages
+                        if not item.is_closed() and id(item) not in pages_before
+                    ]
+                    if new_pages:
+                        page = new_pages[-1]
+                        await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        await self._set_active_page(session, page)
+                        state["new_page_detected"] = True
+                    expected_after = str(step.get("expected_url_after") or "").strip()
+                    if expected_after and _safe_page_url(page.url) != _safe_page_url(expected_after):
+                        await page.wait_for_url(_safe_page_url(expected_after), timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    expected_selector = str(step.get("expected_selector_after") or "").strip()
+                    if expected_selector:
+                        await page.locator(expected_selector).first.wait_for(
+                            state="visible",
+                            timeout=_REPLAY_STEP_TIMEOUT_MS,
+                        )
+                    state["recorded_wait_ms"] = recorded_wait_ms
+                    state["wait_hint"] = str(step.get("wait_hint") or "")
+                    state["replay_hint"] = str(step.get("replay_hint") or "")
                 elif step_type == "teclar":
-                    await session.page.keyboard.press(str(step.get("valor") or "Enter"))
-                    await session.page.wait_for_timeout(300)
+                    await page.keyboard.press(str(step.get("valor") or "Enter"))
+                    await page.wait_for_timeout(300)
                 elif step_type == "extrair_texto":
-                    locator = session.page.locator(selector).first
-                    text = await locator.inner_text(timeout=5000)
+                    assert locator is not None
+                    text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
                     extracted[str(step.get("nome") or selector)] = text.strip()
             except DemoSessionError:
                 raise
             except Exception as exc:
-                raise DemoSessionError(f"Falha ao executar o passo '{step_type}'.") from exc
+                diagnostics = await self._capture_step_diagnostics(
+                    session,
+                    run_id,
+                    step_index,
+                    step_type,
+                    selector,
+                    exc,
+                )
+                raise DemoReplayStepError(
+                    f"Falha ao executar o passo '{step_type}'. Consulte o diagnostico da run.",
+                    diagnostics,
+                ) from exc
 
         evidence_path = _DATA_DIR / "runs" / f"{run_id}.png"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -660,13 +1012,103 @@ class DemoSessionManager:
             "dados_extraidos": extracted,
             "passos_executados": len(steps),
             "session_revalidated": automatically_revalidated,
+            "selector_diagnostics": selector_diagnostics,
         }
+
+    async def _wait_actionable_locator(self, page: Page, selector: str) -> tuple[Locator, dict[str, Any]]:
+        locator = page.locator(selector).first
+        await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
+        deadline = asyncio.get_running_loop().time() + (_REPLAY_STEP_TIMEOUT_MS / 1000)
+        while not await locator.is_enabled():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise PlaywrightTimeoutError(f"Seletor nao ficou habilitado: {selector}")
+            await page.wait_for_timeout(100)
+        return locator, await self._selector_state(page, selector)
+
+    async def _selector_state(self, page: Page, selector: str) -> dict[str, Any]:
+        locator = page.locator(selector)
+        count = await locator.count()
+        first = locator.first
+        visible = await first.is_visible() if count else False
+        enabled = await first.is_enabled() if count else False
+        return {
+            "current_url": _safe_page_url(page.url),
+            "selector": selector,
+            "count": count,
+            "visible": visible,
+            "enabled": enabled,
+        }
+
+    async def _capture_step_diagnostics(
+        self,
+        session: DemoBrowserSession,
+        run_id: str,
+        step_index: int,
+        step_type: str,
+        selector: str,
+        exc: Exception,
+    ) -> dict[str, Any]:
+        page = session.page
+        diagnostics: dict[str, Any] = {
+            "step_index": step_index,
+            "step_type": step_type,
+            "selector": selector,
+            "current_url": _safe_page_url(page.url),
+            "page_title": "",
+            "count": 0,
+            "visible": False,
+            "enabled": False,
+            "screenshot_path": "",
+            "safe_dom_summary": {},
+            "error_type": type(exc).__name__,
+        }
+        try:
+            diagnostics["page_title"] = (await page.title())[:200]
+        except Exception:
+            pass
+        try:
+            diagnostics.update(await self._selector_state(page, selector))
+        except Exception:
+            pass
+        evidence_path = _DATA_DIR / "runs" / f"{run_id}_step_{step_index}_{_safe_file_name(step_type)}_error.png"
+        try:
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(evidence_path), full_page=False, timeout=_REPLAY_STEP_TIMEOUT_MS)
+            diagnostics["screenshot_path"] = str(evidence_path.relative_to(_ROOT))
+        except Exception:
+            pass
+        try:
+            diagnostics["safe_dom_summary"] = await page.evaluate(
+                """() => ({
+                  ready_state: document.readyState,
+                  body: {
+                    authenticated: document.body?.dataset?.cotasyncAuthenticated === 'true',
+                    element_count: document.body?.querySelectorAll('*').length || 0
+                  },
+                  interactive_elements: Array.from(document.querySelectorAll(
+                    'button, input, select, textarea, a, [role="button"], [data-cotasync-output]'
+                  )).slice(0, 30).map((element) => ({
+                    tag: element.tagName.toLowerCase(),
+                    id: String(element.id || '').slice(0, 100),
+                    type: String(element.getAttribute('type') || '').slice(0, 40),
+                    role: String(element.getAttribute('role') || '').slice(0, 40),
+                    disabled: Boolean(element.disabled || element.getAttribute('aria-disabled') === 'true')
+                  }))
+                })"""
+            )
+        except Exception:
+            pass
+        logger.error("Diagnostico seguro de replay: %s", json.dumps(diagnostics, ensure_ascii=False))
+        return diagnostics
 
     async def close(self, session_id: str) -> None:
         session = self._sessions.pop(str(session_id), None)
         if session is None:
             return
         session.status = "encerrada"
+        for task in list(session.observer_tasks):
+            task.cancel()
+        session.observer_tasks.clear()
         try:
             await session.browser.close()
         finally:
