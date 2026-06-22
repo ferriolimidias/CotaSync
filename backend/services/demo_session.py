@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ logger = logging.getLogger("cotasync.demo")
 _ROOT = Path(__file__).resolve().parents[2]
 _DATA_DIR = _ROOT / "data"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
+_DEMO_SESSIONS_DIR = _DATA_DIR / "demo_sessions"
 _MAX_RECORDED_STEPS = 200
 
 
@@ -162,6 +164,10 @@ def _is_sensitive_selector(selector: str) -> bool:
     return bool(re.search(r"password|senha|secret|token|otp|captcha", selector, flags=re.IGNORECASE))
 
 
+def _storage_state_path(session_id: str) -> Path:
+    return _DEMO_SESSIONS_DIR / str(session_id) / "storage_state.json"
+
+
 def _load_ui_map() -> dict[str, Any]:
     if not _UI_MAP_PATH.is_file():
         return {"acoes_conhecidas": {}}
@@ -241,6 +247,176 @@ class DemoSessionManager:
             return
         session.steps.append(step)
 
+    async def _page_is_authenticated(self, page: Page) -> bool:
+        """Valida os sinais publicos aceitos pela demo sem depender do status em memoria."""
+
+        try:
+            if page.is_closed():
+                return False
+            if await page.locator("[data-cotasync-authenticated='true']").count() > 0:
+                return True
+            if await page.get_by_text("Consulta de Pedidos", exact=False).count() > 0:
+                return True
+            has_order_input = await page.locator("input#pedido-codigo").count() > 0
+            has_search_button = await page.locator("button#buscar-pedido").count() > 0
+            if has_order_input and has_search_button:
+                return True
+
+            # No alvo local a tela de login usa a mesma URL. Por isso a URL so e
+            # sinal de pos-login quando o formulario de credenciais desapareceu.
+            is_demo_target = "/demo/alvo" in str(page.url or "")
+            has_login_form = await page.locator("input[type='password'], #demo-login").count() > 0
+            return is_demo_target and not has_login_form
+        except Exception:
+            return False
+
+    async def _set_active_page(self, session: DemoBrowserSession, page: Page) -> None:
+        session.page = page
+        session.context = page.context
+        cdp = await session.context.new_cdp_session(page)
+        target_info = await cdp.send("Target.getTargetInfo")
+        target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
+        if target_id:
+            session.target_id = target_id
+            session.live_url = _live_url(target_id)
+
+    async def _find_authenticated_live_page(self, session: DemoBrowserSession) -> Page | None:
+        if not session.browser.is_connected():
+            return None
+
+        candidates = [session.page]
+        for context in session.browser.contexts:
+            candidates.extend(context.pages)
+
+        seen: set[int] = set()
+        for page in candidates:
+            identity = id(page)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if await self._page_is_authenticated(page):
+                return page
+        return None
+
+    async def _save_storage_state(self, session: DemoBrowserSession, *, required: bool) -> bool:
+        path = _storage_state_path(session.id)
+        tmp_path: Path | None = None
+        try:
+            state = await session.context.storage_state()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+                json.dump(state, tmp, ensure_ascii=False, indent=2)
+                tmp.write("\n")
+                tmp_path = Path(tmp.name)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+            tmp_path = None
+            return True
+        except Exception as exc:
+            logger.warning("Falha ao persistir storage_state da sessao %s: %s", session.id, exc)
+            if required:
+                raise DemoSessionError("Login reconhecido, mas nao foi possivel salvar a sessao.") from exc
+            return False
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    async def _prepare_reconnected_context(self, session_id: str, context: BrowserContext) -> None:
+        async def record_binding(_source: Any, payload: Any) -> None:
+            current = self._sessions.get(session_id)
+            if current is not None:
+                self._append_step(current, payload)
+
+        await context.expose_binding("__cotasyncRecord", record_binding)
+        await context.add_init_script(_RECORDER_SCRIPT)
+
+    async def _restore_storage_state(self, session: DemoBrowserSession) -> Page | None:
+        path = _storage_state_path(session.id)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(state, dict):
+            return None
+
+        try:
+            if session.browser.is_connected():
+                browser = session.browser
+                context = session.context
+            else:
+                browser = await session.playwright.chromium.connect_over_cdp(_browserless_ws_url(session.id))
+                context = browser.contexts[0] if browser.contexts else await browser.new_context(
+                    viewport={"width": 1280, "height": 800}
+                )
+                await self._prepare_reconnected_context(session.id, context)
+                session.browser = browser
+                session.context = context
+
+            cookies = state.get("cookies", [])
+            if isinstance(cookies, list) and cookies:
+                await context.add_cookies(cookies)
+
+            local_storage_by_origin: dict[str, dict[str, str]] = {}
+            origins = state.get("origins", [])
+            if isinstance(origins, list):
+                for origin_state in origins:
+                    if not isinstance(origin_state, dict):
+                        continue
+                    origin = str(origin_state.get("origin") or "")
+                    entries = origin_state.get("localStorage", [])
+                    if not origin or not isinstance(entries, list):
+                        continue
+                    local_storage_by_origin[origin] = {
+                        str(item.get("name")): str(item.get("value"))
+                        for item in entries
+                        if isinstance(item, dict) and item.get("name") is not None
+                    }
+            if local_storage_by_origin:
+                serialized = json.dumps(local_storage_by_origin, ensure_ascii=False)
+                await context.add_init_script(
+                    f"""() => {{
+                      const stored = {serialized};
+                      const entries = stored[window.location.origin] || {{}};
+                      for (const [key, value] of Object.entries(entries)) localStorage.setItem(key, value);
+                    }}"""
+                )
+
+            page = session.page if not session.page.is_closed() and session.page.context == context else None
+            if page is None:
+                page = next((item for item in context.pages if not item.is_closed()), None)
+            if page is None:
+                page = await context.new_page()
+            await page.goto(_demo_target_url(), wait_until="domcontentloaded", timeout=15000)
+            if not await self._page_is_authenticated(page):
+                return None
+            return page
+        except Exception as exc:
+            logger.info("storage_state nao restaurou a sessao %s: %s", session.id, exc)
+            return None
+
+    async def _revalidate_for_replay(self, session: DemoBrowserSession) -> tuple[bool, bool]:
+        was_authenticated = session.status in {"autenticada", "gravando"}
+        page = await self._find_authenticated_live_page(session)
+        restored = False
+        if page is None:
+            page = await self._restore_storage_state(session)
+            restored = page is not None
+        if page is None:
+            session.status = "expirada"
+            return False, False
+
+        await self._set_active_page(session, page)
+        session.status = "autenticada"
+        await self._save_storage_state(session, required=False)
+        automatically_revalidated = not was_authenticated or restored
+        if automatically_revalidated:
+            logger.info(
+                "Sessao %s revalidada automaticamente via %s",
+                session.id,
+                "storage_state" if restored else "pagina CDP ativa",
+            )
+        return True, automatically_revalidated
+
     async def create(self) -> dict[str, Any]:
         session_id = str(uuid4())
         playwright = await async_playwright().start()
@@ -313,11 +489,12 @@ class DemoSessionManager:
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
-        password_visible = await session.page.locator("input[type='password']").count() > 0
-        marker = await session.page.locator("[data-cotasync-authenticated='true']").count() > 0
-        if password_visible and not marker:
+        page = await self._find_authenticated_live_page(session)
+        if page is None:
             raise DemoSessionError("O login ainda nao foi concluido na pagina aberta.")
+        await self._set_active_page(session, page)
         session.status = "autenticada"
+        await self._save_storage_state(session, required=True)
         logger.info("Login manual confirmado para a sessao %s", session_id)
         return await self.status(session_id)
 
@@ -431,7 +608,8 @@ class DemoSessionManager:
         run_id: str,
     ) -> dict[str, Any]:
         session = self._get(session_id)
-        if session.status not in {"autenticada", "gravando"}:
+        authenticated, automatically_revalidated = await self._revalidate_for_replay(session)
+        if not authenticated:
             raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
         if session.recording:
             raise DemoSessionError("Pare a gravacao antes de executar a rotina aprendida.")
@@ -481,6 +659,7 @@ class DemoSessionManager:
             "evidencia": str(evidence_path.relative_to(_ROOT)),
             "dados_extraidos": extracted,
             "passos_executados": len(steps),
+            "session_revalidated": automatically_revalidated,
         }
 
     async def close(self, session_id: str) -> None:
@@ -492,6 +671,7 @@ class DemoSessionManager:
             await session.browser.close()
         finally:
             await session.playwright.stop()
+            shutil.rmtree(_storage_state_path(session_id).parent, ignore_errors=True)
         logger.info("Sessao assistida encerrada: %s", session_id)
 
     async def close_all(self) -> None:

@@ -22,6 +22,7 @@ UI_MAP = ROOT / "data" / "ui_map.json"
 RUNS = ROOT / "data" / "runs" / "runs.json"
 ACTION_NAME = "Consultar status do pedido"
 MAPPING_EVIDENCE = ROOT / "data" / "mapeamento_Consultar_status_do_pedido.png"
+DEMO_SESSIONS = ROOT / "data" / "demo_sessions"
 
 
 def api(method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 30) -> dict[str, Any]:
@@ -81,6 +82,7 @@ async def run_cycle(number: int) -> str:
         await page.wait_for_selector("[data-cotasync-authenticated='true']", timeout=5000)
         confirmed = api("POST", f"/api/demo/sessions/{session_id}/confirm-login")
         assert confirmed["session"]["status"] == "autenticada"
+        assert (DEMO_SESSIONS / session_id / "storage_state.json").is_file()
 
         started = api("POST", f"/api/demo/sessions/{session_id}/recording/start")
         assert started["session"]["status"] == "gravando"
@@ -146,6 +148,66 @@ async def run_cycle(number: int) -> str:
             await playwright.stop()
 
 
+async def run_revalidation_regression() -> None:
+    from backend.schemas.runs import ActionRunRequest
+    from backend.services.action_runner import run_action_sync
+    from backend.services.actions_repository import find_action
+    from backend.services.demo_session import demo_session_manager
+
+    created = await demo_session_manager.create()
+    session_id = str(created["id"])
+    session = demo_session_manager._get(session_id)
+    storage_state = DEMO_SESSIONS / session_id / "storage_state.json"
+    try:
+        await session.page.fill("#demo-user", "demo")
+        await session.page.fill("#demo-password", "demo")
+        await session.page.click("#demo-login")
+        await session.page.wait_for_selector("[data-cotasync-authenticated='true']", timeout=5000)
+        confirmed = await demo_session_manager.confirm_login(session_id)
+        assert confirmed["status"] == "autenticada"
+        assert storage_state.is_file()
+
+        action = find_action("consultar-status-do-pedido")
+        assert action is not None
+
+        # Regressao principal: somente o status interno expira; a pagina CDP continua autenticada.
+        session.status = "expirada"
+        assert await session.page.locator("[data-cotasync-authenticated='true']").count() == 1
+        live_run = await run_action_sync(
+            action,
+            ActionRunRequest(
+                variables={"codigo_pedido": "PED-2002"},
+                requested_by="demo-revalidation-live-test",
+                session_id=session_id,
+            ),
+        )
+        assert live_run.status == "success", live_run
+        assert live_run.result_payload and live_run.result_payload.get("session_revalidated") is True
+        assert session.status == "autenticada"
+
+        # Fallback: remove o cookie do contexto vivo e comprova a restauracao do arquivo salvo.
+        await session.context.clear_cookies()
+        await session.page.goto(session.page.url, wait_until="domcontentloaded")
+        assert await session.page.locator("input[type='password']").count() == 1
+        session.status = "expirada"
+        restored_run = await run_action_sync(
+            action,
+            ActionRunRequest(
+                variables={"codigo_pedido": "PED-2002"},
+                requested_by="demo-revalidation-storage-test",
+                session_id=session_id,
+            ),
+        )
+        assert restored_run.status == "success", restored_run
+        assert restored_run.result_payload and restored_run.result_payload.get("session_revalidated") is True
+        assert session.status == "autenticada"
+        assert await session.page.locator("[data-cotasync-authenticated='true']").count() == 1
+        print("Regressao: replay revalidou pagina CDP ativa e restaurou storage_state.")
+    finally:
+        await demo_session_manager.close(session_id)
+        assert not storage_state.exists()
+
+
 async def main() -> None:
     ui_map_existed = UI_MAP.exists()
     runs_existed = RUNS.exists()
@@ -157,6 +219,7 @@ async def main() -> None:
     try:
         for cycle in range(1, 4):
             await run_cycle(cycle)
+        await run_revalidation_regression()
         print("Demo v0.1 validada em 3 ciclos consecutivos sem sistema externo.")
     finally:
         UI_MAP.parent.mkdir(parents=True, exist_ok=True)

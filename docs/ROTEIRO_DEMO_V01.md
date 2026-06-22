@@ -51,6 +51,7 @@ Demo v0.1 validada em 3 ciclos consecutivos sem sistema externo.
 15. Clique em **Executar ação aprendida**.
 16. Mostre:
     - status de sucesso e ID da run;
+    - se o status interno tiver expirado, a mensagem **Sessão revalidada automaticamente.**;
     - resultado extraído `status_pedido: Enviado`;
     - screenshot final do replay;
     - campo da página alterado para `PED-2002` sem intervenção humana.
@@ -67,6 +68,7 @@ Demo v0.1 validada em 3 ciclos consecutivos sem sistema externo.
 - A ação é criada durante a apresentação.
 - `data/ui_map.json` recebe passos estruturados e uma variável.
 - O replay usa `PED-2002`, diferente do ensino com `PED-1001`.
+- Antes do replay, a sessão é revalidada pela página CDP ativa e, se necessário, pelo `storage_state` salvo durante o login.
 - A run termina em `success` e extrai `Enviado`.
 - O PNG associado à run é exibido.
 
@@ -91,6 +93,7 @@ Recuperação segura:
 
 - Uma sessão assistida por vez na apresentação.
 - Sessões vivem em memória e terminam com o backend.
+- O `storage_state` fica somente em `data/demo_sessions/<session_id>/` durante a sessão e é removido ao encerrá-la.
 - O recorder cobre preenchimento, clique, Enter e saída marcada pelo alvo.
 - O fluxo antigo de chat/Cartógrafo permanece separado.
 - Sem multiusuário, SaaS, Postgres definitivo, fila ou integrações externas.

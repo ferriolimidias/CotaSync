@@ -307,6 +307,8 @@ def _render_demo_v01() -> None:
                 st.error(str(last_run.get("error_message") or "Execução não concluída."))
             payload = last_run.get("result_payload", {})
             if isinstance(payload, dict):
+                if payload.get("session_revalidated") is True:
+                    st.info("Sessão revalidada automaticamente.")
                 extracted = payload.get("dados_extraidos")
                 steps_executed = payload.get("passos_executados")
                 if steps_executed:

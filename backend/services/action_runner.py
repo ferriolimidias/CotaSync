@@ -78,7 +78,7 @@ def mask_variables(variables: dict[str, Any]) -> dict[str, Any]:
 
 def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
-    for key in ("evidencia", "arquivos", "dados_extraidos", "passos_executados"):
+    for key in ("evidencia", "arquivos", "dados_extraidos", "passos_executados", "session_revalidated"):
         value = result.get(key)
         if value:
             payload[key] = value

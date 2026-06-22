@@ -20,6 +20,8 @@ data/usuarios_autorizados.json
 data/*.png
 data/*.xlsx
 data/agendamentos/
+data/demo_sessions/**
+!data/demo_sessions/.gitkeep
 data/chat_history.json
 data/erp_config.json
 data/runs/*.json
