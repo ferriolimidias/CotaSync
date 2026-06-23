@@ -27,6 +27,7 @@ data/external_systems/sessions/**
 data/chat_history.json
 data/erp_config.json
 data/browser_config.json
+data/runtime/desktop_view_tokens.json
 data/runs/*.json
 !data/runs/.gitkeep
 

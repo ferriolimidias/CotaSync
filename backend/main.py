@@ -9,6 +9,7 @@ import glob
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from backend.api.actions import router as actions_router
 from backend.api.browser import router as browser_router
 from backend.api.demo import router as demo_router
+from backend.api.desktop_browser import router as desktop_browser_router
 from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
 from backend.motor_browser import processar_lote_com_semaforo, verificar_browserless
@@ -32,6 +34,25 @@ load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cotasync.api")
+
+
+class _MaskViewTokenFilter(logging.Filter):
+    """Impede que validacoes diretas por query exponham o segredo no access log."""
+
+    _pattern = re.compile(r"(?i)(token=)[^&\s\"]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = self._pattern.sub(r"\1<masked>", record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                self._pattern.sub(r"\1<masked>", value) if isinstance(value, str) else value
+                for value in record.args
+            )
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_MaskViewTokenFilter())
 
 scheduler = AsyncIOScheduler()
 
@@ -65,6 +86,7 @@ app.include_router(browser_router)
 app.include_router(actions_run_router)
 app.include_router(runs_router)
 app.include_router(demo_router)
+app.include_router(desktop_browser_router)
 app.include_router(external_systems_router)
 
 

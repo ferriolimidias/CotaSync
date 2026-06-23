@@ -87,11 +87,13 @@ services:
       DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
       COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
+      COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-}
+      COTASYNC_DESKTOP_VIEW_TOKEN_TTL_SECONDS: ${COTASYNC_DESKTOP_VIEW_TOKEN_TTL_SECONDS:-1800}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       REDIS_URL: redis://cotasync_test_redis:6379/0
     ports:
-      - "${BACKEND_PORT:-8100}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8100}:8000"
     volumes:
       - .:/app
     networks:
@@ -119,6 +121,7 @@ services:
       COTASYNC_API_BASE_URL: http://cotasync_test_backend:8000
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
       COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
+      COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-}
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       REDIS_URL: redis://cotasync_test_redis:6379/0
     ports:

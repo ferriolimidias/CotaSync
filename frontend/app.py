@@ -128,6 +128,39 @@ def _screenshot_por_acao(chave_acao: str) -> Path:
     return _DATA_DIR / f"mapeamento_{_normalizar_nome_arquivo(chave_acao)}.png"
 
 
+def _render_desktop_view_access(state_suffix: str) -> None:
+    """Gera acesso noVNC sob demanda sem renderizar o token como texto."""
+
+    state_key = f"desktop_view_access_{state_suffix}"
+    if st.button(
+        "Abrir Navegador Desktop",
+        key=f"desktop_view_generate_{state_suffix}",
+        use_container_width=True,
+    ):
+        try:
+            access = demo_api_request(
+                "POST",
+                "/api/desktop-browser/view-token",
+                api_base_url=API_BASE_URL,
+            )
+            st.session_state[state_key] = access
+        except DemoApiError as exc:
+            st.session_state.pop(state_key, None)
+            st.error(str(exc))
+
+    access = st.session_state.get(state_key)
+    if not isinstance(access, dict):
+        return
+    view_url = str(access.get("view_url") or "")
+    expires_at = str(access.get("expires_at") or "")
+    ttl_seconds = int(access.get("ttl_seconds") or 0)
+    if view_url:
+        st.link_button("Acessar navegador temporariamente", view_url, use_container_width=True)
+        ttl_minutes = max(1, ttl_seconds // 60)
+        expiry_label = expires_at.replace("T", " ").replace("+00:00", " UTC")
+        st.caption(f"Link temporário: {ttl_minutes} min · expira em {expiry_label}.")
+
+
 def _nome_variavel_sugerida(selector: str, index: int) -> str:
     tokens = [
         token.lower()
@@ -199,7 +232,10 @@ def _render_demo_v01() -> None:
             st.caption("Alvo local de demonstração (fallback).")
 
         live_url = str(session.get("live_url", "") or "")
-        if live_url:
+        if session.get("browser_mode") == "desktop_browser":
+            _render_desktop_view_access(f"session_{session_id}")
+            st.caption("Se a janela remota não aceitar teclado, use Modo operador.")
+        elif live_url:
             link_label = (
                 "Abrir Navegador Desktop"
                 if session.get("browser_mode") == "desktop_browser"
@@ -1218,9 +1254,7 @@ elif menu_selecionado == "Configurações":
         status_left.metric("Desktop Browser", "rodando" if desktop_status.get("running") else "parado")
         status_right.metric("CDP", "acessível" if desktop_status.get("cdp_reachable") else "indisponível")
         st.caption(f"CDP interno: `{desktop_status.get('cdp_url') or 'não configurado'}`")
-        view_url = str(desktop_status.get("view_url") or "")
-        if view_url:
-            st.link_button("Abrir Navegador Desktop", view_url, use_container_width=True)
+        _render_desktop_view_access("settings")
         st.caption(f"Perfil persistente no worker: `{desktop_status.get('profile_dir') or '/data/profile'}`")
     st.divider()
 
@@ -1282,9 +1316,11 @@ elif menu_selecionado == "Configurações":
                 st.error(str(exc))
     public_base_url = os.getenv("COTASYNC_PUBLIC_BASE_URL", "").strip()
     browserless_public_url = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
+    desktop_public_url = os.getenv("COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL", "").strip()
     desktop_browser_view_url = os.getenv("DESKTOP_BROWSER_VIEW_URL", "").strip()
     st.caption(f"URL pública do app: `{public_base_url or 'não configurada'}`")
     st.caption(f"URL pública do navegador: `{browserless_public_url or 'não configurada'}`")
+    st.caption(f"URL pública protegida do Desktop Browser: `{desktop_public_url or 'não configurada'}`")
     st.caption(f"Visualização local do Desktop Browser: `{desktop_browser_view_url or 'não configurada'}`")
     st.divider()
 
