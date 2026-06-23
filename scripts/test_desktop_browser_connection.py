@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ API_BASE = os.getenv("COTASYNC_API_BASE_URL", "http://127.0.0.1:8000").rstrip("/
 ROOT = Path(__file__).resolve().parents[1]
 ACTION_NAME = "Desktop Browser MVP - consulta local"
 ACTION_VARIABLE = "pedido_desktop"
+EXTERNAL_SESSIONS = ROOT / "data" / "external_systems" / "sessions"
 TRACKED_FILES = (
     ROOT / "data" / "browser_config.json",
     ROOT / "data" / "external_systems" / "current.json",
@@ -46,12 +48,24 @@ async def clear_local_demo_cookie_and_check_cdp() -> None:
         await playwright.stop()
 
 
+async def navigate_desktop_page(url: str) -> None:
+    playwright = await async_playwright().start()
+    try:
+        connection = await DesktopBrowserProvider().connect(playwright, "desktop-manual-confirmation")
+        await connection.page.goto(url, wait_until="domcontentloaded")
+        assert connection.page.url == url
+        assert await connection.page.title() == "Intranet Newcon"
+    finally:
+        await playwright.stop()
+
+
 async def main() -> None:
     backups = {path: path.read_bytes() if path.is_file() else None for path in TRACKED_FILES}
     evidence_before = set((ROOT / "data").glob("mapeamento_*.png")) | set(
         (ROOT / "data" / "runs").glob("*.png")
     )
     session_id = ""
+    manual_session_id = ""
     try:
         await clear_local_demo_cookie_and_check_cdp()
 
@@ -67,6 +81,51 @@ async def main() -> None:
         assert configured["browser_mode"] == "desktop_browser"
         assert configured["desktop_browser"]["running"] is True
         assert configured["desktop_browser"]["cdp_reachable"] is True
+
+        manual_config = api(
+            "PUT",
+            "/api/external-systems/current",
+            {
+                "external_system_name": "Sistema Externo Manual Teste",
+                "external_login_url": "http://cotasync_test_backend:8000/demo/alvo",
+                "validation": "manual_confirmation",
+                # Comprovacao da precedencia do modo manual sobre sinais automaticos.
+                "auth_success_text": "texto-que-nao-existe",
+                "auth_success_selector": "#seletor-que-nao-existe",
+            },
+        )["external_system"]
+        assert manual_config["validation"] == "manual_confirmation"
+
+        manual_session = api("POST", "/api/demo/sessions")["session"]
+        manual_session_id = str(manual_session["id"])
+        session_id = manual_session_id
+        assert manual_session["browser_mode"] == "desktop_browser"
+        assert manual_session["using_external_system"] is True
+        assert manual_session["auth_validation_mode"] == "manual_confirmation"
+        assert manual_session["profile_reference"]
+
+        await navigate_desktop_page(
+            "http://cotasync_test_backend:8000/demo/manual-confirmation-test"
+        )
+        available = api("GET", f"/api/demo/sessions/{manual_session_id}")["session"]
+        assert available["page_title"] == "Intranet Newcon"
+        assert available["page_url"].endswith("/demo/manual-confirmation-test")
+
+        manual_confirmed = api(
+            "POST", f"/api/demo/sessions/{manual_session_id}/confirm-login"
+        )["session"]
+        assert manual_confirmed["status"] == "autenticada"
+        assert manual_confirmed["manual_confirmed"] is True
+        assert manual_confirmed["storage_state_saved"] is True
+        assert manual_confirmed["confirmed_page_title"] == "Intranet Newcon"
+        assert manual_confirmed["confirmed_page_url"].endswith("/demo/manual-confirmation-test")
+
+        manual_recording = api(
+            "POST", f"/api/demo/sessions/{manual_session_id}/recording/start"
+        )["session"]
+        assert manual_recording["status"] == "gravando"
+        api("DELETE", f"/api/demo/sessions/{manual_session_id}")
+        session_id = ""
 
         api(
             "PUT",
@@ -158,6 +217,9 @@ async def main() -> None:
                 api("DELETE", f"/api/demo/sessions/{session_id}")
             except Exception:
                 pass
+        if manual_session_id:
+            for session_dir in EXTERNAL_SESSIONS.glob(f"*/{manual_session_id}"):
+                shutil.rmtree(session_dir, ignore_errors=True)
         for path, content in backups.items():
             if content is None:
                 path.unlink(missing_ok=True)

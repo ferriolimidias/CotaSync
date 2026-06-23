@@ -25,6 +25,7 @@ ACTION_VARIABLE = "pedido_codigo"
 MAPPING_EVIDENCE = ROOT / "data" / "mapeamento_Consultar_status_do_pedido.png"
 DEMO_SESSIONS = ROOT / "data" / "demo_sessions"
 EXTERNAL_CONFIG = ROOT / "data" / "external_systems" / "current.json"
+BROWSER_CONFIG = ROOT / "data" / "browser_config.json"
 
 
 def api(method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 30) -> dict[str, Any]:
@@ -458,9 +459,12 @@ async def main(
     mapping_backup = MAPPING_EVIDENCE.read_bytes() if mapping_existed else b""
     external_config_existed = EXTERNAL_CONFIG.exists()
     external_config_backup = EXTERNAL_CONFIG.read_bytes() if external_config_existed else b""
+    browser_config_existed = BROWSER_CONFIG.exists()
+    browser_config_backup = BROWSER_CONFIG.read_bytes() if browser_config_existed else b""
     run_evidence_before = set((ROOT / "data" / "runs").glob("*.png"))
     try:
         EXTERNAL_CONFIG.unlink(missing_ok=True)
+        api("PUT", "/api/browser/config", {"browser_mode": "browserless"})
         await run_ai_observer_fallback_regression()
         await run_ai_observer_json_regression()
         for cycle in range(1, cycle_count + 1):
@@ -493,6 +497,11 @@ async def main(
             EXTERNAL_CONFIG.write_bytes(external_config_backup)
         else:
             EXTERNAL_CONFIG.unlink(missing_ok=True)
+        if browser_config_existed:
+            BROWSER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            BROWSER_CONFIG.write_bytes(browser_config_backup)
+        else:
+            BROWSER_CONFIG.unlink(missing_ok=True)
         for evidence in (ROOT / "data" / "runs").glob("*.png"):
             if evidence not in run_evidence_before:
                 evidence.unlink(missing_ok=True)

@@ -33,6 +33,7 @@ from backend.services.browser_providers import (
     BrowserProviderError,
     browser_provider,
     configured_browser_mode,
+    desktop_profile_dir,
 )
 
 
@@ -43,6 +44,15 @@ _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _DEMO_SESSIONS_DIR = _DATA_DIR / "demo_sessions"
 _MAX_RECORDED_STEPS = 200
 _REPLAY_STEP_TIMEOUT_MS = 5000
+_MANUAL_CONFIRMATION_BLOCK_TEXTS = (
+    "acesso bloqueado",
+    "access blocked",
+    "access denied",
+    "acesso negado",
+    "site can't be reached",
+    "não é possível acessar esse site",
+    "nao e possivel acessar esse site",
+)
 
 
 class DemoSessionError(RuntimeError):
@@ -293,9 +303,13 @@ class DemoBrowserSession:
     browser_mode: BrowserMode = "browserless"
     external_system_name: str = ""
     external_login_url: str = ""
+    auth_validation_mode: str = ""
     auth_success_text: str = ""
     auth_success_selector: str = ""
     storage_state_path: Path = field(default_factory=Path)
+    profile_reference: str = ""
+    confirmed_page_url: str = ""
+    confirmed_page_title: str = ""
     manual_login_confirmed: bool = False
     status: str = "aguardando_login"
     recording: bool = False
@@ -435,18 +449,18 @@ class DemoSessionManager:
             if page.is_closed():
                 return False
             if session.external_login_url:
-                if session.auth_success_selector:
+                if session.auth_validation_mode == "manual_confirmation":
+                    return (
+                        session.manual_login_confirmed
+                        and await self._page_is_valid_for_manual_confirmation(session, page)
+                    )
+                if session.auth_validation_mode == "selector" and session.auth_success_selector:
                     locator = page.locator(session.auth_success_selector)
                     return await locator.count() > 0 and await locator.first.is_visible()
-                if session.auth_success_text:
+                if session.auth_validation_mode == "text" and session.auth_success_text:
                     body_text = await page.locator("body").inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
                     return session.auth_success_text in body_text
-                parsed = urlsplit(str(page.url or ""))
-                return (
-                    session.manual_login_confirmed
-                    and parsed.scheme in {"http", "https"}
-                    and bool(parsed.netloc)
-                )
+                return False
             if await page.locator("[data-cotasync-authenticated='true']").count() > 0:
                 return True
             if await page.get_by_text("Consulta de Pedidos", exact=False).count() > 0:
@@ -468,6 +482,32 @@ class DemoSessionManager:
             return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and not has_login_form
         except Exception:
             return False
+
+    async def _page_is_valid_for_manual_confirmation(
+        self,
+        session: DemoBrowserSession,
+        page: Page,
+    ) -> bool:
+        """Aceita a confirmacao humana somente para uma pagina web carregada e utilizavel."""
+
+        if page.is_closed():
+            return False
+        current_url = str(page.url or "").strip()
+        parsed = urlsplit(current_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False
+
+        title = (await page.title()).strip()
+        url_changed = _safe_page_url(current_url) != _safe_page_url(session.external_login_url)
+        if not title and not url_changed:
+            return False
+
+        try:
+            body_text = await page.locator("body").inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
+        except Exception:
+            body_text = ""
+        normalized_body = body_text.casefold()
+        return not any(block_text in normalized_body for block_text in _MANUAL_CONFIRMATION_BLOCK_TEXTS)
 
     async def _set_active_page(self, session: DemoBrowserSession, page: Page) -> None:
         session.page = page
@@ -519,15 +559,8 @@ class DemoSessionManager:
                 continue
             seen.add(identity)
             url_matches = _page_matches_url(page, expected_url)
-            if session.external_login_url and (session.auth_success_selector or session.auth_success_text):
+            if session.external_login_url:
                 url_matches = True
-            elif session.external_login_url:
-                expected_origin = urlsplit(session.external_login_url)
-                page_origin = urlsplit(str(page.url or ""))
-                url_matches = (page_origin.scheme, page_origin.netloc) == (
-                    expected_origin.scheme,
-                    expected_origin.netloc,
-                )
             if url_matches and await self._page_is_authenticated(session, page):
                 valid_candidates.append(page)
 
@@ -700,9 +733,11 @@ class DemoSessionManager:
                 browser_mode=selected_mode,
                 external_system_name=external_system_name,
                 external_login_url=external_login_url,
+                auth_validation_mode=str(external_config.get("validation") or "").strip(),
                 auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
                 auth_success_selector=str(external_config.get("auth_success_selector") or "").strip(),
                 storage_state_path=storage_state_path,
+                profile_reference=desktop_profile_dir() if selected_mode == "desktop_browser" else "",
             )
             self._sessions[session_id] = session
             session.last_page_count = len(context.pages)
@@ -764,17 +799,12 @@ class DemoSessionManager:
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
             "using_external_system": bool(session.external_login_url),
-            "auth_validation_mode": (
-                "selector"
-                if session.auth_success_selector
-                else "text"
-                if session.auth_success_text
-                else "manual_confirmation"
-                if session.external_login_url
-                else "demo_target_markers"
-            ),
+            "auth_validation_mode": session.auth_validation_mode or "demo_target_markers",
             "storage_state_saved": session.storage_state_path.is_file(),
+            "profile_reference": session.profile_reference,
             "manual_confirmed": session.manual_login_confirmed,
+            "confirmed_page_url": session.confirmed_page_url,
+            "confirmed_page_title": session.confirmed_page_title,
         }
 
     async def operator_diagnostics(self, session_id: str) -> dict[str, Any]:
@@ -960,7 +990,7 @@ class DemoSessionManager:
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
-        if session.external_login_url and not (session.auth_success_selector or session.auth_success_text):
+        if session.external_login_url and session.auth_validation_mode == "manual_confirmation":
             session.manual_login_confirmed = True
         expected_url = session.external_login_url or _demo_target_url()
         page = await self._find_authenticated_live_page(session, _safe_page_url(expected_url))
@@ -968,6 +998,11 @@ class DemoSessionManager:
             session.manual_login_confirmed = False
             raise DemoSessionError("O login ainda nao foi concluido na pagina aberta.")
         await self._set_active_page(session, page)
+        session.confirmed_page_url = _safe_page_url(page.url)
+        try:
+            session.confirmed_page_title = (await page.title()).strip()[:200]
+        except Exception:
+            session.confirmed_page_title = ""
         session.status = "autenticada"
         await self._save_storage_state(session, required=True)
         logger.info("Login manual confirmado para a sessao %s", session_id)

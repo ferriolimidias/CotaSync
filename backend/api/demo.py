@@ -177,6 +177,13 @@ async def demo_target_login(request: Request) -> RedirectResponse | HTMLResponse
     return response
 
 
+@router.get("/demo/manual-confirmation-test", response_class=HTMLResponse, include_in_schema=False)
+async def manual_confirmation_test_target() -> HTMLResponse:
+    """Pagina local sem login usada pela regressao de confirmacao manual desktop."""
+
+    return HTMLResponse(_MANUAL_CONFIRMATION_TEST_HTML)
+
+
 _LOGIN_HTML = """<!doctype html>
 <html lang="pt-BR"><head><meta charset="utf-8"><title>Alvo Local — Login</title>
 <style>body{font-family:sans-serif;max-width:420px;margin:80px auto;padding:24px}label,input,button{display:block;width:100%;margin:10px 0}input,button{padding:10px;box-sizing:border-box}.error{color:#b91c1c}</style>
@@ -185,6 +192,11 @@ _LOGIN_HTML = """<!doctype html>
 <label for="demo-user">Usuário</label><input id="demo-user" name="usuario" autocomplete="username" required>
 <label for="demo-password">Senha</label><input id="demo-password" name="senha" type="password" autocomplete="current-password" required>
 <button id="demo-login" type="submit">Entrar</button></form></body></html>"""
+
+
+_MANUAL_CONFIRMATION_TEST_HTML = """<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><title>Intranet Newcon</title></head>
+<body><main><h1>Intranet Newcon</h1><p>Página autenticada simulada para teste local.</p></main></body></html>"""
 
 
 _ORDERS_HTML = """<!doctype html>

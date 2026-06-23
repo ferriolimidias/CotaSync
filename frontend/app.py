@@ -213,7 +213,13 @@ def _render_demo_v01() -> None:
 
         if status == "aguardando_login":
             if session.get("using_external_system"):
-                st.info("Faça o login manual no sistema externo e clique em Login concluído.")
+                if session.get("auth_validation_mode") == "manual_confirmation":
+                    st.info(
+                        "Validação manual: ao clicar em Login concluído, esta página será aceita "
+                        "como sessão autenticada."
+                    )
+                else:
+                    st.info("Faça o login manual no sistema externo e clique em Login concluído.")
             else:
                 st.info("Faça o login na janela do navegador. No alvo local, use as credenciais fictícias `demo` / `demo`.")
             if st.button("Login concluído", key="demo_confirm_login", use_container_width=True):
@@ -1248,6 +1254,14 @@ elif menu_selecionado == "Configurações":
             value=str(external_config.get("auth_success_selector") or ""),
             help="Tem prioridade sobre auth_success_text e deve estar visível após o login.",
         )
+        validation_options = ["automática", "manual_confirmation"]
+        configured_validation = str(external_config.get("validation") or "")
+        validation = st.selectbox(
+            "validation",
+            validation_options,
+            index=1 if configured_validation == "manual_confirmation" else 0,
+            help="No modo manual, o clique do usuário confirma uma página web válida.",
+        )
         if st.form_submit_button("Salvar sistema externo", type="primary", use_container_width=True):
             try:
                 demo_api_request(
@@ -1256,6 +1270,7 @@ elif menu_selecionado == "Configurações":
                     {
                         "external_system_name": external_system_name,
                         "external_login_url": external_login_url,
+                        "validation": "manual_confirmation" if validation == "manual_confirmation" else "",
                         "auth_success_text": auth_success_text,
                         "auth_success_selector": auth_success_selector,
                     },
