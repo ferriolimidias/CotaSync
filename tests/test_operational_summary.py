@@ -62,6 +62,32 @@ class OperationalSummaryTests(unittest.TestCase):
             )
         self.assertIn("Ativo", summary)
 
+    def test_page_only_success_uses_stable_operational_summary(self) -> None:
+        summary = asyncio.run(
+            build_operational_summary(
+                _action(extraction_targets=[], passos_playwright=[]),
+                status="success",
+                result_payload={"final_page": {"title": "Intranet Newcon"}},
+            )
+        )
+        self.assertEqual(
+            summary,
+            "Ação executada com sucesso. A tela solicitada foi aberta, mas nenhum dado foi configurado para extração.",
+        )
+
+    def test_reauthentication_summary_is_stable(self) -> None:
+        summary = asyncio.run(
+            build_operational_summary(
+                _action(),
+                status="error",
+                error_message="A sessao precisa ser autenticada novamente.",
+            )
+        )
+        self.assertEqual(
+            summary,
+            "Não consegui executar a ação porque a sessão precisa ser autenticada novamente.",
+        )
+
     def test_ai_output_with_technical_or_secret_content_is_rejected(self) -> None:
         fake_llm = SimpleNamespace(
             ainvoke=AsyncMock(return_value=SimpleNamespace(content="desktop_browser selector #interno token segredo"))

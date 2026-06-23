@@ -25,6 +25,13 @@ from pydantic import BaseModel, Field
 from playwright.async_api import Browser, async_playwright
 import requests
 
+from backend.services.action_pages import (
+    ActionPageError,
+    select_desktop_page_for_action,
+    validate_action_page_url,
+)
+from backend.services.browser_providers import browser_provider, normalize_browser_mode
+
 load_dotenv()
 os.makedirs("data", exist_ok=True)
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -1004,6 +1011,7 @@ async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
     dados_variaveis: dict | None = None,
+    action_config: dict[str, Any] | None = None,
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Fast-Track), repetindo os passos técnicos.
@@ -1019,21 +1027,32 @@ async def executar_acao_rapida(
     arquivos_baixados: list[str] = []
     dados_extraidos: dict[str, str] = {}
 
+    action_config = action_config if isinstance(action_config, dict) else {}
+    browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "browserless")
+    provider = browser_provider(browser_mode)
     browser: Browser | None = None
     _LOGGER.info(f"[FAST-TRACK] Iniciando execução rápida da ação: {nome_acao}")
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp(_ws_browserless())
-            context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = await context.new_page()
-
-            try:
-                login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
-            except Exception as exc:
-                return {"status": "erro", "motivo": str(exc)}
-            if not login_ok:
-                return {"status": "erro", "motivo": login_msg}
-            _LOGGER.info(f"[FAST-TRACK] {login_msg}")
+            if browser_mode == "desktop_browser":
+                connection = await provider.connect(p, f"action-{nome_arquivo}")
+                browser = connection.browser
+                context = connection.context
+                page = await select_desktop_page_for_action(action_config, context, connection.page)
+                _LOGGER.info("[FAST-TRACK] Pagina desktop do sistema alvo selecionada.")
+            else:
+                # Mantem o fluxo historico do Browserless: sessao isolada, nova
+                # pagina e login automatico baseado no ERP configurado.
+                browser = await p.chromium.connect_over_cdp(_ws_browserless())
+                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                page = await context.new_page()
+                try:
+                    login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
+                except Exception as exc:
+                    return {"status": "erro", "motivo": str(exc)}
+                if not login_ok:
+                    return {"status": "erro", "motivo": login_msg}
+                _LOGGER.info(f"[FAST-TRACK] {login_msg}")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
             for passo in passos_playwright:
                 if not isinstance(passo, dict):
@@ -1070,10 +1089,13 @@ async def executar_acao_rapida(
                                 await nova_aba.wait_for_load_state("networkidle", timeout=5000)
                             except Exception:
                                 pass
-
+                            if browser_mode == "desktop_browser":
+                                validate_action_page_url(action_config, nova_aba.url)
                             page = nova_aba
                             logging.info(f"[NAVEGAÇÃO] Popup/Nova Aba detetada! Foco transferido para: {page.url}")
 
+                        except ActionPageError:
+                            raise
                         except Exception:
                             if not sucesso_clique:
                                 try:
@@ -1087,6 +1109,8 @@ async def executar_acao_rapida(
                                 pass
 
                         await asyncio.sleep(2)
+                        if browser_mode == "desktop_browser":
+                            validate_action_page_url(action_config, page.url)
 
                     elif tipo_acao == "preencher":
                         if "variavel" in passo and dados_variaveis and str(passo["variavel"]) in dados_variaveis:
@@ -1133,12 +1157,16 @@ async def executar_acao_rapida(
                         await _extrator_universal_de_download(page, seletor, caminho_arquivo)
                         arquivos_baixados.append(caminho_arquivo)
 
+                except ActionPageError:
+                    raise
                 except Exception as e:
                     raise Exception(
                         f"Falha técnica no Fast-Track ao executar {tipo_acao} em {seletor}: {str(e)}"
                     ) from e
 
             await asyncio.sleep(1)
+            if browser_mode == "desktop_browser":
+                validate_action_page_url(action_config, page.url)
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
             final_title = (await page.title()).strip()[:200]
@@ -1151,9 +1179,12 @@ async def executar_acao_rapida(
                 "passos_executados": len(passos_playwright),
                 "final_page": {"title": final_title, "url": _safe_result_url(page.url)},
             }
+    except ActionPageError as exc:
+        _LOGGER.info(f"[ERRO] Falha operacional na execução rápida '{nome_acao}': {exc}")
+        return {"status": "erro", "motivo": str(exc), "page_diagnostics": exc.diagnostics}
     except Exception as exc:
         _LOGGER.info(f"[ERRO] Falha na execução rápida '{nome_acao}': {exc}")
         return {"status": "erro", "motivo": f"Falha na execução rápida: {exc}"}
     finally:
-        if browser is not None:
+        if browser is not None and provider.close_browser_on_session_end:
             await browser.close()

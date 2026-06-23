@@ -9,6 +9,7 @@ from uuid import uuid4
 from backend.agente import executar_acao_fast_track
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
+from backend.services.action_pages import validate_action_page_url
 from backend.services.operational_summary import build_operational_summary, build_technical_summary
 from backend.services.runs_repository import append_run, update_run
 
@@ -121,6 +122,14 @@ def _run_local_fixture(action: ActionDetail, variables: dict[str, Any]) -> dict[
     return {"echo": echo, "fixture": True, "action_id": action.id}
 
 
+def _validate_desktop_result(action: ActionDetail, result: dict[str, Any]) -> None:
+    if str(action.browser_mode or "browserless").strip() != "desktop_browser":
+        return
+    final_page = result.get("final_page")
+    final_url = final_page.get("url") if isinstance(final_page, dict) else ""
+    validate_action_page_url(action, final_url)
+
+
 async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
     created_at = utc_now_iso()
     run = RunRecord(
@@ -155,6 +164,7 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
                 request.variables,
                 run.id,
             )
+            _validate_desktop_result(action, result)
             run.status = "success"
             run.result_payload = _safe_result_payload(result)
         else:
@@ -162,8 +172,15 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             text = str(result.get("texto") or "").strip()
             execution_status = str(result.get("status") or "").strip().lower()
             if execution_status == "error" or text.startswith("❌") or "Falha" in text or "falha" in text:
-                raise RuntimeError(text or "Falha na execucao da acao.")
+                execution_error = RuntimeError(
+                    str(result.get("error_message") or text or "Falha na execucao da acao.")
+                )
+                page_diagnostics = result.get("page_diagnostics")
+                if isinstance(page_diagnostics, dict):
+                    execution_error.diagnostics = page_diagnostics  # type: ignore[attr-defined]
+                raise execution_error
 
+            _validate_desktop_result(action, result)
             run.status = "success"
             run.result_payload = _safe_result_payload(result)
     except Exception as exc:

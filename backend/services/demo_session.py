@@ -28,6 +28,11 @@ from playwright.async_api import (
 )
 
 from backend.services.browserless_urls import public_devtools_host
+from backend.services.action_pages import (
+    ActionPageError,
+    select_desktop_page_for_action,
+    validate_action_page_url,
+)
 from backend.services.browser_providers import (
     BrowserMode,
     BrowserProviderError,
@@ -1245,9 +1250,20 @@ class DemoSessionManager:
         if not isinstance(steps, list) or not steps:
             raise DemoSessionError("A acao aprendida nao possui passos executaveis.")
 
+        action_browser_mode = str(action.get("browser_mode") or "browserless").strip()
+        if action_browser_mode != session.browser_mode:
+            raise DemoSessionError("A acao deve ser executada no modo de navegador em que foi gravada.")
+
         action_external_url = str(action.get("external_login_url") or "").strip()
         if action_external_url != session.external_login_url:
             raise DemoSessionError("Selecione a sessao do sistema externo usada por esta acao.")
+
+        if action_browser_mode == "desktop_browser":
+            try:
+                action_page = await select_desktop_page_for_action(action, session.context, session.page)
+                await self._set_active_page(session, action_page)
+            except ActionPageError as exc:
+                raise DemoSessionError(str(exc)) from exc
 
         expected_url = _expected_replay_url(action.get("url_inicial"))
         extracted: dict[str, str] = {}
@@ -1266,6 +1282,8 @@ class DemoSessionManager:
                     raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
                 page = session.page
                 await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                if action_browser_mode == "desktop_browser":
+                    validate_action_page_url(action, page.url)
                 if not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(session, page):
                     raise DemoSessionError("A pagina CDP da sessao nao esta pronta para o replay.")
 
@@ -1327,6 +1345,8 @@ class DemoSessionManager:
                     if new_pages:
                         page = new_pages[-1]
                         await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        if action_browser_mode == "desktop_browser":
+                            validate_action_page_url(action, page.url)
                         await self._set_active_page(session, page)
                         state["new_page_detected"] = True
                     expected_after = str(step.get("expected_url_after") or "").strip()
@@ -1348,6 +1368,10 @@ class DemoSessionManager:
                     assert locator is not None
                     text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
                     extracted[str(step.get("nome") or selector)] = text.strip()
+                if action_browser_mode == "desktop_browser":
+                    validate_action_page_url(action, session.page.url)
+            except ActionPageError as exc:
+                raise DemoSessionError(str(exc)) from exc
             except DemoSessionError:
                 raise
             except Exception as exc:
@@ -1363,6 +1387,12 @@ class DemoSessionManager:
                     f"Falha ao executar o passo '{step_type}'. Consulte o diagnostico da run.",
                     diagnostics,
                 ) from exc
+
+        if action_browser_mode == "desktop_browser":
+            try:
+                validate_action_page_url(action, session.page.url)
+            except ActionPageError as exc:
+                raise DemoSessionError(str(exc)) from exc
 
         evidence_path = _DATA_DIR / "runs" / f"{run_id}.png"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)

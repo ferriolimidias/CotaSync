@@ -131,6 +131,10 @@ def deterministic_operational_summary(
 ) -> str:
     if str(status).lower() != "success":
         error = str(error_message or "").casefold()
+        if "precisa ser autenticada novamente" in error or "reauthentication_required" in error:
+            return "Não consegui executar a ação porque a sessão precisa ser autenticada novamente."
+        if "pagina do sistema esperado" in error or "unexpected_page_host" in error:
+            return "Não consegui executar a ação porque a página do sistema esperado não está disponível."
         if "autentic" in error or "login" in error:
             return "Não foi possível concluir a ação porque a sessão do sistema não está autenticada."
         if "não encontr" in error or "nao encontr" in error:
@@ -161,7 +165,7 @@ def deterministic_operational_summary(
         return "Ação concluída com sucesso. O arquivo gerado está disponível para envio."
     title = _safe_final_title(result_payload)
     if title:
-        return f"Ação executada com sucesso. A tela '{title}' foi aberta, mas nenhum dado foi configurado para extração."
+        return "Ação executada com sucesso. A tela solicitada foi aberta, mas nenhum dado foi configurado para extração."
     return "Ação executada com sucesso. Nenhum resultado final foi configurado para retorno nesta ação."
 
 
@@ -187,6 +191,14 @@ async def build_operational_summary(
     fallback = deterministic_operational_summary(
         action, status=status, result_payload=result_payload, error_message=error_message
     )
+    if str(status).lower() != "success" and fallback.startswith("Não consegui executar a ação"):
+        return fallback
+    if (
+        str(status).lower() == "success"
+        and not extraction_targets(action)
+        and bool(_safe_final_title(result_payload))
+    ):
+        return fallback
     enabled = bool(_metadata(action, "ai_result_summary_enabled", True))
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not enabled or not api_key:

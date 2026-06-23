@@ -166,6 +166,8 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ai_result_summary_enabled=bool(data.get("ai_result_summary_enabled", True)),
         external_system_name=str(data.get("external_system_name") or "").strip() or None,
         external_login_url=str(data.get("external_login_url") or "").strip() or None,
+        browser_mode=str(data.get("browser_mode") or "browserless").strip() or "browserless",
+        url_inicial=str(data.get("url_inicial") or data.get("url") or "").strip() or None,
         source=SOURCE_LABEL,
     )
     return ActionDetail(**summary.model_dump(), steps_preview=_steps_preview(raw_steps))

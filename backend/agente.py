@@ -483,16 +483,31 @@ async def executar_acao_fast_track(
         return {"texto": f"❌ A ação '{nome_acao}' não foi encontrada.", "estado": "NORMAL"}
 
     acao = acoes.get(nome_acao, {})
-    passos_playwright = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
+    browser_mode = str(acao.get("browser_mode") or "browserless") if isinstance(acao, dict) else "browserless"
+    if browser_mode == "desktop_browser" and isinstance(acao, dict):
+        passos_playwright = acao.get("robust_steps") or acao.get("passos_playwright", [])
+    else:
+        passos_playwright = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
 
     try:
         resultado = await executar_acao_rapida(
             nome_acao,
             passos_playwright,
             dados_variaveis if isinstance(dados_variaveis, dict) else None,
+            action_config=acao if isinstance(acao, dict) else None,
         )
         if str(resultado.get("status", "")).lower() != "sucesso":
             motivo = str(resultado.get("motivo", "Falha não identificada."))
+            if browser_mode == "desktop_browser":
+                summary = await build_operational_summary(acao, status="error", error_message=motivo)
+                return {
+                    "texto": summary,
+                    "operational_summary": summary,
+                    "error_message": motivo,
+                    "page_diagnostics": resultado.get("page_diagnostics"),
+                    "status": "error",
+                    "estado": "NORMAL",
+                }
             raise RuntimeError(motivo)
         result_payload = {
             "evidencia": str(resultado.get("evidencia", "")),

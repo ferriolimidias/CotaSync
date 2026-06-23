@@ -31,6 +31,13 @@ class BrowserProvidersTest(unittest.TestCase):
         self.assertIn("trackingId=cotasync-abcdef", result)
         self.assertIn("timeout=600000", result)
 
+    def test_default_provider_remains_browserless_when_configured(self) -> None:
+        with patch(
+            "backend.services.browser_providers.configured_browser_mode",
+            return_value="browserless",
+        ):
+            self.assertIsInstance(browser_provider(), BrowserlessProvider)
+
 
 if __name__ == "__main__":
     unittest.main()

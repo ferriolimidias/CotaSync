@@ -37,6 +37,8 @@ class ActionSummary(BaseModel):
     ai_result_summary_enabled: bool = True
     external_system_name: str | None = None
     external_login_url: str | None = None
+    browser_mode: str = "browserless"
+    url_inicial: str | None = None
     source: str = "data/ui_map.json"
 
 
