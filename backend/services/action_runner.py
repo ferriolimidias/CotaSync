@@ -79,11 +79,40 @@ def mask_variables(variables: dict[str, Any]) -> dict[str, Any]:
     return masked
 
 
+def _safe_runtime_file_metadata(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    path = str(value.get("path") or "").replace("\\", "/").strip()
+    if not path.startswith("data/runs/downloads/") or ".." in path.split("/"):
+        return None
+    return {
+        "name": str(value.get("name") or "arquivo")[:200],
+        "path": path[:500],
+        "mime_type": str(value.get("mime_type") or "application/octet-stream")[:100],
+        "size_bytes": max(0, int(value.get("size_bytes") or 0)),
+    }
+
+
+def _safe_legacy_file_paths(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    safe: list[str] = []
+    for raw in value:
+        path = str(raw or "").replace("\\", "/").strip()
+        if ".." in path.split("/") or path.startswith("/"):
+            continue
+        if path.startswith(("downloads/", "data/runs/downloads/")):
+            safe.append(path[:500])
+    return safe
+
+
 def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
     for key in (
         "evidencia",
         "arquivos",
+        "downloaded_files",
+        "main_file",
         "dados_extraidos",
         "passos_executados",
         "session_revalidated",
@@ -97,6 +126,16 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
                     str(item_key): mask_value_for_key(str(item_key), item)
                     for item_key, item in value.items()
                 }
+            elif key == "arquivos":
+                payload[key] = _safe_legacy_file_paths(value)
+            elif key == "downloaded_files" and isinstance(value, list):
+                payload[key] = [
+                    item for raw in value if (item := _safe_runtime_file_metadata(raw)) is not None
+                ]
+            elif key == "main_file":
+                safe_file = _safe_runtime_file_metadata(value)
+                if safe_file is not None:
+                    payload[key] = safe_file
             else:
                 payload[key] = value
     return payload or None
@@ -168,7 +207,7 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             run.status = "success"
             run.result_payload = _safe_result_payload(result)
         else:
-            result = await executar_acao_fast_track(action.key, request.variables)
+            result = await executar_acao_fast_track(action.key, request.variables, run.id)
             text = str(result.get("texto") or "").strip()
             execution_status = str(result.get("status") or "").strip().lower()
             if execution_status == "error" or text.startswith("❌") or "Falha" in text or "falha" in text:

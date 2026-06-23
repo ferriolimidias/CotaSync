@@ -476,6 +476,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 async def executar_acao_fast_track(
     nome_acao: str,
     dados_variaveis: dict | None = None,
+    run_id: str = "",
 ) -> dict[str, Any]:
     ui_map = carregar_ui_map()
     acoes = ui_map.get("acoes_conhecidas", {})
@@ -484,6 +485,7 @@ async def executar_acao_fast_track(
 
     acao = acoes.get(nome_acao, {})
     browser_mode = str(acao.get("browser_mode") or "browserless") if isinstance(acao, dict) else "browserless"
+    ai_recovery_enabled = bool(acao.get("ai_recovery_enabled", True)) if isinstance(acao, dict) else False
     if browser_mode == "desktop_browser" and isinstance(acao, dict):
         passos_playwright = acao.get("robust_steps") or acao.get("passos_playwright", [])
     else:
@@ -495,10 +497,11 @@ async def executar_acao_fast_track(
             passos_playwright,
             dados_variaveis if isinstance(dados_variaveis, dict) else None,
             action_config=acao if isinstance(acao, dict) else None,
+            run_id=run_id,
         )
         if str(resultado.get("status", "")).lower() != "sucesso":
             motivo = str(resultado.get("motivo", "Falha não identificada."))
-            if browser_mode == "desktop_browser":
+            if browser_mode == "desktop_browser" or not ai_recovery_enabled:
                 summary = await build_operational_summary(acao, status="error", error_message=motivo)
                 return {
                     "texto": summary,
@@ -512,6 +515,8 @@ async def executar_acao_fast_track(
         result_payload = {
             "evidencia": str(resultado.get("evidencia", "")),
             "arquivos": resultado.get("arquivos_baixados", []),
+            "downloaded_files": resultado.get("downloaded_files", []),
+            "main_file": resultado.get("main_file"),
             "dados_extraidos": resultado.get("dados_extraidos", {}),
             "passos_executados": resultado.get("passos_executados", len(passos_playwright)),
             "final_page": resultado.get("final_page", {}),

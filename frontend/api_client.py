@@ -96,11 +96,15 @@ def _normalize_api_action(raw: Any) -> dict[str, Any] | None:
         "ai_reviewed": bool(raw.get("ai_reviewed", False)),
         "ai_observer_summary": str(raw.get("ai_observer_summary") or "").strip(),
         "objective": str(raw.get("objective") or "").strip(),
+        "input_description": str(raw.get("input_description") or "").strip(),
         "expected_result": str(raw.get("expected_result") or "").strip(),
+        "success_criteria": str(raw.get("success_criteria") or "").strip(),
+        "output_type": str(raw.get("output_type") or "").strip(),
         "output_schema": raw.get("output_schema", {}) if isinstance(raw.get("output_schema"), dict) else {},
         "extraction_targets": raw.get("extraction_targets", []) if isinstance(raw.get("extraction_targets"), list) else [],
         "user_result_summary_template": str(raw.get("user_result_summary_template") or "").strip(),
         "ai_result_summary_enabled": bool(raw.get("ai_result_summary_enabled", True)),
+        "ai_recovery_enabled": bool(raw.get("ai_recovery_enabled", False)),
         "replay_hints": raw.get("replay_hints", []) if isinstance(raw.get("replay_hints"), list) else [],
         "wait_strategies": (
             raw.get("wait_strategies", []) if isinstance(raw.get("wait_strategies"), list) else []
@@ -130,11 +134,15 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
         "ai_reviewed": bool(data.get("ai_reviewed", False)),
         "ai_observer_summary": str(data.get("ai_observer_summary") or "").strip(),
         "objective": str(data.get("objective") or data.get("descricao") or "").strip(),
+        "input_description": str(data.get("input_description") or "").strip(),
         "expected_result": str(data.get("expected_result") or "").strip(),
+        "success_criteria": str(data.get("success_criteria") or "").strip(),
+        "output_type": str(data.get("output_type") or "").strip(),
         "output_schema": data.get("output_schema", {}) if isinstance(data.get("output_schema"), dict) else {},
         "extraction_targets": data.get("extraction_targets", []) if isinstance(data.get("extraction_targets"), list) else [],
         "user_result_summary_template": str(data.get("user_result_summary_template") or "").strip(),
         "ai_result_summary_enabled": bool(data.get("ai_result_summary_enabled", True)),
+        "ai_recovery_enabled": bool(data.get("ai_recovery_enabled", False)),
         "replay_hints": data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
         "wait_strategies": (
             data.get("wait_strategies", []) if isinstance(data.get("wait_strategies"), list) else []

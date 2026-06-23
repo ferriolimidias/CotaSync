@@ -40,6 +40,7 @@ from backend.services.browser_providers import (
     configured_browser_mode,
     desktop_profile_dir,
 )
+from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -324,6 +325,9 @@ class DemoBrowserSession:
     last_screenshot_path: str = ""
     last_page_count: int = 0
     download_detected: bool = False
+    guided_learning: dict[str, Any] = field(default_factory=dict)
+    output_candidates: list[dict[str, str]] = field(default_factory=list)
+    learning_synthesis: dict[str, Any] = field(default_factory=dict)
     operator_recording_suppressed_until: float = 0.0
 
 
@@ -439,7 +443,10 @@ class DemoSessionManager:
         async def apply_live_review() -> None:
             review = await observe_learning_step_with_ai(
                 event,
-                {"previous_events": len(session.learning_events) - 1},
+                {
+                    "previous_events": len(session.learning_events) - 1,
+                    "guided_instruction": session.guided_learning,
+                },
             )
             event.update(review)
 
@@ -1013,7 +1020,11 @@ class DemoSessionManager:
         logger.info("Login manual confirmado para a sessao %s", session_id)
         return await self.status(session_id)
 
-    async def start_recording(self, session_id: str) -> dict[str, Any]:
+    async def start_recording(
+        self,
+        session_id: str,
+        guided_learning: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         session = self._get(session_id)
         if session.status != "autenticada":
             raise DemoSessionError("Confirme o login manual antes de iniciar o aprendizado.")
@@ -1023,6 +1034,22 @@ class DemoSessionManager:
             task.cancel()
         session.observer_tasks.clear()
         session.operator_recording_suppressed_until = 0.0
+        raw_instruction = guided_learning if isinstance(guided_learning, dict) else {}
+        output_type = str(raw_instruction.get("output_type") or "apenas abrir tela").strip()
+        if output_type not in {"texto/dados da tela", "arquivo/PDF", "ambos", "apenas abrir tela"}:
+            raise DemoSessionError("Selecione um tipo de retorno esperado valido.")
+        session.guided_learning = {
+            "name": str(raw_instruction.get("name") or "").strip()[:200],
+            "objective": str(raw_instruction.get("objective") or "").strip()[:1000],
+            "input_description": str(raw_instruction.get("input_description") or "").strip()[:1000],
+            "expected_result": str(raw_instruction.get("expected_result") or "").strip()[:1000],
+            "success_criteria": str(raw_instruction.get("success_criteria") or "").strip()[:1000],
+            "output_type": output_type,
+            "ai_result_summary_enabled": bool(raw_instruction.get("ai_result_summary_enabled", False)),
+            "ai_recovery_enabled": bool(raw_instruction.get("ai_recovery_enabled", False)),
+        }
+        session.output_candidates = []
+        session.learning_synthesis = {}
         session.recording = True
         session.status = "gravando"
         await session.page.evaluate(_RECORDER_SCRIPT)
@@ -1065,15 +1092,57 @@ class DemoSessionManager:
                 ):
                     continue
                 await self._record_live_step(session, output)
+        candidates = await session.page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+              '[data-cotasync-output], output, [role="status"], [aria-live], .result, table, h1, h2, h3'
+            )).filter((el) => {
+              const style = getComputedStyle(el);
+              const text = String(el.innerText || el.value || '').trim();
+              return text && style.display !== 'none' && style.visibility !== 'hidden';
+            }).slice(0, 20).map((el, index) => ({
+              label: el.getAttribute('data-cotasync-output') || el.getAttribute('aria-label') ||
+                String(el.id || '') || `resultado_${index + 1}`,
+              selector: window.__cotasyncSelectorFor ? window.__cotasyncSelectorFor(el) : '',
+              preview: String(el.innerText || el.value || '').trim().slice(0, 160)
+            })).filter((item) => item.selector)"""
+        )
+        session.output_candidates = [
+            {
+                "label": str(item.get("label") or "resultado")[:100],
+                "selector": str(item.get("selector") or "")[:500],
+                "preview": str(item.get("preview") or "")[:160],
+            }
+            for item in candidates
+            if isinstance(item, dict) and str(item.get("selector") or "").strip()
+        ] if isinstance(candidates, list) else []
         session.recording = False
         session.status = "autenticada"
         if not session.steps:
             raise DemoSessionError("Nenhum passo foi capturado. Repita a rotina com a gravacao ativa.")
+        if session.observer_tasks:
+            await asyncio.gather(*list(session.observer_tasks), return_exceptions=True)
+        from backend.services.ai_observer import analyze_recorded_action_with_ai
+
+        provisional_action = {
+            "nome_amigavel": session.guided_learning.get("name", ""),
+            **session.guided_learning,
+            "passos_playwright": session.steps,
+            "learning_events": session.learning_events,
+            "output_candidates": session.output_candidates,
+        }
+        session.learning_synthesis = await analyze_recorded_action_with_ai(provisional_action)
         logger.info("Gravacao finalizada na sessao %s com %s passos", session_id, len(session.steps))
         return {
             "session": await self.status(session_id),
             "steps": [dict(step, index=index) for index, step in enumerate(session.steps)],
             "learning_events": [dict(event) for event in session.learning_events],
+            "guided_learning": dict(session.guided_learning),
+            "output_candidates": list(session.output_candidates),
+            "download_detected": bool(
+                session.download_detected
+                or any(event.get("download_detected") for event in session.learning_events)
+            ),
+            "ai_synthesis": dict(session.learning_synthesis),
         }
 
     async def save_action(
@@ -1084,9 +1153,16 @@ class DemoSessionManager:
         variable_names: dict[str, str],
         *,
         objective: str = "",
+        input_description: str = "",
         expected_result: str = "",
+        success_criteria: str = "",
+        output_type: str = "",
         user_result_summary_template: str | None = None,
-        ai_result_summary_enabled: bool = True,
+        ai_result_summary_enabled: bool = False,
+        ai_recovery_enabled: bool = False,
+        extraction_targets: list[dict[str, str]] | None = None,
+        extract_visible_text: bool = False,
+        return_downloaded_file: bool = False,
     ) -> dict[str, Any]:
         session = self._get(session_id)
         action_name = str(name or "").strip()
@@ -1114,6 +1190,48 @@ class DemoSessionManager:
                     event["value_template"] = f"{{{{{variable}}}}}"
             if variable not in variables:
                 variables.append(variable)
+
+        requested_extractions = extraction_targets if isinstance(extraction_targets, list) else []
+        if requested_extractions or extract_visible_text:
+            steps = [step for step in steps if str(step.get("tipo") or "") != "extrair_texto"]
+            for index, raw_target in enumerate(requested_extractions):
+                if not isinstance(raw_target, dict):
+                    continue
+                selector = str(raw_target.get("selector") or raw_target.get("seletor") or "").strip()
+                label = re.sub(
+                    r"[^a-zA-Z0-9_]+",
+                    "_",
+                    str(raw_target.get("label") or raw_target.get("name") or f"resultado_{index + 1}").strip(),
+                ).strip("_")
+                if selector and label and not _is_sensitive_selector(selector):
+                    steps.append({"tipo": "extrair_texto", "seletor": selector, "valor": "", "nome": label})
+            if extract_visible_text:
+                steps.append(
+                    {
+                        "tipo": "extrair_texto",
+                        "seletor": "body",
+                        "valor": "",
+                        "nome": "texto_tela_final",
+                    }
+                )
+
+        download_detected = bool(
+            session.download_detected
+            or any(event.get("download_detected") for event in learning_events)
+        )
+        if return_downloaded_file:
+            detected_indexes = [
+                int(event.get("step_index"))
+                for event in learning_events
+                if event.get("download_detected") and str(event.get("step_index", "")).isdigit()
+            ]
+            click_indexes = [
+                index for index, step in enumerate(steps) if str(step.get("tipo") or "") == "clicar"
+            ]
+            download_index = detected_indexes[-1] if detected_indexes else (click_indexes[-1] if click_indexes else -1)
+            if download_index < 0 or download_index >= len(steps):
+                raise DemoSessionError("Nao foi possivel associar o download a um clique gravado.")
+            steps[download_index]["tipo"] = "download_pdf"
 
         robust_steps: list[dict[str, Any]] = []
         for index, step in enumerate(steps):
@@ -1145,8 +1263,18 @@ class DemoSessionManager:
             and str(step.get("nome") or "").strip()
         ]
         output_schema = {target: {"type": "string"} for target in extraction_targets}
-        objective_text = str(objective or "").strip()
-        expected_result_text = str(expected_result or "").strip()
+        guided = session.guided_learning
+        objective_text = str(objective or guided.get("objective") or "").strip()
+        input_description_text = str(input_description or guided.get("input_description") or "").strip()
+        expected_result_text = str(expected_result or guided.get("expected_result") or "").strip()
+        success_criteria_text = str(success_criteria or guided.get("success_criteria") or "").strip()
+        output_type_text = str(output_type or guided.get("output_type") or "apenas abrir tela").strip()
+        if return_downloaded_file and output_type_text == "texto/dados da tela":
+            output_type_text = "ambos"
+        if return_downloaded_file and not extraction_targets and not extract_visible_text:
+            output_type_text = "arquivo/PDF"
+        if return_downloaded_file:
+            output_schema["main_file"] = {"type": "file", "format": "pdf"}
 
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
@@ -1157,11 +1285,17 @@ class DemoSessionManager:
             "learning_events": learning_events,
             "variaveis_necessarias": variables,
             "objective": objective_text,
+            "input_description": input_description_text,
             "expected_result": expected_result_text,
+            "success_criteria": success_criteria_text,
+            "output_type": output_type_text,
             "output_schema": output_schema,
             "extraction_targets": extraction_targets,
             "user_result_summary_template": str(user_result_summary_template or "").strip() or None,
             "ai_result_summary_enabled": bool(ai_result_summary_enabled),
+            "ai_recovery_enabled": bool(ai_recovery_enabled),
+            "download_expected": bool(return_downloaded_file),
+            "download_detected_during_learning": download_detected,
             "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
             "learning_mode": (
                 "desktop_browser_live_ai_observed"
@@ -1174,6 +1308,8 @@ class DemoSessionManager:
         }
         from backend.services.ai_observer import analyze_recorded_action_with_ai
 
+        # A síntese final inclui nomes de variáveis e saídas editados após a
+        # gravação; a pré-síntese de stop_recording continua disponível na UI.
         ai_review = await analyze_recorded_action_with_ai(learned_action)
         learned_action.update(ai_review)
         if not learned_action["objective"]:
@@ -1220,11 +1356,16 @@ class DemoSessionManager:
             "variable_schema": learned_action.get("variable_schema", []),
             "extraction_target": str(learned_action.get("extraction_target") or ""),
             "objective": learned_action["objective"],
+            "input_description": learned_action["input_description"],
             "expected_result": learned_action["expected_result"],
+            "success_criteria": learned_action["success_criteria"],
+            "output_type": learned_action["output_type"],
             "output_schema": learned_action["output_schema"],
             "extraction_targets": learned_action["extraction_targets"],
             "user_result_summary_template": learned_action["user_result_summary_template"],
             "ai_result_summary_enabled": learned_action["ai_result_summary_enabled"],
+            "ai_recovery_enabled": learned_action["ai_recovery_enabled"],
+            "download_expected": learned_action["download_expected"],
             "robust_steps_count": len(robust_steps),
             "learning_events_count": len(learning_events),
             "external_system_name": learned_action["external_system_name"],
@@ -1267,6 +1408,7 @@ class DemoSessionManager:
 
         expected_url = _expected_replay_url(action.get("url_inicial"))
         extracted: dict[str, str] = {}
+        downloaded_files: list[dict[str, object]] = []
         selector_diagnostics: list[dict[str, Any]] = []
         automatically_revalidated = False
         for step_index, step in enumerate(steps):
@@ -1368,6 +1510,16 @@ class DemoSessionManager:
                     assert locator is not None
                     text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
                     extracted[str(step.get("nome") or selector)] = text.strip()
+                elif step_type == "download_pdf":
+                    from backend.motor_browser import _extrator_universal_de_download
+
+                    download_path = runtime_download_path(
+                        action_key,
+                        f"{run_id}-{step_index}",
+                        ".pdf",
+                    )
+                    await _extrator_universal_de_download(page, selector, str(download_path))
+                    downloaded_files.append(runtime_file_metadata(download_path))
                 if action_browser_mode == "desktop_browser":
                     validate_action_page_url(action, session.page.url)
             except ActionPageError as exc:
@@ -1403,6 +1555,9 @@ class DemoSessionManager:
             "texto": "Execucao assistida concluida com sucesso.",
             "evidencia": str(evidence_path.relative_to(_ROOT)),
             "dados_extraidos": extracted,
+            "arquivos": [str(item["path"]) for item in downloaded_files],
+            "downloaded_files": downloaded_files,
+            "main_file": downloaded_files[0] if downloaded_files else None,
             "passos_executados": len(steps),
             "session_revalidated": automatically_revalidated,
             "selector_diagnostics": selector_diagnostics,

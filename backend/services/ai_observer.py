@@ -25,6 +25,9 @@ class ObserverReview(BaseModel):
     waits: list[dict[str, Any]] = Field(default_factory=list)
     variable_schema: list[dict[str, Any]] = Field(default_factory=list)
     extraction_target: str = ""
+    suggested_extraction_targets: list[dict[str, str]] = Field(default_factory=list)
+    suggested_objective: str = ""
+    suggested_expected_result: str = ""
     slow_system_notes: list[str] = Field(default_factory=list)
     risk_notes: list[str] = Field(default_factory=list)
 
@@ -112,6 +115,11 @@ def _parse_review_json(response: Any) -> ObserverReview | None:
         waits=object_list("waits", "wait_strategies"),
         variable_schema=object_list("variable_schema"),
         extraction_target=str(payload.get("extraction_target") or "").strip(),
+        suggested_extraction_targets=(
+            object_list("suggested_extraction_targets") or object_list("extraction_targets")
+        ),
+        suggested_objective=str(payload.get("suggested_objective") or "").strip(),
+        suggested_expected_result=str(payload.get("suggested_expected_result") or "").strip(),
         slow_system_notes=string_list("slow_system_notes"),
         risk_notes=string_list("risk_notes"),
     )
@@ -166,9 +174,23 @@ def _safe_action(action: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": str(action.get("nome_amigavel") or action.get("name") or "")[:200],
         "description": str(action.get("descricao") or action.get("description") or "")[:500],
+        "objective": str(action.get("objective") or "")[:1000],
+        "input_description": str(action.get("input_description") or "")[:1000],
+        "expected_result": str(action.get("expected_result") or "")[:1000],
+        "success_criteria": str(action.get("success_criteria") or "")[:1000],
+        "output_type": str(action.get("output_type") or "")[:100],
         "url": str(action.get("url_inicial") or "")[:500],
         "steps": safe_steps,
         "learning_events": safe_events,
+        "output_candidates": [
+            {
+                "label": str(item.get("label") or "")[:100],
+                "selector": str(item.get("selector") or "")[:500],
+                "preview": str(item.get("preview") or "")[:160],
+            }
+            for item in action.get("output_candidates", [])[:20]
+            if isinstance(item, dict)
+        ] if isinstance(action.get("output_candidates"), list) else [],
     }
 
 
@@ -293,6 +315,9 @@ def _local_analysis(action: dict[str, Any]) -> dict[str, Any]:
         "waits": waits,
         "variable_schema": variables,
         "extraction_target": ", ".join(item for item in extraction_targets if item),
+        "suggested_extraction_targets": [],
+        "suggested_objective": str(safe.get("objective") or ""),
+        "suggested_expected_result": str(safe.get("expected_result") or ""),
         "ai_slow_system_notes": [
             "Seletores podem aparecer antes dos dados; aguardar conteúdo útil em extrações."
         ],
@@ -322,13 +347,16 @@ async def analyze_recorded_action_with_ai(
     }
     prompt = (
         "Você é observador de uma automação demonstrada por um humano. "
+        "Use objetivo, entradas, resultado esperado, critério de sucesso e tipo de retorno da instrução guiada. "
         "Revise a receita sem criar navegação autônoma e sem modificar os passos determinísticos. "
-        "Produza estratégias de espera por índice, dicas de replay, rótulos claros de variáveis, "
-        "alvo de extração, notas para sistemas lentos e riscos de popup/nova aba. "
+        "Produza estratégias de espera por índice, dicas de replay, rótulos claros de variáveis digitadas, "
+        "alvos de extração entre os candidatos reais, detecção de download, notas para sistemas lentos e riscos. "
         "Não invente credenciais, valores de campos nem seletores. "
         "Responda somente com um objeto JSON válido, sem markdown, com estas chaves: "
         '"summary" (string), "replay_hints" (array de strings), "waits" (array de objetos), '
         '"variable_schema" (array de objetos), "extraction_target" (string), '
+        '"suggested_extraction_targets" (array de objetos com label e selector), '
+        '"suggested_objective" (string), "suggested_expected_result" (string), '
         '"slow_system_notes" (array de strings) e "risk_notes" (array de strings). '
         "Contexto sanitizado: "
         + json.dumps(safe_context, ensure_ascii=False)
@@ -356,6 +384,13 @@ async def analyze_recorded_action_with_ai(
             "waits": reviewed["waits"] or fallback["waits"],
             "variable_schema": reviewed["variable_schema"] or fallback["variable_schema"],
             "extraction_target": review.extraction_target.strip() or fallback["extraction_target"],
+            "suggested_extraction_targets": (
+                reviewed["suggested_extraction_targets"] or fallback["suggested_extraction_targets"]
+            ),
+            "suggested_objective": review.suggested_objective.strip() or fallback["suggested_objective"],
+            "suggested_expected_result": (
+                review.suggested_expected_result.strip() or fallback["suggested_expected_result"]
+            ),
             "ai_slow_system_notes": reviewed["slow_system_notes"] or fallback["ai_slow_system_notes"],
             "ai_risk_notes": reviewed["risk_notes"] or fallback["ai_risk_notes"],
         }

@@ -192,6 +192,7 @@ def _render_demo_v01() -> None:
                     session = response.get("session", {})
                     st.session_state.demo_session_id = str(session.get("id", ""))
                     st.session_state.pop("demo_recorded_steps", None)
+                    st.session_state.pop("demo_recording_result", None)
                     st.session_state.pop("demo_saved_action", None)
                     st.session_state.pop("demo_last_run", None)
                     st.rerun()
@@ -377,13 +378,58 @@ def _render_demo_v01() -> None:
                         st.error(flash[1])
 
         recorded_steps = st.session_state.get("demo_recorded_steps")
-        if status == "autenticada" and not recorded_steps:
-            st.markdown("**Aprendizado**")
+        saved_action = st.session_state.get("demo_saved_action")
+        if status == "autenticada" and not recorded_steps and not saved_action:
+            st.markdown("**Aprendizado guiado**")
+            st.caption("Descreva o resultado de negócio antes de iniciar a demonstração.")
+            action_name_key = f"demo_guided_name_{session_id}"
+            objective_key = f"demo_guided_objective_{session_id}"
+            input_key = f"demo_guided_input_{session_id}"
+            expected_key = f"demo_guided_expected_{session_id}"
+            success_key = f"demo_guided_success_{session_id}"
+            output_key = f"demo_guided_output_{session_id}"
+            ai_mode_key = f"demo_guided_ai_mode_{session_id}"
+            st.text_input("Nome da ação", key=action_name_key, placeholder="Ex.: Consultar resultado da assembleia")
+            st.text_area("Objetivo da ação", key=objective_key)
+            st.text_area(
+                "O que o usuário vai informar para executar essa ação",
+                key=input_key,
+                placeholder="Ex.: grupo e cota",
+            )
+            st.text_area("O que o CotaSync deve retornar no final", key=expected_key)
+            st.text_area("Como saber que deu certo", key=success_key)
+            st.selectbox(
+                "Tipo de retorno esperado",
+                ["texto/dados da tela", "arquivo/PDF", "ambos", "apenas abrir tela"],
+                index=0,
+                key=output_key,
+            )
+            st.selectbox(
+                "Uso de IA na execução",
+                [
+                    "não usar IA na execução",
+                    "usar IA só para resumir resultado",
+                    "usar IA para tentar recuperar falha",
+                ],
+                index=0,
+                key=ai_mode_key,
+            )
             if st.button("Iniciar gravação", key="demo_start_recording", type="primary", use_container_width=True):
                 try:
+                    ai_mode = str(st.session_state.get(ai_mode_key) or "")
                     demo_api_request(
                         "POST",
                         f"/api/demo/sessions/{encoded_session}/recording/start",
+                        {
+                            "name": st.session_state.get(action_name_key, ""),
+                            "objective": st.session_state.get(objective_key, ""),
+                            "input_description": st.session_state.get(input_key, ""),
+                            "expected_result": st.session_state.get(expected_key, ""),
+                            "success_criteria": st.session_state.get(success_key, ""),
+                            "output_type": st.session_state.get(output_key, "texto/dados da tela"),
+                            "ai_result_summary_enabled": ai_mode == "usar IA só para resumir resultado",
+                            "ai_recovery_enabled": ai_mode == "usar IA para tentar recuperar falha",
+                        },
                         api_base_url=API_BASE_URL,
                     )
                     st.rerun()
@@ -400,11 +446,22 @@ def _render_demo_v01() -> None:
                         api_base_url=API_BASE_URL,
                     )
                     st.session_state.demo_recorded_steps = result.get("steps", [])
+                    st.session_state.demo_recording_result = result
                     st.rerun()
                 except DemoApiError as exc:
                     st.error(str(exc))
 
         if isinstance(recorded_steps, list) and recorded_steps:
+            recording_result = st.session_state.get("demo_recording_result", {})
+            if not isinstance(recording_result, dict):
+                recording_result = {}
+            guided = recording_result.get("guided_learning", {})
+            if not isinstance(guided, dict):
+                guided = {}
+            synthesis = recording_result.get("ai_synthesis", {})
+            if isinstance(synthesis, dict) and synthesis:
+                st.markdown("**Síntese do aprendizado**")
+                st.info(str(synthesis.get("ai_observer_summary") or "Análise local concluída."))
             st.markdown("**Passos capturados**")
             variable_names: dict[str, str] = {}
             for step in recorded_steps:
@@ -426,32 +483,94 @@ def _render_demo_v01() -> None:
                 for step in recorded_steps
                 if isinstance(step, dict) and str(step.get("tipo") or "").lower() == "extrair_texto"
             ]
+            st.markdown("**Configuração final da ação**")
             action_name = st.text_input(
                 "Nome da ação",
-                value="",
-                placeholder="Ex.: Consultar status do pedido",
+                value=str(guided.get("name") or ""),
+                placeholder="Ex.: Consultar resultado da assembleia",
                 key=f"demo_action_name_{session_id}",
             )
             action_objective = st.text_input(
                 "Objetivo da ação",
-                value=(
-                    f"Executar a consulta e retornar {', '.join(suggested_targets)}"
-                    if suggested_targets
-                    else "Abrir a tela final da rotina demonstrada"
-                ),
+                value=str(guided.get("objective") or synthesis.get("suggested_objective") or ""),
                 key=f"demo_action_objective_{session_id}",
+            )
+            input_description = st.text_input(
+                "Entradas informadas pelo usuário",
+                value=str(guided.get("input_description") or ""),
+                key=f"demo_action_input_{session_id}",
             )
             expected_result = st.text_input(
                 "Resultado esperado para retornar ao usuário",
-                value=(
-                    f"Retornar {', '.join(suggested_targets)}"
-                    if suggested_targets
-                    else "Confirmar que a tela solicitada foi aberta"
-                ),
+                value=str(guided.get("expected_result") or synthesis.get("suggested_expected_result") or ""),
                 key=f"demo_action_expected_result_{session_id}",
+            )
+            success_criteria = st.text_input(
+                "Como saber que deu certo",
+                value=str(guided.get("success_criteria") or ""),
+                key=f"demo_action_success_{session_id}",
+            )
+            output_options = ["texto/dados da tela", "arquivo/PDF", "ambos", "apenas abrir tela"]
+            guided_output = str(guided.get("output_type") or "texto/dados da tela")
+            output_type = st.selectbox(
+                "Tipo de retorno esperado",
+                output_options,
+                index=output_options.index(guided_output) if guided_output in output_options else 0,
+                key=f"demo_action_output_{session_id}",
+            )
+
+            st.markdown("**Resultado que a ação deve retornar**")
+            candidates = recording_result.get("output_candidates", [])
+            candidates = candidates if isinstance(candidates, list) else []
+            ai_candidates = synthesis.get("suggested_extraction_targets", []) if isinstance(synthesis, dict) else []
+            if isinstance(ai_candidates, list):
+                candidates = candidates + [item for item in ai_candidates if isinstance(item, dict)]
+            candidate_options = {
+                f"{item.get('label', 'resultado')}: {item.get('preview', '')}": item
+                for item in candidates
+                if isinstance(item, dict) and item.get("selector")
+            }
+            selected_candidates = st.multiselect(
+                "Textos detectados na tela final",
+                list(candidate_options),
+                key=f"demo_output_candidates_{session_id}",
+            )
+            manual_label = st.text_input(
+                "Nome do resultado manual",
+                key=f"demo_manual_output_label_{session_id}",
+                placeholder="Ex.: valor_contemplacao",
+            )
+            manual_selector = st.text_input(
+                "Seletor CSS do resultado manual",
+                key=f"demo_manual_output_selector_{session_id}",
+                placeholder="#resultado ou .valor-final",
+            )
+            extract_visible_text = st.checkbox(
+                "Extrair texto visível da tela final",
+                key=f"demo_extract_visible_{session_id}",
+            )
+            download_detected = bool(recording_result.get("download_detected"))
+            if download_detected:
+                st.success("Download detectado durante a demonstração.")
+            return_downloaded_file = st.checkbox(
+                "Retornar arquivo baixado",
+                value=download_detected and output_type in {"arquivo/PDF", "ambos"},
+                disabled=not download_detected,
+                key=f"demo_return_download_{session_id}",
             )
             if st.button("Salvar ação aprendida", key="demo_save_action", type="primary", use_container_width=True):
                 try:
+                    configured_targets = [
+                        {
+                            "label": str(candidate_options[item].get("label") or "resultado"),
+                            "selector": str(candidate_options[item].get("selector") or ""),
+                        }
+                        for item in selected_candidates
+                    ]
+                    if manual_label.strip() and manual_selector.strip():
+                        configured_targets.append({"label": manual_label, "selector": manual_selector})
+                    ai_result_enabled = bool(guided.get("ai_result_summary_enabled", False))
+                    ai_recovery_enabled = bool(guided.get("ai_recovery_enabled", False))
                     with st.spinner("Revisando a demonstração e salvando a ação..."):
                         result = demo_api_request(
                             "POST",
@@ -460,14 +579,23 @@ def _render_demo_v01() -> None:
                                 "name": action_name,
                                 "description": "Rotina demonstrada manualmente e revisada pelo observador de IA.",
                                 "objective": action_objective,
+                                "input_description": input_description,
                                 "expected_result": expected_result,
+                                "success_criteria": success_criteria,
+                                "output_type": output_type,
                                 "variable_names": variable_names,
+                                "extraction_targets": configured_targets,
+                                "extract_visible_text": extract_visible_text,
+                                "return_downloaded_file": return_downloaded_file,
+                                "ai_result_summary_enabled": ai_result_enabled,
+                                "ai_recovery_enabled": ai_recovery_enabled,
                             },
                             api_base_url=API_BASE_URL,
                             timeout=30,
                         )
                     st.session_state.demo_saved_action = result.get("action", {})
                     st.session_state.pop("demo_recorded_steps", None)
+                    st.session_state.pop("demo_recording_result", None)
                     st.success("Ação aprendida e salva no catálogo.")
                     st.rerun()
                 except DemoApiError as exc:
@@ -528,6 +656,23 @@ def _render_demo_v01() -> None:
                 if extracted:
                     st.write("**Resultado extraído:**")
                     st.json(extracted)
+                downloaded_files = payload.get("downloaded_files", [])
+                if isinstance(downloaded_files, list):
+                    for file_index, metadata in enumerate(downloaded_files):
+                        if not isinstance(metadata, dict):
+                            continue
+                        relative_path = str(metadata.get("path") or "")
+                        file_path = (_ROOT / relative_path).resolve()
+                        allowed_root = (_ROOT / "data" / "runs" / "downloads").resolve()
+                        if not file_path.is_file() or not file_path.is_relative_to(allowed_root):
+                            continue
+                        st.download_button(
+                            "Baixar arquivo gerado",
+                            data=file_path.read_bytes(),
+                            file_name=str(metadata.get("name") or file_path.name),
+                            mime=str(metadata.get("mime_type") or "application/octet-stream"),
+                            key=f"demo_run_download_{last_run.get('id', '')}_{file_index}",
+                        )
                 evidence = str(payload.get("evidencia") or "")
                 evidence_path = _ROOT / evidence
                 if evidence and evidence_path.is_file():
@@ -543,7 +688,13 @@ def _render_demo_v01() -> None:
                 )
             except DemoApiError:
                 pass
-            for key in ("demo_session_id", "demo_recorded_steps", "demo_saved_action", "demo_last_run"):
+            for key in (
+                "demo_session_id",
+                "demo_recorded_steps",
+                "demo_recording_result",
+                "demo_saved_action",
+                "demo_last_run",
+            ):
                 st.session_state.pop(key, None)
             st.rerun()
 

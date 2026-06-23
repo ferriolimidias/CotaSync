@@ -48,7 +48,7 @@ class OperationalSummaryTests(unittest.TestCase):
         )
         self.assertEqual(
             summary,
-            "Ação executada com sucesso. Nenhum resultado final foi configurado para retorno nesta ação.",
+            "Ação executada com sucesso, mas nenhum resultado final foi configurado para retorno.",
         )
 
     def test_fallback_works_without_openai_key(self) -> None:

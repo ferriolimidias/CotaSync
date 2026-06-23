@@ -18,10 +18,28 @@ class SaveDemoActionRequest(BaseModel):
     name: str
     description: str = "Rotina aprendida por demonstracao manual."
     objective: str = ""
+    input_description: str = ""
     expected_result: str = ""
+    success_criteria: str = ""
+    output_type: str = "apenas abrir tela"
     user_result_summary_template: str | None = None
-    ai_result_summary_enabled: bool = True
+    ai_result_summary_enabled: bool = False
+    ai_recovery_enabled: bool = False
     variable_names: dict[str, str] = Field(default_factory=dict)
+    extraction_targets: list[dict[str, str]] = Field(default_factory=list)
+    extract_visible_text: bool = False
+    return_downloaded_file: bool = False
+
+
+class GuidedLearningRequest(BaseModel):
+    name: str = ""
+    objective: str = ""
+    input_description: str = ""
+    expected_result: str = ""
+    success_criteria: str = ""
+    output_type: str = "apenas abrir tela"
+    ai_result_summary_enabled: bool = False
+    ai_recovery_enabled: bool = False
 
 
 class OperatorFillRequest(BaseModel):
@@ -119,9 +137,15 @@ async def confirm_demo_login(session_id: str) -> dict[str, Any]:
 
 
 @router.post("/api/demo/sessions/{session_id}/recording/start")
-async def start_demo_recording(session_id: str) -> dict[str, Any]:
+async def start_demo_recording(
+    session_id: str,
+    payload: GuidedLearningRequest | None = None,
+) -> dict[str, Any]:
     try:
-        session = await demo_session_manager.start_recording(session_id)
+        session = await demo_session_manager.start_recording(
+            session_id,
+            payload.model_dump() if payload is not None else {},
+        )
     except DemoSessionError as exc:
         _raise_safe(exc)
     return {"status": "ok", "session": session}
@@ -145,9 +169,16 @@ async def save_demo_action(session_id: str, payload: SaveDemoActionRequest) -> d
             payload.description,
             payload.variable_names,
             objective=payload.objective,
+            input_description=payload.input_description,
             expected_result=payload.expected_result,
+            success_criteria=payload.success_criteria,
+            output_type=payload.output_type,
             user_result_summary_template=payload.user_result_summary_template,
             ai_result_summary_enabled=payload.ai_result_summary_enabled,
+            ai_recovery_enabled=payload.ai_recovery_enabled,
+            extraction_targets=payload.extraction_targets,
+            extract_visible_text=payload.extract_visible_text,
+            return_downloaded_file=payload.return_downloaded_file,
         )
     except DemoSessionError as exc:
         _raise_safe(exc)

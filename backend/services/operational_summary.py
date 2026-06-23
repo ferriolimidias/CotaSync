@@ -118,8 +118,8 @@ def _safe_final_title(result_payload: dict[str, Any] | None) -> str:
 
 def _has_files(result_payload: dict[str, Any] | None) -> bool:
     payload = result_payload if isinstance(result_payload, dict) else {}
-    files = payload.get("arquivos", [])
-    return isinstance(files, list) and any(str(item).strip() for item in files)
+    files = payload.get("downloaded_files") or payload.get("arquivos", [])
+    return isinstance(files, list) and bool(files)
 
 
 def deterministic_operational_summary(
@@ -146,6 +146,7 @@ def deterministic_operational_summary(
         return "Não foi possível concluir a ação no sistema. Tente novamente ou verifique se o serviço está disponível."
 
     extracted = _safe_extracted_values(action, result_payload)
+    has_files = _has_files(result_payload)
     if extracted:
         template = _clean_scalar(_metadata(action, "user_result_summary_template", ""))
         if template:
@@ -156,17 +157,21 @@ def deterministic_operational_summary(
             except (KeyError, ValueError):
                 rendered = ""
             if rendered and _summary_is_safe(rendered, extracted):
-                return rendered
+                return f"{rendered} Arquivo disponível." if has_files else rendered
         values = ". ".join(f"{key.capitalize()}: {value}" for key, value in extracted.items())
-        return f"Ação concluída com sucesso. {values}."
+        suffix = " Arquivo disponível." if has_files else ""
+        return f"Consulta concluída. Encontrei: {values}.{suffix}"
     if extraction_targets(action):
         return "Ação executada com sucesso, mas o resultado configurado não foi encontrado ou está vazio."
-    if _has_files(result_payload):
-        return "Ação concluída com sucesso. O arquivo gerado está disponível para envio."
+    if has_files:
+        return "Arquivo gerado com sucesso. Arquivo disponível."
+    output_type = str(_metadata(action, "output_type", "") or "").strip().casefold()
+    if output_type in {"texto/dados da tela", "arquivo/pdf", "ambos"}:
+        return "Ação executada com sucesso, mas nenhum resultado final foi configurado para retorno."
     title = _safe_final_title(result_payload)
     if title:
         return "Ação executada com sucesso. A tela solicitada foi aberta, mas nenhum dado foi configurado para extração."
-    return "Ação executada com sucesso. Nenhum resultado final foi configurado para retorno nesta ação."
+    return "Ação executada com sucesso, mas nenhum resultado final foi configurado para retorno."
 
 
 def _summary_is_safe(summary: str, extracted: dict[str, str]) -> bool:

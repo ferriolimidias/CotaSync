@@ -31,6 +31,7 @@ from backend.services.action_pages import (
     validate_action_page_url,
 )
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
+from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 
 load_dotenv()
 os.makedirs("data", exist_ok=True)
@@ -462,7 +463,10 @@ async def _extrator_universal_de_download(page: Any, botao_locator: str, caminho
 
         download = await download_info.value
         download_url = str(getattr(download, "url", "") or "")
-        logging.info(f"[DOWNLOAD] Evento capturado. URL detectada: {download_url or 'N/A'}")
+        logging.info(
+            "[DOWNLOAD] Evento capturado. Origem detectada: %s",
+            _safe_result_url(download_url) if download_url else "N/A",
+        )
         await download.save_as(caminho_destino)
         await asyncio.sleep(2)  # Garantia extra de flush no disco após save_as
         if _arquivo_pdf_valido(caminho_destino):
@@ -1012,6 +1016,7 @@ async def executar_acao_rapida(
     passos_playwright: list,
     dados_variaveis: dict | None = None,
     action_config: dict[str, Any] | None = None,
+    run_id: str = "",
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Fast-Track), repetindo os passos técnicos.
@@ -1025,6 +1030,7 @@ async def executar_acao_rapida(
     caminho_execucao = _DATA_DIR / f"execucao_{nome_arquivo}.png"
     caminho_evidencia_padrao = raiz / NOME_ARQUIVO_EVIDENCIA
     arquivos_baixados: list[str] = []
+    downloaded_files: list[dict[str, object]] = []
     dados_extraidos: dict[str, str] = {}
 
     action_config = action_config if isinstance(action_config, dict) else {}
@@ -1152,10 +1158,11 @@ async def executar_acao_rapida(
                         dados_extraidos[extraction_name] = texto.strip()
 
                     elif tipo_acao == "download_pdf":
-                        os.makedirs("downloads", exist_ok=True)
-                        caminho_arquivo = f"downloads/{re.sub(r'[^\w\\-.]+', '_', str(nome_acao or 'acao'))}.pdf"
-                        await _extrator_universal_de_download(page, seletor, caminho_arquivo)
-                        arquivos_baixados.append(caminho_arquivo)
+                        caminho_arquivo = runtime_download_path(nome_acao, run_id, ".pdf")
+                        await _extrator_universal_de_download(page, seletor, str(caminho_arquivo))
+                        metadata = runtime_file_metadata(caminho_arquivo)
+                        downloaded_files.append(metadata)
+                        arquivos_baixados.append(str(metadata["path"]))
 
                 except ActionPageError:
                     raise
@@ -1175,6 +1182,8 @@ async def executar_acao_rapida(
                 "status": "sucesso",
                 "evidencia": caminho_execucao.name,
                 "arquivos_baixados": arquivos_baixados,
+                "downloaded_files": downloaded_files,
+                "main_file": downloaded_files[0] if downloaded_files else None,
                 "dados_extraidos": dados_extraidos,
                 "passos_executados": len(passos_playwright),
                 "final_page": {"title": final_title, "url": _safe_result_url(page.url)},

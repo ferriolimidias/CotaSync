@@ -30,11 +30,15 @@ class ActionSummary(BaseModel):
     variable_schema: list[dict] = Field(default_factory=list)
     extraction_target: str | None = None
     objective: str = ""
+    input_description: str = ""
     expected_result: str = ""
+    success_criteria: str = ""
+    output_type: str = ""
     output_schema: dict[str, Any] = Field(default_factory=dict)
     extraction_targets: list[str] = Field(default_factory=list)
     user_result_summary_template: str | None = None
     ai_result_summary_enabled: bool = True
+    ai_recovery_enabled: bool = False
     external_system_name: str | None = None
     external_login_url: str | None = None
     browser_mode: str = "browserless"
