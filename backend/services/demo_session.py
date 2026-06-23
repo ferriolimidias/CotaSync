@@ -1077,6 +1077,11 @@ class DemoSessionManager:
         name: str,
         description: str,
         variable_names: dict[str, str],
+        *,
+        objective: str = "",
+        expected_result: str = "",
+        user_result_summary_template: str | None = None,
+        ai_result_summary_enabled: bool = True,
     ) -> dict[str, Any]:
         session = self._get(session_id)
         action_name = str(name or "").strip()
@@ -1128,6 +1133,16 @@ class DemoSessionManager:
             )
             robust_steps.append(robust_step)
 
+        extraction_targets = [
+            str(step.get("nome") or "").strip()
+            for step in steps
+            if str(step.get("tipo") or "").strip().lower() == "extrair_texto"
+            and str(step.get("nome") or "").strip()
+        ]
+        output_schema = {target: {"type": "string"} for target in extraction_targets}
+        objective_text = str(objective or "").strip()
+        expected_result_text = str(expected_result or "").strip()
+
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
             "descricao": str(description or "Rotina aprendida por demonstracao manual.").strip(),
@@ -1136,6 +1151,12 @@ class DemoSessionManager:
             "robust_steps": robust_steps,
             "learning_events": learning_events,
             "variaveis_necessarias": variables,
+            "objective": objective_text,
+            "expected_result": expected_result_text,
+            "output_schema": output_schema,
+            "extraction_targets": extraction_targets,
+            "user_result_summary_template": str(user_result_summary_template or "").strip() or None,
+            "ai_result_summary_enabled": bool(ai_result_summary_enabled),
             "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
             "learning_mode": (
                 "desktop_browser_live_ai_observed"
@@ -1150,6 +1171,16 @@ class DemoSessionManager:
 
         ai_review = await analyze_recorded_action_with_ai(learned_action)
         learned_action.update(ai_review)
+        if not learned_action["objective"]:
+            learned_action["objective"] = str(
+                learned_action.get("ai_observer_summary") or f"Executar a ação {action_name}"
+            ).strip()
+        if not learned_action["expected_result"]:
+            learned_action["expected_result"] = (
+                "Retornar " + ", ".join(extraction_targets)
+                if extraction_targets
+                else "Abrir a tela final da rotina"
+            )
         learned_action["wait_strategies"] = learned_action.get("waits", [])
         learned_action["risks_detected"] = learned_action.get("ai_risk_notes", [])
         learned_action["slow_system_notes"] = learned_action.get("ai_slow_system_notes", [])
@@ -1183,6 +1214,12 @@ class DemoSessionManager:
             "wait_strategies": learned_action.get("wait_strategies", []),
             "variable_schema": learned_action.get("variable_schema", []),
             "extraction_target": str(learned_action.get("extraction_target") or ""),
+            "objective": learned_action["objective"],
+            "expected_result": learned_action["expected_result"],
+            "output_schema": learned_action["output_schema"],
+            "extraction_targets": learned_action["extraction_targets"],
+            "user_result_summary_template": learned_action["user_result_summary_template"],
+            "ai_result_summary_enabled": learned_action["ai_result_summary_enabled"],
             "robust_steps_count": len(robust_steps),
             "learning_events_count": len(learning_events),
             "external_system_name": learned_action["external_system_name"],
@@ -1330,6 +1367,7 @@ class DemoSessionManager:
         evidence_path = _DATA_DIR / "runs" / f"{run_id}.png"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         await session.page.screenshot(path=str(evidence_path), full_page=False)
+        final_title = (await session.page.title()).strip()[:200]
         logger.info("Replay concluido na sessao %s, run %s", session_id, run_id)
         return {
             "texto": "Execucao assistida concluida com sucesso.",
@@ -1338,6 +1376,7 @@ class DemoSessionManager:
             "passos_executados": len(steps),
             "session_revalidated": automatically_revalidated,
             "selector_diagnostics": selector_diagnostics,
+            "final_page": {"title": final_title, "url": _safe_page_url(session.page.url)},
         }
 
     async def _wait_actionable_locator(self, page: Page, selector: str) -> tuple[Locator, dict[str, Any]]:

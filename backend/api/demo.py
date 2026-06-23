@@ -17,6 +17,10 @@ router = APIRouter(tags=["demo-v0.1"])
 class SaveDemoActionRequest(BaseModel):
     name: str
     description: str = "Rotina aprendida por demonstracao manual."
+    objective: str = ""
+    expected_result: str = ""
+    user_result_summary_template: str | None = None
+    ai_result_summary_enabled: bool = True
     variable_names: dict[str, str] = Field(default_factory=dict)
 
 
@@ -140,6 +144,10 @@ async def save_demo_action(session_id: str, payload: SaveDemoActionRequest) -> d
             payload.name,
             payload.description,
             payload.variable_names,
+            objective=payload.objective,
+            expected_result=payload.expected_result,
+            user_result_summary_template=payload.user_result_summary_template,
+            ai_result_summary_enabled=payload.ai_result_summary_enabled,
         )
     except DemoSessionError as exc:
         _raise_safe(exc)

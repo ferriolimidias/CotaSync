@@ -142,7 +142,9 @@ payload = json.load(open(sys.argv[1], encoding="utf-8"))
 run = payload["run"]
 assert payload["status"] == "ok"
 assert run["status"] == "success"
-assert run["result_summary"] == "Execucao local de teste concluida."
+assert run["result_summary"] == run["operational_summary"]
+assert "Nenhum resultado final foi configurado" in run["operational_summary"]
+assert run["technical_summary"]
 assert run["variables"]["cpf"] == "*********00"
 assert run["result_payload"]["echo"]["cpf"] == "*********00"
 assert run["result_payload"]["fixture"] is True

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -8,6 +9,7 @@ from uuid import uuid4
 from backend.agente import executar_acao_fast_track
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
+from backend.services.operational_summary import build_operational_summary, build_technical_summary
 from backend.services.runs_repository import append_run, update_run
 
 logger = logging.getLogger("cotasync.action_runner")
@@ -85,20 +87,38 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "passos_executados",
         "session_revalidated",
         "selector_diagnostics",
+        "final_page",
     ):
         value = result.get(key)
         if value:
-            payload[key] = value
+            if key == "dados_extraidos" and isinstance(value, dict):
+                payload[key] = {
+                    str(item_key): mask_value_for_key(str(item_key), item)
+                    for item_key, item in value.items()
+                }
+            else:
+                payload[key] = value
     return payload or None
+
+
+def _safe_error_message(exc: Exception) -> str:
+    text = re.sub(
+        r"([?&](?:token|key|secret|password|senha)=)[^&\s]+",
+        r"\1[REDACTED]",
+        str(exc),
+        flags=re.I,
+    )
+    text = re.sub(r"((?:token|secret|password|senha)\s*[:=]\s*)\S+", r"\1[REDACTED]", text, flags=re.I)
+    return text[:1000] or type(exc).__name__
 
 
 def _is_local_fixture(action: ActionDetail) -> bool:
     return action.test_mode or str(action.execution_type or "").lower() == "local_fixture"
 
 
-def _run_local_fixture(action: ActionDetail, variables: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _run_local_fixture(action: ActionDetail, variables: dict[str, Any]) -> dict[str, Any]:
     echo = {variable.key: mask_value_for_key(variable.key, variables.get(variable.key)) for variable in action.variables}
-    return "Execucao local de teste concluida.", {"echo": echo, "fixture": True, "action_id": action.id}
+    return {"echo": echo, "fixture": True, "action_id": action.id}
 
 
 async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
@@ -122,10 +142,8 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
 
     try:
         if _is_local_fixture(action):
-            summary, payload = _run_local_fixture(action, request.variables)
             run.status = "success"
-            run.result_summary = summary
-            run.result_payload = payload
+            run.result_payload = _run_local_fixture(action, request.variables)
         elif action.steps_count <= 0:
             raise RuntimeError("Acao aprendida nao possui passos para execucao.")
         elif request.session_id:
@@ -138,25 +156,39 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
                 run.id,
             )
             run.status = "success"
-            run.result_summary = str(result.get("texto") or "Execucao concluida.")
             run.result_payload = _safe_result_payload(result)
         else:
             result = await executar_acao_fast_track(action.key, request.variables)
             text = str(result.get("texto") or "").strip()
-            if text.startswith("❌") or "Falha" in text or "falha" in text:
+            execution_status = str(result.get("status") or "").strip().lower()
+            if execution_status == "error" or text.startswith("❌") or "Falha" in text or "falha" in text:
                 raise RuntimeError(text or "Falha na execucao da acao.")
 
             run.status = "success"
-            run.result_summary = text or "Execucao concluida."
             run.result_payload = _safe_result_payload(result)
     except Exception as exc:
-        logger.info("Run %s finalizada com erro: %s", run.id, exc)
+        safe_error = _safe_error_message(exc)
+        logger.info("Run %s finalizada com erro do tipo %s", run.id, type(exc).__name__)
         run.status = "error"
-        run.result_summary = "Execucao finalizada com erro."
-        run.error_message = str(exc)
+        run.error_message = safe_error
         diagnostics = getattr(exc, "diagnostics", None)
         run.result_payload = {"selector_diagnostics": [diagnostics]} if isinstance(diagnostics, dict) else None
     finally:
+        run.operational_summary = await build_operational_summary(
+            action,
+            status=run.status,
+            result_payload=run.result_payload,
+            error_message=run.error_message,
+        )
+        run.result_summary = run.operational_summary
+        executed_steps = 0
+        if isinstance(run.result_payload, dict):
+            executed_steps = int(run.result_payload.get("passos_executados") or 0)
+        run.technical_summary = build_technical_summary(
+            status=run.status,
+            executed_steps=executed_steps,
+            result_payload=run.result_payload,
+        )
         run.finished_at = utc_now_iso()
         update_run(run)
 

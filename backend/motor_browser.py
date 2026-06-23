@@ -252,6 +252,18 @@ def browserless_url_segura() -> str:
         return "ws://***"
 
 
+def _safe_result_url(url: str) -> str:
+    """Remove credenciais, query e fragmento antes de persistir a pagina final."""
+    try:
+        parsed = urlsplit(str(url or ""))
+        hostname = parsed.hostname or ""
+        if parsed.port:
+            hostname = f"{hostname}:{parsed.port}"
+        return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
+    except Exception:
+        return ""
+
+
 async def verificar_browserless(screenshot_path: str | None = None) -> dict[str, Any]:
     """Valida a conexão CDP com Browserless sem acessar sistemas externos."""
     inicio = time.monotonic()
@@ -1112,7 +1124,8 @@ async def executar_acao_rapida(
                         else:
                             texto = await elemento.inner_text(timeout=5000)
 
-                        dados_extraidos[seletor] = texto
+                        extraction_name = str(passo.get("nome") or "").strip() or seletor
+                        dados_extraidos[extraction_name] = texto.strip()
 
                     elif tipo_acao == "download_pdf":
                         os.makedirs("downloads", exist_ok=True)
@@ -1128,12 +1141,15 @@ async def executar_acao_rapida(
             await asyncio.sleep(1)
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
+            final_title = (await page.title()).strip()[:200]
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
             return {
                 "status": "sucesso",
                 "evidencia": caminho_execucao.name,
                 "arquivos_baixados": arquivos_baixados,
                 "dados_extraidos": dados_extraidos,
+                "passos_executados": len(passos_playwright),
+                "final_page": {"title": final_title, "url": _safe_result_url(page.url)},
             }
     except Exception as exc:
         _LOGGER.info(f"[ERRO] Falha na execução rápida '{nome_acao}': {exc}")

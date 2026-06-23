@@ -109,6 +109,24 @@ def _unique_action_id(base_id: str, used_ids: set[str]) -> str:
     return candidate
 
 
+def _extraction_targets(data: dict[str, Any], raw_steps: Any) -> list[str]:
+    configured = data.get("extraction_targets")
+    if isinstance(configured, list):
+        targets = [str(item).strip() for item in configured if str(item).strip()]
+        if targets:
+            return targets
+    if not isinstance(raw_steps, list):
+        return []
+    targets: list[str] = []
+    for step in raw_steps:
+        if not isinstance(step, dict) or str(step.get("tipo") or "").strip().lower() != "extrair_texto":
+            continue
+        target = str(step.get("nome") or "").strip()
+        if target and target not in targets:
+            targets.append(target)
+    return targets
+
+
 def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDetail:
     data = raw_action if isinstance(raw_action, dict) else {}
     name = str(data.get("nome_amigavel") or data.get("name") or key).strip() or key
@@ -118,6 +136,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
     action_id = _unique_action_id(slugify_action_id(name or key), used_ids)
     execution_type_raw = data.get("tipo_execucao")
     execution_type = str(execution_type_raw).strip() if execution_type_raw is not None else None
+    extraction_targets = _extraction_targets(data, raw_steps)
 
     summary = ActionSummary(
         id=action_id,
@@ -139,6 +158,12 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ),
         variable_schema=data.get("variable_schema", []) if isinstance(data.get("variable_schema"), list) else [],
         extraction_target=str(data.get("extraction_target") or "").strip() or None,
+        objective=str(data.get("objective") or description or name).strip(),
+        expected_result=str(data.get("expected_result") or "").strip(),
+        output_schema=data.get("output_schema", {}) if isinstance(data.get("output_schema"), dict) else {},
+        extraction_targets=extraction_targets,
+        user_result_summary_template=str(data.get("user_result_summary_template") or "").strip() or None,
+        ai_result_summary_enabled=bool(data.get("ai_result_summary_enabled", True)),
         external_system_name=str(data.get("external_system_name") or "").strip() or None,
         external_login_url=str(data.get("external_login_url") or "").strip() or None,
         source=SOURCE_LABEL,

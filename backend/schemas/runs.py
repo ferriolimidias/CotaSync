@@ -29,6 +29,8 @@ class RunRecord(BaseModel):
     finished_at: str | None = None
     variables: dict[str, Any] = Field(default_factory=dict)
     result_summary: str | None = None
+    operational_summary: str | None = None
+    technical_summary: str | None = None
     result_payload: dict[str, Any] | None = None
     error_message: str | None = None
 

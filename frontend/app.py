@@ -421,10 +421,34 @@ def _render_demo_v01() -> None:
                         key=f"demo_variable_{session_id}_{index}",
                     )
 
+            suggested_targets = [
+                str(step.get("nome") or "").replace("_", " ").strip()
+                for step in recorded_steps
+                if isinstance(step, dict) and str(step.get("tipo") or "").lower() == "extrair_texto"
+            ]
             action_name = st.text_input(
-                "Nome da nova ação",
-                value="Consultar status do pedido",
+                "Nome da ação",
+                value="",
+                placeholder="Ex.: Consultar status do pedido",
                 key=f"demo_action_name_{session_id}",
+            )
+            action_objective = st.text_input(
+                "Objetivo da ação",
+                value=(
+                    f"Executar a consulta e retornar {', '.join(suggested_targets)}"
+                    if suggested_targets
+                    else "Abrir a tela final da rotina demonstrada"
+                ),
+                key=f"demo_action_objective_{session_id}",
+            )
+            expected_result = st.text_input(
+                "Resultado esperado para retornar ao usuário",
+                value=(
+                    f"Retornar {', '.join(suggested_targets)}"
+                    if suggested_targets
+                    else "Confirmar que a tela solicitada foi aberta"
+                ),
+                key=f"demo_action_expected_result_{session_id}",
             )
             if st.button("Salvar ação aprendida", key="demo_save_action", type="primary", use_container_width=True):
                 try:
@@ -435,6 +459,8 @@ def _render_demo_v01() -> None:
                             {
                                 "name": action_name,
                                 "description": "Rotina demonstrada manualmente e revisada pelo observador de IA.",
+                                "objective": action_objective,
+                                "expected_result": expected_result,
                                 "variable_names": variable_names,
                             },
                             api_base_url=API_BASE_URL,
@@ -488,9 +514,9 @@ def _render_demo_v01() -> None:
         last_run = st.session_state.get("demo_last_run")
         if isinstance(last_run, dict) and last_run:
             if last_run.get("status") == "success":
-                st.success(f"Execução concluída. Run `{last_run.get('id', '')}`")
+                st.success(str(last_run.get("operational_summary") or "Ação executada."))
             else:
-                st.error(str(last_run.get("error_message") or "Execução não concluída."))
+                st.error(str(last_run.get("operational_summary") or "Execução não concluída."))
             payload = last_run.get("result_payload", {})
             if isinstance(payload, dict):
                 if payload.get("session_revalidated") is True:

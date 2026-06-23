@@ -29,6 +29,7 @@ from backend.motor_browser import (
     executar_acao_rapida,
     gerar_plano_acao,
 )
+from backend.services.operational_summary import build_operational_summary
 
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
@@ -327,6 +328,14 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
 
         passos_reais = await revisar_e_otimizar_passos(instrucao_execucao, passos_reais)
 
+        extraction_targets = [
+            str(step.get("nome") or "").strip()
+            for step in passos_reais
+            if isinstance(step, dict)
+            and str(step.get("tipo") or "").strip().lower() == "extrair_texto"
+            and str(step.get("nome") or "").strip()
+        ]
+
         ui_map = carregar_ui_map()
         ui_map.setdefault("acoes_conhecidas", {})
         ui_map["acoes_conhecidas"][nome_acao] = {
@@ -334,6 +343,16 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
             "descricao": f"Ação aprendida: {str(sessao_atual.get('instrucao_original', instrucao_execucao))[:80]}...",
             "url_inicial": "Lida do erp_config.json",
             "passos_playwright": passos_reais,
+            "objective": str(sessao_atual.get("instrucao_original", instrucao_execucao)).strip(),
+            "expected_result": (
+                "Retornar " + ", ".join(extraction_targets)
+                if extraction_targets
+                else "Confirmar a abertura da tela final"
+            ),
+            "output_schema": {target: {"type": "string"} for target in extraction_targets},
+            "extraction_targets": extraction_targets,
+            "user_result_summary_template": None,
+            "ai_result_summary_enabled": True,
             "variaveis_necessarias": (
                 resultado_mapeamento.get("variaveis_necessarias", [])
                 if isinstance(resultado_mapeamento, dict)
@@ -430,25 +449,8 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         mensagem_limpa = str(mensagem_usuario or "").strip()
         if isinstance(acoes, dict) and mensagem_limpa in acoes:
             _LOGGER.info(f"[FAST-TRACK] Disparo direto da ação: {mensagem_limpa}")
-            acao = acoes.get(mensagem_limpa, {})
-            passos = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
-            resultado_execucao = await executar_acao_rapida(mensagem_limpa, passos, None)
-            if str(resultado_execucao.get("status", "")).lower() == "sucesso":
-                arquivos_baixados = resultado_execucao.get("arquivos_baixados", [])
-                evidencia = str(resultado_execucao.get("evidencia", ""))
-                dados_ft = resultado_execucao.get("dados_extraidos", {})
-                extras: dict[str, Any] = {
-                    "evidencia": evidencia,
-                    "arquivos": arquivos_baixados if isinstance(arquivos_baixados, list) else [],
-                }
-                if isinstance(dados_ft, dict) and dados_ft:
-                    extras["dados_extraidos"] = dados_ft
-                return _montar_resposta(
-                    "✅ Execução concluída com sucesso! Evidência visual e arquivos extraídos abaixo:",
-                    extras,
-                )
-            motivo = str(resultado_execucao.get("motivo", "Falha não identificada."))
-            return _montar_resposta(f"❌ A execução rápida falhou: {motivo}")
+            resultado_execucao = await executar_acao_fast_track(mensagem_limpa)
+            return _montar_resposta(str(resultado_execucao.get("texto") or ""), resultado_execucao)
 
         if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
             sessao["estado"] = "ESPERANDO_ENSINO"
@@ -492,16 +494,24 @@ async def executar_acao_fast_track(
         if str(resultado.get("status", "")).lower() != "sucesso":
             motivo = str(resultado.get("motivo", "Falha não identificada."))
             raise RuntimeError(motivo)
-        return {
-            "texto": "✅ Execução rápida concluída com sucesso da memória!",
-            "estado": "NORMAL",
+        result_payload = {
             "evidencia": str(resultado.get("evidencia", "")),
             "arquivos": resultado.get("arquivos_baixados", []),
             "dados_extraidos": resultado.get("dados_extraidos", {}),
+            "passos_executados": resultado.get("passos_executados", len(passos_playwright)),
+            "final_page": resultado.get("final_page", {}),
+        }
+        summary = await build_operational_summary(acao, status="success", result_payload=result_payload)
+        return {
+            "texto": summary,
+            "operational_summary": summary,
+            "status": "success",
+            "estado": "NORMAL",
+            **result_payload,
         }
 
     except Exception as erro_fast_track:
-        logging.warning(f"[AUTO-HEALING] Fast-Track falhou para a ação '{nome_acao}'. Erro: {erro_fast_track}")
+        logging.warning("[AUTO-HEALING] Fast-Track falhou para a ação '%s' (%s).", nome_acao, type(erro_fast_track).__name__)
         logging.info("[AUTO-HEALING] Acionando a IA para Diagnóstico e Correção da tela...")
 
         instrucao_recuperacao = f"""
@@ -524,26 +534,30 @@ async def executar_acao_fast_track(
 
             logging.info(f"[AUTO-HEALING] SUCESSO! A rotina '{nome_acao}' foi auto-corrigida.")
 
-            return {
-                "texto": (
-                    "⚠️ **Diagnóstico e Auto-Correção:** Ocorreu um obstáculo no sistema (possível lentidão ou mudança de tela).\n\n"
-                    "Assumi o controlo manual com a Inteligência Artificial, analisei a situação, concluí a tarefa pretendida "
-                    "e ajustei a minha abordagem para não falhar na próxima!\n\n"
-                    f"Dados extraídos: {novos_passos.get('dados_extraidos', {})}"
-                ),
-                "estado": "NORMAL",
+            healed_payload = {
                 "arquivos": novos_passos.get("arquivos_baixados", []),
                 "dados_extraidos": novos_passos.get("dados_extraidos", {}),
             }
+            summary = await build_operational_summary(acao, status="success", result_payload=healed_payload)
+            return {
+                "texto": summary,
+                "operational_summary": summary,
+                "status": "success",
+                "estado": "NORMAL",
+                **healed_payload,
+            }
 
         except Exception as e_ia:
-            logging.error(f"[AUTO-HEALING FALHOU] {str(e_ia)}")
+            logging.error("[AUTO-HEALING FALHOU] %s", type(e_ia).__name__)
+            summary = await build_operational_summary(
+                acao,
+                status="error",
+                error_message=str(e_ia),
+            )
             return {
-                "texto": (
-                    "❌ **Falha Crítica:** O sistema parece estar indisponível ou ocorreu um erro incontornável. "
-                    "Tentei assumir o controlo manual com a IA, mas não foi possível avançar. "
-                    f"Erro técnico: {str(e_ia)}"
-                ),
+                "texto": summary,
+                "operational_summary": summary,
+                "status": "error",
                 "estado": "NORMAL",
             }
 

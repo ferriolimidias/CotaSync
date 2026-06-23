@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -27,6 +29,12 @@ class ActionSummary(BaseModel):
     wait_strategies: list[dict] = Field(default_factory=list)
     variable_schema: list[dict] = Field(default_factory=list)
     extraction_target: str | None = None
+    objective: str = ""
+    expected_result: str = ""
+    output_schema: dict[str, Any] = Field(default_factory=dict)
+    extraction_targets: list[str] = Field(default_factory=list)
+    user_result_summary_template: str | None = None
+    ai_result_summary_enabled: bool = True
     external_system_name: str | None = None
     external_login_url: str | None = None
     source: str = "data/ui_map.json"
