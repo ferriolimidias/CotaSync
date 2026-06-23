@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,7 @@ from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import run_action_sync
 from backend.services.operational_summary import (
     build_operational_summary,
+    build_operational_summary_result,
     deterministic_operational_summary,
 )
 
@@ -51,6 +53,66 @@ class OperationalSummaryTests(unittest.TestCase):
             "Ação executada com sucesso, mas nenhum resultado final foi configurado para retorno.",
         )
 
+    def test_noisy_extracted_text_becomes_concise_deterministic_summary(self) -> None:
+        noisy = (
+            "Página Inicial Venda Grupo Cobrança Relatórios Página Inicial Venda Grupo Cobrança "
+            "Filtros Consulta Grupo Produto Situação Período Tipo de venda " * 25
+        )
+        summary = deterministic_operational_summary(
+            _action(extraction_targets=["texto_tela_final"]),
+            status="success",
+            result_payload={"dados_extraidos": {"texto_tela_final": noisy}},
+        )
+        self.assertLess(len(summary), 260)
+        self.assertNotIn("Página Inicial Venda Grupo Cobrança Relatórios Página Inicial", summary)
+
+    def test_form_filter_page_is_not_reported_as_final_result(self) -> None:
+        text = (
+            "Página Inicial\nVenda\nGrupo\nCobrança\nRelatórios\n"
+            "Consulta de relatório\nGrupo\nPeríodo\nProduto\nTipo de venda\nSituação\nConsultar"
+        )
+        summary = deterministic_operational_summary(
+            _action(extraction_targets=["texto_tela_final"]),
+            status="success",
+            result_payload={"dados_extraidos": {"texto_tela_final": text * 10}},
+        )
+        lowered = summary.casefold()
+        self.assertIn("formulário", lowered)
+        self.assertIn("nenhum resultado específico", lowered)
+        self.assertNotIn("encontrei: texto tela final", lowered)
+
+    def test_real_extracted_fields_are_summarized_clearly(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(extraction_targets=["cliente", "grupo", "cota", "status"]),
+            status="success",
+            result_payload={
+                "dados_extraidos": {
+                    "cliente": "João Silva",
+                    "grupo": "123",
+                    "cota": "456",
+                    "status": "Ativo",
+                }
+            },
+        )
+        self.assertIn("João Silva", summary)
+        self.assertIn("Grupo: 123", summary)
+        self.assertIn("Cota: 456", summary)
+        self.assertIn("Status: Ativo", summary)
+
+    def test_downloaded_file_summary_mentions_available_file(self) -> None:
+        metadata = {
+            "name": "relatorio.pdf",
+            "path": "data/runs/downloads/run-1/relatorio.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 12,
+        }
+        summary = deterministic_operational_summary(
+            _action(extraction_targets=[], passos_playwright=[], output_type="arquivo/PDF"),
+            status="success",
+            result_payload={"downloaded_files": [metadata], "main_file": metadata},
+        )
+        self.assertIn("Arquivo disponível", summary)
+
     def test_fallback_works_without_openai_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             summary = asyncio.run(
@@ -61,6 +123,36 @@ class OperationalSummaryTests(unittest.TestCase):
                 )
             )
         self.assertIn("Ativo", summary)
+
+    def test_openai_error_falls_back_deterministically(self) -> None:
+        fake_llm = SimpleNamespace(ainvoke=AsyncMock(side_effect=RuntimeError("offline")))
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), patch(
+            "backend.services.operational_summary.ChatOpenAI", return_value=fake_llm
+        ):
+            result = asyncio.run(
+                build_operational_summary_result(
+                    _action(),
+                    status="success",
+                    result_payload={"dados_extraidos": {"status_cliente": "Ativo"}},
+                )
+            )
+        self.assertEqual(result.summary_source, "deterministic")
+        self.assertFalse(result.ai_summary_used)
+        self.assertIn("Ativo", result.summary)
+
+    def test_ai_disabled_does_not_call_openai(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), patch(
+            "backend.services.operational_summary.ChatOpenAI"
+        ) as chat_openai:
+            result = asyncio.run(
+                build_operational_summary_result(
+                    _action(ai_result_summary_enabled=False),
+                    status="success",
+                    result_payload={"dados_extraidos": {"status_cliente": "Ativo"}},
+                )
+            )
+        chat_openai.assert_not_called()
+        self.assertEqual(result.summary_source, "deterministic")
 
     def test_page_only_success_uses_stable_operational_summary(self) -> None:
         summary = asyncio.run(
@@ -112,6 +204,37 @@ class OperationalSummaryTests(unittest.TestCase):
         self.assertNotIn("desktop_browser", lowered)
         self.assertNotIn("selector", lowered)
         self.assertNotIn("credencial-super-secreta", lowered)
+
+    def test_ai_summary_uses_limited_sanitized_context(self) -> None:
+        fake_llm = SimpleNamespace(
+            ainvoke=AsyncMock(
+                return_value=SimpleNamespace(
+                    content="Consulta concluída. A tela aberta parece ser um formulário de relatório/filtro. Nenhum resultado específico foi listado ainda."
+                )
+            )
+        )
+        noisy = (
+            "Página Inicial Venda Grupo Cobrança Relatórios token=abc123 "
+            "/opt/cotasync-test/src/data/runs/downloads/secret.pdf "
+            "Grupo Período Produto Tipo de venda Situação Consultar " * 400
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "cheap-model"}, clear=True), patch(
+            "backend.services.operational_summary.ChatOpenAI", return_value=fake_llm
+        ) as chat_openai:
+            result = asyncio.run(
+                build_operational_summary_result(
+                    _action(extraction_targets=["texto_tela_final"]),
+                    status="success",
+                    result_payload={"dados_extraidos": {"texto_tela_final": noisy}},
+                )
+            )
+        prompt = fake_llm.ainvoke.await_args.args[0]
+        self.assertEqual(result.summary_source, "ai")
+        self.assertTrue(result.ai_summary_used)
+        self.assertLess(len(prompt), 9500)
+        self.assertNotIn("abc123", prompt)
+        self.assertNotIn("/opt/cotasync-test", prompt)
+        chat_openai.assert_called_once()
 
     def test_quick_execution_chat_uses_operational_summary(self) -> None:
         from backend import agente
@@ -167,6 +290,32 @@ class OperationalSummaryTests(unittest.TestCase):
         self.assertNotIn("#status-interno", run.operational_summary or "")
         self.assertIn("#status-interno", str(run.result_payload))
         self.assertIn("diagnósticos=1", run.technical_summary or "")
+        self.assertEqual(run.summary_source, "deterministic")
+        self.assertFalse(run.ai_summary_used)
+
+    def test_operational_summary_does_not_leak_selectors_tokens_credentials_or_paths(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(extraction_targets=["status"]),
+            status="success",
+            result_payload={
+                "dados_extraidos": {
+                    "#status-interno": "Ativo",
+                    "access_token": "sk-secret",
+                    "senha": "123456",
+                    "arquivo": "/opt/cotasync-test/src/data/runs/downloads/boleto.pdf",
+                }
+            },
+        )
+        self.assertNotIn("#status-interno", summary)
+        self.assertNotIn("sk-secret", summary)
+        self.assertNotIn("123456", summary)
+        self.assertNotIn("/opt/cotasync-test", summary)
+
+    def test_frontend_chat_keeps_raw_extracted_data_in_expander(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('st.expander("Ver dados extraídos", expanded=False)', source)
+        self.assertIn('st.expander("Ver JSON/result_payload", expanded=False)', source)
+        self.assertNotIn('st.write("Textos / dados extraídos nesta execução:")', source)
 
 
 if __name__ == "__main__":

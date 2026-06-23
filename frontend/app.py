@@ -654,25 +654,14 @@ def _render_demo_v01() -> None:
                 if steps_executed:
                     st.caption(f"Passos executados: {steps_executed}")
                 if extracted:
-                    st.write("**Resultado extraído:**")
-                    st.json(extracted)
-                downloaded_files = payload.get("downloaded_files", [])
-                if isinstance(downloaded_files, list):
-                    for file_index, metadata in enumerate(downloaded_files):
-                        if not isinstance(metadata, dict):
-                            continue
-                        relative_path = str(metadata.get("path") or "")
-                        file_path = (_ROOT / relative_path).resolve()
-                        allowed_root = (_ROOT / "data" / "runs" / "downloads").resolve()
-                        if not file_path.is_file() or not file_path.is_relative_to(allowed_root):
-                            continue
-                        st.download_button(
-                            "Baixar arquivo gerado",
-                            data=file_path.read_bytes(),
-                            file_name=str(metadata.get("name") or file_path.name),
-                            mime=str(metadata.get("mime_type") or "application/octet-stream"),
-                            key=f"demo_run_download_{last_run.get('id', '')}_{file_index}",
-                        )
+                    with st.expander("Ver dados extraídos", expanded=False):
+                        st.json(extracted)
+                with st.expander("Ver JSON/result_payload", expanded=False):
+                    st.json(payload)
+                _render_runtime_downloads(
+                    payload.get("downloaded_files", []),
+                    key_prefix=f"demo_run_download_{last_run.get('id', '')}",
+                )
                 evidence = str(payload.get("evidencia") or "")
                 evidence_path = _ROOT / evidence
                 if evidence and evidence_path.is_file():
@@ -712,8 +701,37 @@ def _normalizar_resposta_assistente(resposta: object) -> dict:
         dados_extra = resposta.get("dados_extraidos")
         if isinstance(dados_extra, dict) and dados_extra:
             payload["dados_extraidos"] = dados_extra
+        downloaded_files = resposta.get("downloaded_files")
+        if isinstance(downloaded_files, list) and downloaded_files:
+            payload["downloaded_files"] = downloaded_files
+        main_file = resposta.get("main_file")
+        if isinstance(main_file, dict) and main_file:
+            payload["main_file"] = main_file
+        result_payload = resposta.get("result_payload")
+        if isinstance(result_payload, dict) and result_payload:
+            payload["result_payload"] = result_payload
         return payload
     return {"role": "assistant", "content": str(resposta)}
+
+
+def _render_runtime_downloads(files: object, *, key_prefix: str) -> None:
+    if not isinstance(files, list):
+        return
+    allowed_root = (_ROOT / "data" / "runs" / "downloads").resolve()
+    for file_index, metadata in enumerate(files):
+        if not isinstance(metadata, dict):
+            continue
+        relative_path = str(metadata.get("path") or "")
+        file_path = (_ROOT / relative_path).resolve()
+        if not file_path.is_file() or not file_path.is_relative_to(allowed_root):
+            continue
+        st.download_button(
+            "Baixar arquivo gerado",
+            data=file_path.read_bytes(),
+            file_name=str(metadata.get("name") or file_path.name),
+            mime=str(metadata.get("mime_type") or "application/octet-stream"),
+            key=f"{key_prefix}_{file_index}",
+        )
 
 
 def carregar_historico_disco() -> list[dict]:
@@ -736,6 +754,12 @@ def carregar_historico_disco() -> list[dict]:
                     msg_restaurada["evidencia"] = str(item["evidencia"])
                 if "dados_extraidos" in item and isinstance(item.get("dados_extraidos"), dict):
                     msg_restaurada["dados_extraidos"] = item["dados_extraidos"]
+                if "downloaded_files" in item and isinstance(item.get("downloaded_files"), list):
+                    msg_restaurada["downloaded_files"] = item["downloaded_files"]
+                if "main_file" in item and isinstance(item.get("main_file"), dict):
+                    msg_restaurada["main_file"] = item["main_file"]
+                if "result_payload" in item and isinstance(item.get("result_payload"), dict):
+                    msg_restaurada["result_payload"] = item["result_payload"]
                 mensagens_validas.append(msg_restaurada)
         return mensagens_validas
     except (json.JSONDecodeError, OSError):
@@ -976,8 +1000,17 @@ if menu_selecionado == "Chat & Ações":
 
             dados_ex = msg.get("dados_extraidos")
             if isinstance(dados_ex, dict) and dados_ex:
-                st.write("Textos / dados extraídos nesta execução:")
-                st.json(dados_ex)
+                with st.expander("Ver dados extraídos", expanded=False):
+                    st.json(dados_ex)
+
+            result_payload_msg = msg.get("result_payload")
+            if isinstance(result_payload_msg, dict) and result_payload_msg:
+                with st.expander("Ver JSON/result_payload", expanded=False):
+                    st.json(result_payload_msg)
+
+            runtime_files = msg.get("downloaded_files")
+            if isinstance(runtime_files, list) and runtime_files:
+                _render_runtime_downloads(runtime_files, key_prefix=f"chat_runtime_download_{i}")
 
             if "arquivos" in msg and msg["arquivos"]:
                 from backend.motor_browser import _converter_pdf_para_excel
@@ -1065,6 +1098,9 @@ if menu_selecionado == "Chat & Ações":
                 "arquivos": arquivos_anexos,
                 "evidencia": resultado_ia.get("evidencia", ""),
                 "dados_extraidos": resultado_ia.get("dados_extraidos", {}),
+                "downloaded_files": resultado_ia.get("downloaded_files", []),
+                "main_file": resultado_ia.get("main_file", {}),
+                "result_payload": resultado_ia.get("result_payload", {}),
             }
         else:
             resposta_chat = str(resultado_ia)

@@ -29,7 +29,7 @@ from backend.motor_browser import (
     executar_acao_rapida,
     gerar_plano_acao,
 )
-from backend.services.operational_summary import build_operational_summary
+from backend.services.operational_summary import build_operational_summary, build_operational_summary_result
 
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
@@ -521,12 +521,15 @@ async def executar_acao_fast_track(
             "passos_executados": resultado.get("passos_executados", len(passos_playwright)),
             "final_page": resultado.get("final_page", {}),
         }
-        summary = await build_operational_summary(acao, status="success", result_payload=result_payload)
+        summary_result = await build_operational_summary_result(acao, status="success", result_payload=result_payload)
         return {
-            "texto": summary,
-            "operational_summary": summary,
+            "texto": summary_result.summary,
+            "operational_summary": summary_result.summary,
+            "ai_summary_used": summary_result.ai_summary_used,
+            "summary_source": summary_result.summary_source,
             "status": "success",
             "estado": "NORMAL",
+            "result_payload": result_payload,
             **result_payload,
         }
 

@@ -10,7 +10,7 @@ from backend.agente import executar_acao_fast_track
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.services.action_pages import validate_action_page_url
-from backend.services.operational_summary import build_operational_summary, build_technical_summary
+from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
 from backend.services.runs_repository import append_run, update_run
 
 logger = logging.getLogger("cotasync.action_runner")
@@ -230,13 +230,16 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
         diagnostics = getattr(exc, "diagnostics", None)
         run.result_payload = {"selector_diagnostics": [diagnostics]} if isinstance(diagnostics, dict) else None
     finally:
-        run.operational_summary = await build_operational_summary(
+        summary_result = await build_operational_summary_result(
             action,
             status=run.status,
             result_payload=run.result_payload,
             error_message=run.error_message,
         )
+        run.operational_summary = summary_result.summary
         run.result_summary = run.operational_summary
+        run.ai_summary_used = summary_result.ai_summary_used
+        run.summary_source = summary_result.summary_source
         executed_steps = 0
         if isinstance(run.result_payload, dict):
             executed_steps = int(run.result_payload.get("passos_executados") or 0)
