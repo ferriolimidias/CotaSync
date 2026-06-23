@@ -24,16 +24,27 @@ _MAX_AI_CONTEXT_CHARS = 8000
 _NOISY_TEXT_THRESHOLD = 700
 _FORM_HINTS = (
     "consultar",
+    "considera",
+    "contemplação",
+    "contemplacao",
+    "data base",
+    "filial",
     "filtro",
     "filtrar",
     "gerar",
     "grupo",
+    "intervalo",
+    "lista",
     "período",
     "periodo",
     "produto",
+    "relatório",
+    "relatorio",
     "situação",
     "situacao",
     "tipo de venda",
+    "unidade negócio",
+    "unidade negocio",
     "vencimento",
 )
 _NAVIGATION_HINTS = (
@@ -54,6 +65,7 @@ class OperationalSummaryResult:
     summary: str
     ai_summary_used: bool
     summary_source: str
+    summary_reason: str = ""
 
 
 def _metadata(action: Any, key: str, default: Any = None) -> Any:
@@ -110,6 +122,12 @@ def _clean_text(value: Any, *, limit: int = 1200) -> str:
     return text[:limit]
 
 
+def _is_meaningful_text(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    alpha_count = len(re.findall(r"[A-Za-zÀ-ÿ]", cleaned))
+    return len(cleaned) >= 30 and alpha_count >= 20
+
+
 def _dedupe_lines(text: str, *, limit: int = _MAX_AI_CONTEXT_CHARS) -> str:
     seen: set[str] = set()
     kept: list[str] = []
@@ -151,7 +169,66 @@ def _looks_like_form_or_filter(text: str) -> bool:
     return form_hits >= 4 and not has_result_hint
 
 
+def _labels_found(text: str, labels: list[tuple[str, str]]) -> list[str]:
+    lowered = str(text or "").casefold()
+    found: list[str] = []
+    for needle, label in labels:
+        if needle in lowered and label not in found:
+            found.append(label)
+    return found
+
+
+def _extract_form_fields(text: str) -> list[str]:
+    return _labels_found(
+        text,
+        [
+            ("data base", "data base"),
+            ("grupo", "grupo"),
+            ("sit. do grupo", "situação do grupo"),
+            ("situação do grupo", "situação do grupo"),
+            ("situacao do grupo", "situação do grupo"),
+            ("produto", "produto"),
+            ("tipo de venda", "tipo de venda"),
+            ("ponto de venda", "ponto de venda"),
+            ("filial", "filial"),
+            ("unidade negócio", "unidade de negócio"),
+            ("unidade negocio", "unidade de negócio"),
+            ("comissionado", "comissionado"),
+            ("ponto entrega", "ponto de entrega"),
+            ("ponto de entrega", "ponto de entrega"),
+            ("contemplação", "contemplação"),
+            ("contemplacao", "contemplação"),
+            ("intervalo", "intervalo"),
+            ("percentual pago bem", "percentual pago do bem"),
+            ("ordem", "ordem"),
+            ("período", "período"),
+            ("periodo", "período"),
+            ("vencimento", "vencimento"),
+        ],
+    )[:10]
+
+
 def _extract_form_options(text: str) -> list[str]:
+    return _labels_found(
+        text,
+        [
+            ("entregas parciais", "entregas parciais"),
+            ("entrega de bem parcial", "entregas parciais"),
+            ("fgts", "FGTS"),
+            ("sorteio", "contemplação por sorteio"),
+            ("lance", "contemplação por lance"),
+            ("lances pagos", "lances pagos"),
+            ("cotas canceladas", "cotas canceladas"),
+            ("lance parcelado pendente", "lance parcelado pendente"),
+            ("salta de página por grupo", "salto de página por grupo"),
+            ("salta de pagina por grupo", "salto de página por grupo"),
+            ("situação grupo na data base", "situação do grupo na data base"),
+            ("situacao grupo na data base", "situação do grupo na data base"),
+        ],
+    )[:8]
+
+
+def _legacy_form_options(text: str) -> list[str]:
     lowered = str(text or "").casefold()
     labels = [
         ("grupo", "grupo"),
@@ -170,6 +247,56 @@ def _extract_form_options(text: str) -> list[str]:
         if needle in lowered and label not in options:
             options.append(label)
     return options[:6]
+
+
+def _screen_subject(text: str) -> str:
+    lowered = str(text or "").casefold()
+    if "bens a entregar" in lowered:
+        return "um relatório de bens a entregar"
+    if _looks_like_form_or_filter(text):
+        return "um formulário/relatório com filtros"
+    if "relatório" in lowered or "relatorio" in lowered:
+        return "um relatório"
+    return "uma tela do sistema"
+
+
+def _summarize_full_page_text(text: str, *, has_files: bool = False) -> str:
+    cleaned = _clean_text(text, limit=3000)
+    if not _is_meaningful_text(cleaned):
+        return ""
+
+    subject = _screen_subject(cleaned)
+    suffix = " Arquivo disponível." if has_files else ""
+    if _looks_like_form_or_filter(cleaned):
+        fields = _extract_form_fields(cleaned)
+        options = _extract_form_options(cleaned)
+        parts = [f"Consulta concluída. A tela aberta parece ser {subject}."]
+        if fields:
+            parts.append(f"Ela contém filtros/campos como {', '.join(fields[:8])}.")
+        if options:
+            parts.append(f"Também há opções como {', '.join(options[:6])}.")
+        parts.append("Nenhum resultado listado foi exibido; a tela parece estar aguardando filtros para gerar o relatório.")
+        return " ".join(parts) + suffix
+
+    compact = cleaned
+    for noise in ("Página Inicial", "Pagina Inicial", "Voltar"):
+        compact = re.sub(rf"\b{re.escape(noise)}\b", "", compact, flags=re.I)
+    compact = re.sub(r"\s+", " ", compact).strip()
+    if not compact:
+        return ""
+    return f"Consulta concluída. A tela aberta parece ser {subject}. Conteúdo principal encontrado: {compact[:220]}.{suffix}"
+
+
+def _full_page_text(result_payload: dict[str, Any] | None) -> str:
+    payload = result_payload if isinstance(result_payload, dict) else {}
+    raw = payload.get("dados_extraidos", {})
+    if not isinstance(raw, dict):
+        return ""
+    for key, value in raw.items():
+        normalized = str(key or "").strip().casefold()
+        if normalized in {"texto_tela_final", "texto tela final", "final_screen_text", "full_page_text"}:
+            return _clean_text(value, limit=_MAX_AI_CONTEXT_CHARS)
+    return ""
 
 
 def _raw_steps(action: Any) -> list[dict[str, Any]]:
@@ -247,7 +374,8 @@ def _safe_extracted_context(action: Any, result_payload: dict[str, Any] | None) 
         if _is_selector_like(label):
             label = targets[index] if index < len(targets) else f"resultado {index + 1}"
         label = _clean_scalar(label.replace("_", " ").strip()) or f"resultado {index + 1}"
-        value = _dedupe_lines(_clean_text(raw_value, limit=min(3000, remaining)), limit=min(3000, remaining))
+        value_limit = min(_MAX_AI_CONTEXT_CHARS, remaining)
+        value = _dedupe_lines(_clean_text(raw_value, limit=value_limit), limit=value_limit)
         if not value:
             continue
         safe[label] = value
@@ -333,11 +461,16 @@ def deterministic_operational_summary(
 
     extracted = _safe_extracted_values(action, result_payload)
     has_files = _has_files(result_payload)
+    full_page_text = _full_page_text(result_payload)
+    if full_page_text:
+        full_page_summary = _summarize_full_page_text(full_page_text, has_files=has_files)
+        if full_page_summary:
+            return full_page_summary
     if extracted:
         combined_text = _combined_extracted_text(action, result_payload)
         if _looks_like_noisy_text(combined_text):
             if _looks_like_form_or_filter(combined_text):
-                options = _extract_form_options(combined_text)
+                options = _legacy_form_options(combined_text)
                 details = f", com opções de {', '.join(options)}" if options else ""
                 suffix = " Arquivo disponível." if has_files else ""
                 return (
@@ -418,21 +551,41 @@ async def build_operational_summary_result(
         action, status=status, result_payload=result_payload, error_message=error_message
     )
     if str(status).lower() != "success" and fallback.startswith("Não consegui executar a ação"):
-        return OperationalSummaryResult(fallback, ai_summary_used=False, summary_source="deterministic")
+        return OperationalSummaryResult(
+            fallback,
+            ai_summary_used=False,
+            summary_source="deterministic",
+            summary_reason="stable_error_without_ai",
+        )
     if (
         str(status).lower() == "success"
         and not extraction_targets(action)
         and bool(_safe_final_title(result_payload))
     ):
-        return OperationalSummaryResult(fallback, ai_summary_used=False, summary_source="deterministic")
+        return OperationalSummaryResult(
+            fallback,
+            ai_summary_used=False,
+            summary_source="deterministic",
+            summary_reason="page_opened_without_extracted_data",
+        )
     enabled = bool(_metadata(action, "ai_result_summary_enabled", True))
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     has_files = _has_files(result_payload)
     extracted_context = _safe_extracted_context(action, result_payload)
     if not enabled or not api_key:
-        return OperationalSummaryResult(fallback, ai_summary_used=False, summary_source="deterministic")
+        return OperationalSummaryResult(
+            fallback,
+            ai_summary_used=False,
+            summary_source="deterministic",
+            summary_reason="ai_disabled" if not enabled else "openai_api_key_missing",
+        )
     if str(status).lower() == "success" and not extracted_context and not has_files:
-        return OperationalSummaryResult(fallback, ai_summary_used=False, summary_source="deterministic")
+        return OperationalSummaryResult(
+            fallback,
+            ai_summary_used=False,
+            summary_source="deterministic",
+            summary_reason="no_extracted_context_or_files",
+        )
 
     extracted = _safe_extracted_values(action, result_payload)
     context = {
@@ -460,12 +613,27 @@ async def build_operational_summary_result(
         response = await ChatOpenAI(
             model=model, temperature=0, api_key=api_key, timeout=6, max_retries=0
         ).ainvoke(prompt)
-        candidate = _clean_scalar(getattr(response, "content", response))
+        candidate = _clean_text(getattr(response, "content", response), limit=_MAX_SUMMARY_LENGTH)
         if _summary_is_safe(candidate, extracted):
-            return OperationalSummaryResult(candidate, ai_summary_used=True, summary_source="ai")
-        return OperationalSummaryResult(fallback, ai_summary_used=False, summary_source="deterministic")
+            return OperationalSummaryResult(
+                candidate,
+                ai_summary_used=True,
+                summary_source="ai",
+                summary_reason="openai_summary_accepted",
+            )
+        return OperationalSummaryResult(
+            fallback,
+            ai_summary_used=False,
+            summary_source="deterministic",
+            summary_reason="openai_summary_rejected",
+        )
     except Exception:
-        return OperationalSummaryResult(fallback, ai_summary_used=False, summary_source="deterministic")
+        return OperationalSummaryResult(
+            fallback,
+            ai_summary_used=False,
+            summary_source="deterministic",
+            summary_reason="openai_summary_failed",
+        )
 
 
 def build_technical_summary(

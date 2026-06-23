@@ -240,6 +240,7 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
         run.result_summary = run.operational_summary
         run.ai_summary_used = summary_result.ai_summary_used
         run.summary_source = summary_result.summary_source
+        run.summary_reason = summary_result.summary_reason
         executed_steps = 0
         if isinstance(run.result_payload, dict):
             executed_steps = int(run.result_payload.get("passos_executados") or 0)

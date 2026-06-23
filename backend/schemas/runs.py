@@ -34,6 +34,7 @@ class RunRecord(BaseModel):
     result_payload: dict[str, Any] | None = None
     ai_summary_used: bool = False
     summary_source: Literal["ai", "deterministic"] | None = None
+    summary_reason: str | None = None
     error_message: str | None = None
 
 

@@ -527,6 +527,7 @@ async def executar_acao_fast_track(
             "operational_summary": summary_result.summary,
             "ai_summary_used": summary_result.ai_summary_used,
             "summary_source": summary_result.summary_source,
+            "summary_reason": summary_result.summary_reason,
             "status": "success",
             "estado": "NORMAL",
             "result_payload": result_payload,

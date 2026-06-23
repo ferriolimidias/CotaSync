@@ -78,8 +78,37 @@ class OperationalSummaryTests(unittest.TestCase):
         )
         lowered = summary.casefold()
         self.assertIn("formulário", lowered)
-        self.assertIn("nenhum resultado específico", lowered)
+        self.assertTrue("nenhum resultado listado" in lowered or "nenhum resultado específico" in lowered)
         self.assertNotIn("encontrei: texto tela final", lowered)
+
+    def test_real_full_page_report_text_gets_operational_summary(self) -> None:
+        text = (
+            "Página Inicial Venda Grupo Cobrança Contemplação Crédito Encerramento Sistema Atendimento "
+            "Pré-Contemplação Contemplação Relatório Bens a Entregar Voltar Posição Atual Posição "
+            "Contábil Data Base: Lista apenas entregas Parciais Considera os lançamentos de pagamento "
+            "de bem embutido, como entrega de bem parcial Considera os lançamentos de pagamento de bem "
+            "com FGTS, como entrega de bem parcial Contemplação Sorteio Contemplação Lance Lista somente "
+            "Lances Pagos Intervalo Inicial Final Grupo Sit. do Grupo Produto Tipo de Venda Ponto de "
+            "Venda Inicial Final Agrupamento Filial Unidade Negócio Comissionado Inicial Final Ponto "
+            "Entrega Contemplação Percentual Pago Bem Ordem GrupoPonto de EntregaPonto de Venda "
+            "FilialUnidade Negócio Salta de Página por Grupo Considerar situação grupo na data base "
+            "informada Considera as cotas canceladas Considera as cotas com lance parcelado pendente"
+        )
+        summary = deterministic_operational_summary(
+            _action(extraction_targets=["texto_tela_final"]),
+            status="success",
+            result_payload={"dados_extraidos": {"texto_tela_final": text}},
+        )
+        lowered = summary.casefold()
+        self.assertTrue("relatório de bens a entregar" in lowered or "relatório" in lowered)
+        self.assertIn("data base", lowered)
+        self.assertIn("grupo", lowered)
+        self.assertIn("produto", lowered)
+        self.assertIn("tipo de venda", lowered)
+        self.assertTrue("nenhum resultado listado" in lowered or "aguardando filtros" in lowered)
+        self.assertNotIn("não foi possível identificar", lowered)
+        self.assertNotIn("Página Inicial Venda Grupo Cobrança Contemplação Crédito", summary)
+        self.assertLess(len(summary), 500)
 
     def test_real_extracted_fields_are_summarized_clearly(self) -> None:
         summary = deterministic_operational_summary(
@@ -291,6 +320,7 @@ class OperationalSummaryTests(unittest.TestCase):
         self.assertIn("#status-interno", str(run.result_payload))
         self.assertIn("diagnósticos=1", run.technical_summary or "")
         self.assertEqual(run.summary_source, "deterministic")
+        self.assertEqual(run.summary_reason, "openai_api_key_missing")
         self.assertFalse(run.ai_summary_used)
 
     def test_operational_summary_does_not_leak_selectors_tokens_credentials_or_paths(self) -> None:
