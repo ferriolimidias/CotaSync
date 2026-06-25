@@ -9,6 +9,9 @@ from unittest.mock import patch
 from scripts import reset_demo_catalog
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
 class DemoResetTests(unittest.TestCase):
     def test_reset_demo_catalog_clears_actions_and_runs_but_keeps_external_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -39,6 +42,23 @@ class DemoResetTests(unittest.TestCase):
             self.assertEqual(json.loads(ui_map.read_text(encoding="utf-8")), {"acoes_conhecidas": {}})
             self.assertEqual(json.loads(runs.read_text(encoding="utf-8")), {"runs": []})
             self.assertEqual(json.loads(external_config.read_text(encoding="utf-8")), {"access_profile_name": "Priscila"})
+
+
+class DemoAccessProfileUiTests(unittest.TestCase):
+    def test_access_profile_summary_is_rendered_before_login_status_block(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("def render_access_profile_summary(", source)
+        self.assertIn("Perfil de acesso / operador", source)
+        self.assertIn("Conta Microsoft", source)
+        self.assertIn("Host esperado", source)
+
+        render_call = source.index("access_profile_ready = render_access_profile_summary(session, session_id)")
+        awaiting_login_block = source.index('if status == "aguardando_login":')
+        authenticated_only_block = source.index('if status == "autenticada" and not recorded_steps and not saved_action:')
+
+        self.assertLess(render_call, awaiting_login_block)
+        self.assertLess(render_call, authenticated_only_block)
 
 
 if __name__ == "__main__":

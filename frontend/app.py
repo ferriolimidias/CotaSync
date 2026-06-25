@@ -175,6 +175,61 @@ def _render_desktop_view_access(state_suffix: str) -> None:
         st.caption(f"Link temporário: {ttl_minutes} min · expira em {expiry_label}.")
 
 
+def render_access_profile_summary(session: dict, session_id: str) -> bool:
+    """Renderiza o perfil de acesso externo em modo somente leitura."""
+
+    st.markdown("**Perfil de acesso / operador**")
+    profile_cols = st.columns(2)
+    profile_cols[0].text_input(
+        "Sistema externo",
+        value=str(session.get("external_system_name") or ""),
+        disabled=True,
+        key=f"demo_profile_system_{session_id}",
+    )
+    profile_cols[1].text_input(
+        "Perfil",
+        value=str(session.get("access_profile_name") or ""),
+        disabled=True,
+        key=f"demo_profile_name_{session_id}",
+    )
+    profile_cols[0].text_input(
+        "Conta Microsoft",
+        value=str(session.get("microsoft_saved_account_text") or ""),
+        disabled=True,
+        key=f"demo_profile_ms_account_{session_id}",
+    )
+    profile_cols[1].text_input(
+        "Identificador",
+        value=(
+            str(session.get("microsoft_saved_account_identifier") or "").strip()
+            or str(session.get("access_profile_email_or_identifier") or "").strip()
+        ),
+        disabled=True,
+        key=f"demo_profile_ms_identifier_{session_id}",
+    )
+    profile_cols[0].text_input(
+        "Host esperado",
+        value=str(session.get("expected_system_host") or ""),
+        disabled=True,
+        key=f"demo_profile_expected_host_{session_id}",
+    )
+    profile_ready = all(
+        str(session.get(key) or "").strip()
+        for key in (
+            "external_system_name",
+            "access_profile_name",
+            "microsoft_saved_account_text",
+            "expected_system_host",
+        )
+    ) and bool(
+        str(session.get("microsoft_saved_account_identifier") or "").strip()
+        or str(session.get("access_profile_email_or_identifier") or "").strip()
+    )
+    if not profile_ready:
+        st.warning("Perfil de acesso incompleto. Configure antes de ensinar uma rotina.")
+    return profile_ready
+
+
 def _nome_variavel_sugerida(selector: str, index: int) -> str:
     lowered = str(selector or "").casefold()
     if "edtgrupo" in lowered or "grupo" in lowered:
@@ -265,8 +320,10 @@ def _render_demo_v01() -> None:
                 f"Sistema externo: {session.get('external_system_name', '')} · "
                 f"Validação: {session.get('auth_validation_mode', '')}"
             )
+            access_profile_ready = render_access_profile_summary(session, session_id)
         else:
             st.caption("Alvo local de demonstração (fallback).")
+            access_profile_ready = True
 
         live_url = str(session.get("live_url", "") or "")
         if session.get("browser_mode") == "desktop_browser":
@@ -416,49 +473,8 @@ def _render_demo_v01() -> None:
         recorded_steps = st.session_state.get("demo_recorded_steps")
         saved_action = st.session_state.get("demo_saved_action")
         if status == "autenticada" and not recorded_steps and not saved_action:
-            if session.get("using_external_system"):
-                st.markdown("**Perfil de acesso da gravação**")
-                profile_cols = st.columns(2)
-                profile_cols[0].text_input(
-                    "Sistema externo",
-                    value=str(session.get("external_system_name") or ""),
-                    disabled=True,
-                    key=f"demo_profile_system_{session_id}",
-                )
-                profile_cols[1].text_input(
-                    "Perfil de acesso / operador",
-                    value=str(session.get("access_profile_name") or ""),
-                    disabled=True,
-                    key=f"demo_profile_name_{session_id}",
-                )
-                profile_cols[0].text_input(
-                    "Conta Microsoft configurada",
-                    value=(
-                        f"{session.get('microsoft_saved_account_text') or ''} "
-                        f"({session.get('microsoft_saved_account_identifier') or ''})"
-                    ).strip(),
-                    disabled=True,
-                    key=f"demo_profile_ms_account_{session_id}",
-                )
-                profile_cols[1].text_input(
-                    "Host esperado do sistema",
-                    value=str(session.get("expected_system_host") or ""),
-                    disabled=True,
-                    key=f"demo_profile_expected_host_{session_id}",
-                )
-                profile_ready = all(
-                    str(session.get(key) or "").strip()
-                    for key in (
-                        "external_system_name",
-                        "access_profile_name",
-                        "microsoft_saved_account_text",
-                        "microsoft_saved_account_identifier",
-                        "expected_system_host",
-                    )
-                )
-                if not profile_ready:
-                    st.error("Configure o perfil de acesso antes de iniciar o aprendizado.")
-                    return
+            if session.get("using_external_system") and not access_profile_ready:
+                return
             st.markdown("**Aprendizado guiado**")
             st.caption("Descreva o resultado de negócio antes de iniciar a demonstração.")
             action_name_key = f"demo_guided_name_{session_id}"
