@@ -23,6 +23,10 @@ class ExternalSystemRequest(BaseModel):
     validation: str = ""
     auth_success_text: str = ""
     auth_success_selector: str = ""
+    access_profile_name: str = ""
+    access_profile_email_or_identifier: str = ""
+    microsoft_saved_account_selector: str = ""
+    microsoft_saved_account_text: str = ""
 
 
 def _safe_call(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

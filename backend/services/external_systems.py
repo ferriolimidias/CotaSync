@@ -26,6 +26,10 @@ def empty_external_system() -> dict[str, Any]:
         "validation": "",
         "auth_success_text": "",
         "auth_success_selector": "",
+        "access_profile_name": "",
+        "access_profile_email_or_identifier": "",
+        "microsoft_saved_account_selector": "",
+        "microsoft_saved_account_text": "",
         "updated_at": None,
     }
 
@@ -46,6 +50,10 @@ def load_current_external_system() -> dict[str, Any]:
         "validation",
         "auth_success_text",
         "auth_success_selector",
+        "access_profile_name",
+        "access_profile_email_or_identifier",
+        "microsoft_saved_account_selector",
+        "microsoft_saved_account_text",
     ):
         result[key] = str(payload.get(key) or "").strip()
     if result["external_login_url"]:
@@ -62,6 +70,10 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
         "validation",
         "auth_success_text",
         "auth_success_selector",
+        "access_profile_name",
+        "access_profile_email_or_identifier",
+        "microsoft_saved_account_selector",
+        "microsoft_saved_account_text",
     ):
         result[key] = str(payload.get(key) or "").strip()
 

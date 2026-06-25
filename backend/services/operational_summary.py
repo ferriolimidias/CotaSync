@@ -446,6 +446,8 @@ def deterministic_operational_summary(
     if str(status).lower() != "success":
         error = str(error_message or "").casefold()
         payload = result_payload if isinstance(result_payload, dict) else {}
+        session_state = str(payload.get("session_state") or "").casefold()
+        operator_required = bool(payload.get("operator_action_required", False))
         step_diagnostics = payload.get("step_diagnostics", [])
         has_step_timeout = isinstance(step_diagnostics, list) and any(
             str(item.get("result") or "").casefold() == "timeout"
@@ -454,6 +456,14 @@ def deterministic_operational_summary(
         )
         if "precisa ser autenticada novamente" in error or "reauthentication_required" in error:
             return "Não consegui executar a ação porque a sessão precisa ser autenticada novamente."
+        if session_state in {"microsoft_password_required", "microsoft_mfa_required", "microsoft_consent_required"}:
+            return "Não consegui continuar porque a Microsoft solicitou senha ou MFA."
+        if session_state == "microsoft_pick_account":
+            return "Não consegui continuar porque a conta salva configurada não apareceu na tela da Microsoft."
+        if session_state in {"system_unresponsive", "system_loading"}:
+            return "Não consegui concluir porque o sistema ficou sem resposta mesmo após atualizar a página."
+        if operator_required and session_state in {"microsoft_signed_out", "unknown"}:
+            return "Não consegui executar a ação porque o sistema pediu login manual novamente."
         if "pagina do sistema esperado" in error or "unexpected_page_host" in error:
             return "Não consegui executar a ação porque a página do sistema esperado não está disponível."
         if "autentic" in error or "login" in error:
@@ -660,8 +670,11 @@ def build_technical_summary(
     diagnostic_count = len(diagnostics) if isinstance(diagnostics, list) else 0
     step_diagnostics = payload.get("step_diagnostics", [])
     step_diagnostic_count = len(step_diagnostics) if isinstance(step_diagnostics, list) else 0
+    checkpoint_diagnostics = payload.get("checkpoint_diagnostics", [])
+    checkpoint_diagnostic_count = len(checkpoint_diagnostics) if isinstance(checkpoint_diagnostics, list) else 0
     outcome = "concluída" if str(status).lower() == "success" else "falhou"
     return (
         f"Execução {outcome}; passos={max(0, int(executed_steps))}; "
-        f"diagnósticos={diagnostic_count}; step_diagnostics={step_diagnostic_count}."
+        f"diagnósticos={diagnostic_count}; step_diagnostics={step_diagnostic_count}; "
+        f"checkpoint_diagnostics={checkpoint_diagnostic_count}."
     )

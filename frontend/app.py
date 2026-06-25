@@ -485,14 +485,18 @@ def _render_demo_v01() -> None:
                 st.markdown("**Síntese do aprendizado**")
                 st.info(str(synthesis.get("ai_observer_summary") or "Análise local concluída."))
             st.markdown("**Passos capturados**")
+            st.caption(f"{len(recorded_steps)} passos capturados.")
             variable_names: dict[str, str] = {}
             captured_variable_rows: list[tuple[int, str, str]] = []
+            fragile_selectors = 0
             for step in recorded_steps:
                 if not isinstance(step, dict):
                     continue
                 index = int(step.get("index", 0))
                 step_type = str(step.get("tipo", "ação"))
                 selector = str(step.get("seletor", ""))
+                if ":nth-" in selector or " > " in selector:
+                    fragile_selectors += 1
                 st.code(f"{index + 1}. {step_type} → {selector}", language=None)
                 if step_type == "preencher":
                     captured_variable_rows.append((index, selector, _nome_variavel_sugerida(selector, index)))
@@ -595,6 +599,43 @@ def _render_demo_v01() -> None:
                 disabled=not download_detected,
                 key=f"demo_return_download_{session_id}",
             )
+            requires_authenticated_session = st.checkbox(
+                "Requer sessão autenticada",
+                value=bool(session.get("using_external_system", False)),
+                key=f"demo_requires_auth_{session_id}",
+            )
+            action_timeout_seconds = st.number_input(
+                "Timeout máximo da ação (segundos)",
+                min_value=30,
+                max_value=1800,
+                value=300 if session.get("browser_mode") == "desktop_browser" else 180,
+                step=30,
+                key=f"demo_action_timeout_{session_id}",
+            )
+            with st.expander("Revisão técnica", expanded=False):
+                st.write(
+                    {
+                        "steps_captured": len(recorded_steps),
+                        "fragile_selector_warning": fragile_selectors > 0,
+                        "fragile_selectors_count": fragile_selectors,
+                        "variables_detected": [
+                            {"step": index + 1, "suggested_name": suggested}
+                            for index, _selector, suggested in captured_variable_rows
+                        ],
+                        "extraction_targets": selected_candidates
+                        + ([manual_label] if manual_label.strip() and manual_selector.strip() else []),
+                        "may_open_new_tab_or_download": bool(download_detected),
+                        "suggested_checkpoints": [
+                            "before_action_auth_check",
+                            "before_step_auth_check",
+                            "after_step_stability_check",
+                            "after_new_page_check",
+                            "before_extraction_check",
+                            "final_auth_check",
+                        ],
+                        "wait_strategies": synthesis.get("waits", []) if isinstance(synthesis, dict) else [],
+                    }
+                )
             if st.button("Salvar ação aprendida", key="demo_save_action", type="primary", use_container_width=True):
                 try:
                     configured_targets = [
@@ -624,6 +665,8 @@ def _render_demo_v01() -> None:
                                 "extraction_targets": configured_targets,
                                 "extract_visible_text": extract_visible_text,
                                 "return_downloaded_file": return_downloaded_file,
+                                "requires_authenticated_session": requires_authenticated_session,
+                                "action_timeout_seconds": int(action_timeout_seconds),
                                 "ai_result_summary_enabled": ai_result_enabled,
                                 "ai_recovery_enabled": ai_recovery_enabled,
                             },
@@ -688,6 +731,7 @@ def _render_demo_v01() -> None:
             if isinstance(payload, dict):
                 if payload.get("session_revalidated") is True:
                     st.info("Sessão revalidada automaticamente.")
+                _render_session_diagnostics(payload, status=str(last_run.get("status") or ""))
                 extracted = payload.get("dados_extraidos")
                 steps_executed = payload.get("passos_executados")
                 if steps_executed:
@@ -739,6 +783,8 @@ def _normalizar_resposta_assistente(resposta: object) -> dict:
         if not isinstance(arquivos, list):
             arquivos = []
         payload = {"role": "assistant", "content": content, "arquivos": arquivos}
+        if resposta.get("status") is not None:
+            payload["status"] = str(resposta.get("status"))
         if evidencia:
             payload["evidencia"] = evidencia
         dados_extra = resposta.get("dados_extraidos")
@@ -777,6 +823,43 @@ def _render_runtime_downloads(files: object, *, key_prefix: str) -> None:
         )
 
 
+def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
+    if not isinstance(payload, dict):
+        return
+    checkpoint_diagnostics = payload.get("checkpoint_diagnostics")
+    recovery_steps = payload.get("recovery_steps")
+    recovery_attempts = int(payload.get("recovery_attempts") or 0)
+    operator_required = bool(payload.get("operator_action_required", False))
+    session_state = str(payload.get("session_state") or "")
+    should_show = (
+        recovery_attempts > 0
+        or operator_required
+        or str(status).lower() == "error"
+        or isinstance(checkpoint_diagnostics, list)
+    )
+    if not should_show:
+        return
+    if operator_required:
+        st.warning(
+            "A sessão precisa de login manual. Abra o Navegador Desktop, conclua o login e clique em Login concluído."
+        )
+    with st.expander("Ver diagnóstico de sessão", expanded=False):
+        st.write(
+            {
+                "session_state": session_state,
+                "recovery_attempts": recovery_attempts,
+                "retryable": bool(payload.get("retryable", False)),
+                "operator_action_required": operator_required,
+                "current_host": payload.get("current_host", ""),
+                "last_page_title": payload.get("last_page_title", ""),
+            }
+        )
+        if isinstance(recovery_steps, list) and recovery_steps:
+            st.json(recovery_steps)
+        if isinstance(checkpoint_diagnostics, list) and checkpoint_diagnostics:
+            st.json(checkpoint_diagnostics)
+
+
 def carregar_historico_disco() -> list[dict]:
     try:
         if not _CHAT_HISTORY_PATH.is_file():
@@ -803,6 +886,8 @@ def carregar_historico_disco() -> list[dict]:
                     msg_restaurada["main_file"] = item["main_file"]
                 if "result_payload" in item and isinstance(item.get("result_payload"), dict):
                     msg_restaurada["result_payload"] = item["result_payload"]
+                if "status" in item and item.get("status") is not None:
+                    msg_restaurada["status"] = str(item["status"])
                 mensagens_validas.append(msg_restaurada)
         return mensagens_validas
     except (json.JSONDecodeError, OSError):
@@ -1078,6 +1163,7 @@ if menu_selecionado == "Chat & Ações":
 
             result_payload_msg = msg.get("result_payload")
             if isinstance(result_payload_msg, dict) and result_payload_msg:
+                _render_session_diagnostics(result_payload_msg, status=str(msg.get("status") or ""))
                 with st.expander("Ver JSON/result_payload", expanded=False):
                     st.json(result_payload_msg)
 

@@ -120,6 +120,16 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "step_diagnostics",
         "final_page",
         "input_variables",
+        "variables_used",
+        "session_state",
+        "recovery_attempts",
+        "recovery_steps",
+        "recovery_attempted",
+        "operator_action_required",
+        "last_page_title",
+        "current_host",
+        "checkpoint_diagnostics",
+        "evidence",
         "retryable",
     ):
         value = result.get(key)
@@ -242,6 +252,23 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
         diagnostics = getattr(exc, "diagnostics", None)
         if isinstance(diagnostics, dict):
             payload: dict[str, Any] = {"retryable": bool(diagnostics.get("retryable", False))}
+            for key in (
+                "operator_action_required",
+                "session_state",
+                "recovery_attempts",
+                "recovery_steps",
+                "recovery_attempted",
+                "last_page_title",
+                "current_host",
+                "checkpoint_diagnostics",
+                "variables_used",
+                "downloaded_files",
+                "dados_extraidos",
+                "evidence",
+            ):
+                value = diagnostics.get(key)
+                if value is not None and value != [] and value != {}:
+                    payload[key] = value
             if isinstance(diagnostics.get("selector_diagnostics"), list):
                 payload["selector_diagnostics"] = diagnostics["selector_diagnostics"]
             elif any(key in diagnostics for key in ("selector", "current_url", "page_title")):

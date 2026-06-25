@@ -29,6 +29,8 @@ class SaveDemoActionRequest(BaseModel):
     extraction_targets: list[dict[str, str]] = Field(default_factory=list)
     extract_visible_text: bool = False
     return_downloaded_file: bool = False
+    requires_authenticated_session: bool | None = None
+    action_timeout_seconds: int | None = None
 
 
 class GuidedLearningRequest(BaseModel):
@@ -179,6 +181,8 @@ async def save_demo_action(session_id: str, payload: SaveDemoActionRequest) -> d
             extraction_targets=payload.extraction_targets,
             extract_visible_text=payload.extract_visible_text,
             return_downloaded_file=payload.return_downloaded_file,
+            requires_authenticated_session=payload.requires_authenticated_session,
+            action_timeout_seconds=payload.action_timeout_seconds,
         )
     except DemoSessionError as exc:
         _raise_safe(exc)

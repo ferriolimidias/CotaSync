@@ -111,6 +111,11 @@ def _normalize_api_action(raw: Any) -> dict[str, Any] | None:
         ),
         "external_system_name": str(raw.get("external_system_name") or "").strip(),
         "external_login_url": str(raw.get("external_login_url") or "").strip(),
+        "access_profile_name": str(raw.get("access_profile_name") or "").strip(),
+        "access_profile_email_or_identifier": str(raw.get("access_profile_email_or_identifier") or "").strip(),
+        "microsoft_saved_account_text": str(raw.get("microsoft_saved_account_text") or "").strip(),
+        "requires_authenticated_session": bool(raw.get("requires_authenticated_session", True)),
+        "action_timeout_seconds": raw.get("action_timeout_seconds"),
         "source": str(raw.get("source") or "api"),
     }
 
@@ -157,6 +162,11 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
         ),
         "external_system_name": str(data.get("external_system_name") or "").strip(),
         "external_login_url": str(data.get("external_login_url") or "").strip(),
+        "access_profile_name": str(data.get("access_profile_name") or "").strip(),
+        "access_profile_email_or_identifier": str(data.get("access_profile_email_or_identifier") or "").strip(),
+        "microsoft_saved_account_text": str(data.get("microsoft_saved_account_text") or "").strip(),
+        "requires_authenticated_session": bool(data.get("requires_authenticated_session", True)),
+        "action_timeout_seconds": data.get("action_timeout_seconds"),
         "source": "data/ui_map.json",
     }
 

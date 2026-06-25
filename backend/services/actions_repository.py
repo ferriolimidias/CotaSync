@@ -182,6 +182,16 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ai_recovery_enabled=bool(data.get("ai_recovery_enabled", False)),
         external_system_name=str(data.get("external_system_name") or "").strip() or None,
         external_login_url=str(data.get("external_login_url") or "").strip() or None,
+        access_profile_name=str(data.get("access_profile_name") or "").strip() or None,
+        access_profile_email_or_identifier=str(data.get("access_profile_email_or_identifier") or "").strip() or None,
+        microsoft_saved_account_selector=str(data.get("microsoft_saved_account_selector") or "").strip() or None,
+        microsoft_saved_account_text=str(data.get("microsoft_saved_account_text") or "").strip() or None,
+        requires_authenticated_session=bool(data.get("requires_authenticated_session", True)),
+        action_timeout_seconds=(
+            int(data["action_timeout_seconds"])
+            if str(data.get("action_timeout_seconds") or "").strip().isdigit()
+            else None
+        ),
         browser_mode=str(data.get("browser_mode") or "browserless").strip() or "browserless",
         url_inicial=str(data.get("url_inicial") or data.get("url") or "").strip() or None,
         source=SOURCE_LABEL,

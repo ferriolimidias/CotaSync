@@ -41,6 +41,11 @@ from backend.services.browser_providers import (
     desktop_profile_dir,
 )
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
+from backend.services.session_guardian import (
+    SessionGuardian,
+    SessionGuardianError,
+    session_failure_message,
+)
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -61,6 +66,7 @@ def _env_seconds(name: str, default: int) -> int:
 _REPLAY_STEP_TIMEOUT_MS = _env_seconds("COTASYNC_STEP_TIMEOUT_SECONDS", 30) * 1000
 _REPLAY_ACTION_TIMEOUT_MS = _env_seconds("COTASYNC_ACTION_TIMEOUT_SECONDS", 180) * 1000
 _REPLAY_NAVIGATION_TIMEOUT_MS = _env_seconds("COTASYNC_NAVIGATION_TIMEOUT_SECONDS", 45) * 1000
+_LONG_ACTION_MAX_MS = _env_seconds("COTASYNC_LONG_ACTION_MAX_SECONDS", 300) * 1000
 _REPLAY_FALLBACK_DELAY_MS = 1200
 _MANUAL_CONFIRMATION_BLOCK_TEXTS = (
     "acesso bloqueado",
@@ -396,6 +402,10 @@ class DemoBrowserSession:
     auth_validation_mode: str = ""
     auth_success_text: str = ""
     auth_success_selector: str = ""
+    access_profile_name: str = ""
+    access_profile_email_or_identifier: str = ""
+    microsoft_saved_account_selector: str = ""
+    microsoft_saved_account_text: str = ""
     storage_state_path: Path = field(default_factory=Path)
     profile_reference: str = ""
     confirmed_page_url: str = ""
@@ -832,6 +842,14 @@ class DemoSessionManager:
                 auth_validation_mode=str(external_config.get("validation") or "").strip(),
                 auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
                 auth_success_selector=str(external_config.get("auth_success_selector") or "").strip(),
+                access_profile_name=str(external_config.get("access_profile_name") or "").strip(),
+                access_profile_email_or_identifier=str(
+                    external_config.get("access_profile_email_or_identifier") or ""
+                ).strip(),
+                microsoft_saved_account_selector=str(
+                    external_config.get("microsoft_saved_account_selector") or ""
+                ).strip(),
+                microsoft_saved_account_text=str(external_config.get("microsoft_saved_account_text") or "").strip(),
                 storage_state_path=storage_state_path,
                 profile_reference=desktop_profile_dir() if selected_mode == "desktop_browser" else "",
             )
@@ -1258,6 +1276,8 @@ class DemoSessionManager:
         extraction_targets: list[dict[str, str]] | None = None,
         extract_visible_text: bool = False,
         return_downloaded_file: bool = False,
+        requires_authenticated_session: bool | None = None,
+        action_timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         session = self._get(session_id)
         action_name = str(name or "").strip()
@@ -1380,6 +1400,10 @@ class DemoSessionManager:
             output_type_text = "arquivo/PDF"
         if return_downloaded_file:
             output_schema["main_file"] = {"type": "file", "format": "pdf"}
+        access_profile_name = str(getattr(session, "access_profile_name", "") or "").strip()
+        access_profile_email = str(getattr(session, "access_profile_email_or_identifier", "") or "").strip()
+        saved_account_selector = str(getattr(session, "microsoft_saved_account_selector", "") or "").strip()
+        saved_account_text = str(getattr(session, "microsoft_saved_account_text", "") or "").strip()
 
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
@@ -1399,6 +1423,16 @@ class DemoSessionManager:
             "user_result_summary_template": str(user_result_summary_template or "").strip() or None,
             "ai_result_summary_enabled": bool(ai_result_summary_enabled),
             "ai_recovery_enabled": bool(ai_recovery_enabled),
+            "requires_authenticated_session": (
+                bool(requires_authenticated_session)
+                if requires_authenticated_session is not None
+                else bool(session.external_login_url)
+            ),
+            "action_timeout_seconds": (
+                max(1, int(action_timeout_seconds))
+                if isinstance(action_timeout_seconds, int) and action_timeout_seconds > 0
+                else None
+            ),
             "download_expected": bool(return_downloaded_file),
             "download_detected_during_learning": download_detected,
             "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
@@ -1410,6 +1444,18 @@ class DemoSessionManager:
             "browser_mode": session.browser_mode,
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
+            "access_profile_name": access_profile_name or ("Priscila Susin" if session.external_login_url else ""),
+            "access_profile_email_or_identifier": (
+                access_profile_email
+                or ("D0004267@rdmz.com.br" if session.external_login_url else "")
+            ),
+            "microsoft_saved_account_selector": saved_account_selector,
+            "microsoft_saved_account_text": (
+                saved_account_text
+                or access_profile_email
+                or access_profile_name
+                or ("Priscila Susin" if session.external_login_url else "")
+            ),
         }
         from backend.services.ai_observer import analyze_recorded_action_with_ai
 
@@ -1480,10 +1526,15 @@ class DemoSessionManager:
             "ai_result_summary_enabled": learned_action["ai_result_summary_enabled"],
             "ai_recovery_enabled": learned_action["ai_recovery_enabled"],
             "download_expected": learned_action["download_expected"],
+            "requires_authenticated_session": learned_action["requires_authenticated_session"],
+            "action_timeout_seconds": learned_action["action_timeout_seconds"],
             "robust_steps_count": len(robust_steps),
             "learning_events_count": len(learning_events),
             "external_system_name": learned_action["external_system_name"],
             "external_login_url": learned_action["external_login_url"],
+            "access_profile_name": learned_action["access_profile_name"],
+            "access_profile_email_or_identifier": learned_action["access_profile_email_or_identifier"],
+            "microsoft_saved_account_text": learned_action["microsoft_saved_account_text"],
         }
 
     async def execute_action(
@@ -1518,15 +1569,78 @@ class DemoSessionManager:
                 action_page = await select_desktop_page_for_action(action, session.context, session.page)
                 await self._set_active_page(session, action_page)
             except ActionPageError as exc:
-                raise DemoSessionError(str(exc)) from exc
+                if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
+                    raise DemoSessionError(str(exc)) from exc
 
         expected_url = _expected_replay_url(action.get("url_inicial"))
         extracted: dict[str, str] = {}
         downloaded_files: list[dict[str, object]] = []
         selector_diagnostics: list[dict[str, Any]] = []
         step_diagnostics: list[dict[str, Any]] = []
+        checkpoint_diagnostics: list[dict[str, Any]] = []
         automatically_revalidated = False
-        action_deadline = time.monotonic() + (_REPLAY_ACTION_TIMEOUT_MS / 1000)
+        recovery_attempted = False
+        total_recovery_attempts = 0
+        recovery_steps: list[dict[str, Any]] = []
+        last_session_state = ""
+        last_page_title = ""
+        current_host = ""
+        guardian = SessionGuardian() if action_browser_mode == "desktop_browser" else None
+        action_timeout_ms = _REPLAY_ACTION_TIMEOUT_MS
+        if action_browser_mode == "desktop_browser":
+            raw_action_timeout = action.get("action_timeout_seconds")
+            if str(raw_action_timeout or "").strip().isdigit():
+                action_timeout_ms = max(1, int(raw_action_timeout)) * 1000
+            else:
+                action_timeout_ms = _LONG_ACTION_MAX_MS
+        action_deadline = time.monotonic() + (action_timeout_ms / 1000)
+
+        async def run_session_checkpoint(checkpoint: str) -> None:
+            nonlocal automatically_revalidated
+            nonlocal recovery_attempted
+            nonlocal total_recovery_attempts
+            nonlocal recovery_steps
+            nonlocal last_session_state
+            nonlocal last_page_title
+            nonlocal current_host
+            if guardian is None or not bool(action.get("requires_authenticated_session", True)):
+                return
+            started_at = time.monotonic()
+            result = await guardian.ensure_authenticated(
+                session.page,
+                action,
+                is_authenticated=lambda page: self._page_is_authenticated(session, page),
+                checkpoint=checkpoint,
+            )
+            last_session_state = result.state.state
+            last_page_title = result.state.title
+            current_host = result.state.current_host
+            total_recovery_attempts += result.recovery_attempts
+            recovery_attempted = recovery_attempted or result.recovery_attempted
+            automatically_revalidated = automatically_revalidated or result.recovery_attempted
+            recovery_steps.extend(result.recovery_steps)
+            checkpoint_diagnostics.append(
+                {
+                    "checkpoint": checkpoint,
+                    "session_state": result.state.state,
+                    "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                    "recovery_attempted": result.recovery_attempted,
+                    "recovery_attempts": result.recovery_attempts,
+                    "result": "success" if result.ok else "failed",
+                    "current_host": result.state.current_host,
+                    "last_page_title": result.state.title,
+                }
+            )
+            if result.ok:
+                return
+            diagnostics = result.diagnostics()
+            diagnostics["checkpoint_diagnostics"] = checkpoint_diagnostics
+            raise SessionGuardianError(
+                session_failure_message(result.state.state, result.state.reason),
+                diagnostics,
+            )
+
+        await run_session_checkpoint("before_action_auth_check")
         for step_index, step in enumerate(steps):
             if time.monotonic() >= action_deadline:
                 diagnostic = {
@@ -1534,13 +1648,27 @@ class DemoSessionManager:
                     "action_type": "timeout",
                     "target_label": "Ação",
                     "wait_strategy": "action_timeout",
-                    "waited_ms": _REPLAY_ACTION_TIMEOUT_MS,
+                    "waited_ms": action_timeout_ms,
                     "result": "timeout",
-                    "condition": "COTASYNC_ACTION_TIMEOUT_SECONDS",
+                    "condition": (
+                        "COTASYNC_LONG_ACTION_MAX_SECONDS"
+                        if action_browser_mode == "desktop_browser"
+                        else "COTASYNC_ACTION_TIMEOUT_SECONDS"
+                    ),
                 }
                 raise DemoReplayStepError(
                     "O sistema demorou para abrir a próxima tela dentro do tempo total da ação.",
-                    {"step_diagnostics": [diagnostic], "retryable": True},
+                    {
+                        "step_diagnostics": [diagnostic],
+                        "checkpoint_diagnostics": checkpoint_diagnostics,
+                        "session_state": last_session_state,
+                        "recovery_attempts": total_recovery_attempts,
+                        "recovery_steps": recovery_steps,
+                        "last_page_title": last_page_title,
+                        "current_host": current_host,
+                        "recovery_attempted": recovery_attempted,
+                        "retryable": True,
+                    },
                 )
             if not isinstance(step, dict):
                 continue
@@ -1549,15 +1677,21 @@ class DemoSessionManager:
             step_diag: dict[str, Any] | None = None
             try:
                 step_expected_url = _expected_replay_url(step.get("expected_url_before") or expected_url)
-                authenticated, revalidated = await self._revalidate_for_replay(session, step_expected_url)
-                automatically_revalidated = automatically_revalidated or revalidated
-                if not authenticated:
-                    raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
+                if action_browser_mode == "desktop_browser":
+                    await run_session_checkpoint("before_step_auth_check")
+                else:
+                    authenticated, revalidated = await self._revalidate_for_replay(session, step_expected_url)
+                    automatically_revalidated = automatically_revalidated or revalidated
+                    if not authenticated:
+                        raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
                 page = session.page
                 await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
                 if action_browser_mode == "desktop_browser":
                     validate_action_page_url(action, page.url)
-                if not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(session, page):
+                if (
+                    action_browser_mode != "desktop_browser"
+                    and (not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(session, page))
+                ):
                     raise DemoSessionError("A pagina CDP da sessao nao esta pronta para o replay.")
 
                 locator: Locator | None = None
@@ -1645,6 +1779,8 @@ class DemoSessionManager:
                             state["new_page_detected"] = True
                             wait_strategy = "new_page"
                             wait_result = "new_page"
+                            if action_browser_mode == "desktop_browser":
+                                await run_session_checkpoint("after_new_page_check")
                         if expected_selector:
                             await page.locator(expected_selector).first.wait_for(
                                 state="visible",
@@ -1700,6 +1836,8 @@ class DemoSessionManager:
                         )
                     )
                 elif step_type == "extrair_texto":
+                    if action_browser_mode == "desktop_browser":
+                        await run_session_checkpoint("before_extraction_check")
                     label = str(step.get("nome") or selector)
                     result = "success"
                     try:
@@ -1742,8 +1880,24 @@ class DemoSessionManager:
                     )
                 if action_browser_mode == "desktop_browser":
                     validate_action_page_url(action, session.page.url)
+                    await run_session_checkpoint("after_step_stability_check")
             except ActionPageError as exc:
                 raise DemoSessionError(str(exc)) from exc
+            except SessionGuardianError as exc:
+                if step_diag is not None:
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy=str(step_diag.get("wait_strategy") or "session_checkpoint"),
+                            result="error",
+                            error=str(exc),
+                        )
+                    )
+                diagnostics = dict(exc.diagnostics)
+                diagnostics["step_diagnostics"] = step_diagnostics
+                diagnostics["selector_diagnostics"] = selector_diagnostics
+                raise DemoReplayStepError(str(exc), diagnostics) from exc
             except DemoSessionError:
                 raise
             except Exception as exc:
@@ -1770,11 +1924,19 @@ class DemoSessionManager:
                     {
                         "selector_diagnostics": [diagnostics],
                         "step_diagnostics": step_diagnostics,
+                        "checkpoint_diagnostics": checkpoint_diagnostics,
+                        "session_state": last_session_state,
+                        "recovery_attempts": total_recovery_attempts,
+                        "recovery_steps": recovery_steps,
+                        "last_page_title": last_page_title,
+                        "current_host": current_host,
+                        "recovery_attempted": recovery_attempted,
                         "retryable": isinstance(exc, PlaywrightTimeoutError),
                     },
                 ) from exc
 
         if action_browser_mode == "desktop_browser":
+            await run_session_checkpoint("final_auth_check")
             try:
                 validate_action_page_url(action, session.page.url)
             except ActionPageError as exc:
@@ -1794,10 +1956,18 @@ class DemoSessionManager:
             "main_file": downloaded_files[0] if downloaded_files else None,
             "passos_executados": len(steps),
             "session_revalidated": automatically_revalidated,
+            "session_state": last_session_state or "authenticated_system",
+            "recovery_attempts": total_recovery_attempts,
+            "recovery_steps": recovery_steps,
+            "recovery_attempted": recovery_attempted,
+            "operator_action_required": False,
+            "variables_used": sorted(str(key) for key in variables.keys()),
             "selector_diagnostics": selector_diagnostics,
             "step_diagnostics": step_diagnostics,
+            "checkpoint_diagnostics": checkpoint_diagnostics,
             "input_variables": {str(key): "[informado]" for key in variables.keys()},
             "retryable": False,
+            "evidence": str(evidence_path.relative_to(_ROOT)),
             "final_page": {"title": final_title, "url": _safe_page_url(session.page.url)},
         }
 
@@ -1906,7 +2076,6 @@ class DemoSessionManager:
         if not isinstance(page, Page) or page.is_closed():
             return None
         await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_NAVIGATION_TIMEOUT_MS)
-        validate_action_page_url(action, page.url)
         await self._set_active_page(session, page)
         return page
 
