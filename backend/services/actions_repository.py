@@ -237,6 +237,9 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         user_result_summary_template=str(data.get("user_result_summary_template") or "").strip() or None,
         ai_result_summary_enabled=bool(data.get("ai_result_summary_enabled", True)),
         ai_recovery_enabled=bool(data.get("ai_recovery_enabled", False)),
+        learning_warnings=(
+            data.get("learning_warnings", []) if isinstance(data.get("learning_warnings"), list) else []
+        ),
         external_system_name=str(data.get("external_system_name") or "").strip() or None,
         external_login_url=str(data.get("external_login_url") or "").strip() or None,
         access_profile_name=str(normalized_profile.get("access_profile_name") or "").strip() or None,

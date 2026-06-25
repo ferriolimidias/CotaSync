@@ -60,6 +60,11 @@ class DemoAccessProfileUiTests(unittest.TestCase):
         self.assertLess(render_call, awaiting_login_block)
         self.assertLess(render_call, authenticated_only_block)
 
+    def test_learning_review_warns_when_expected_inputs_have_no_fill_steps(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("Não identifiquei os campos digitados", source)
+        self.assertIn("_descricao_entrada_indica_variavel", source)
+
 
 if __name__ == "__main__":
     unittest.main()

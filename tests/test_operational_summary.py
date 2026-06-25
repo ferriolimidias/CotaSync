@@ -156,6 +156,30 @@ class OperationalSummaryTests(unittest.TestCase):
             "A ação foi executada, mas não encontrei o valor da parcela atual na tela final.",
         )
 
+    def test_qtd_pcls_pagas_target_returns_precise_value_and_not_found_message(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(
+                objective="Consultar quantidade de parcelas pagas",
+                extraction_targets=["Qtd. Pcls. Pagas"],
+            ),
+            status="success",
+            result_payload={"dados_extraidos": {"Qtd. Pcls. Pagas": "032"}},
+        )
+        self.assertEqual(summary, "Consulta concluída. Encontrei: Quantidade de parcelas pagas: 032.")
+
+        not_found = deterministic_operational_summary(
+            _action(
+                objective="Consultar quantidade de parcelas pagas",
+                extraction_targets=["Qtd. Pcls. Pagas"],
+            ),
+            status="success",
+            result_payload={"dados_extraidos": {"Qtd. Pcls. Pagas": ""}},
+        )
+        self.assertEqual(
+            not_found,
+            "A ação foi executada, mas não encontrei o campo Qtd. Pcls. Pagas na tela final.",
+        )
+
     def test_timeout_with_step_diagnostics_has_actionable_summary(self) -> None:
         summary = deterministic_operational_summary(
             _action(),

@@ -566,7 +566,9 @@ class SessionGuardian:
 
 
 def session_failure_message(state: str, reason: str = "") -> str:
-    if state in {"microsoft_password_required", "microsoft_mfa_required", "microsoft_consent_required"}:
+    if state == "microsoft_consent_required":
+        return "A Microsoft solicitou aceite/consentimento. Abra o navegador desktop, clique em Accept e depois continue."
+    if state in {"microsoft_password_required", "microsoft_mfa_required"}:
         return "Não consegui continuar porque a Microsoft solicitou senha ou MFA."
     if state in {"microsoft_signed_out", "unknown"} and "auth_marker_missing" in reason:
         return "Não consegui executar a ação porque o sistema pediu login manual novamente."

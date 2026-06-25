@@ -105,6 +105,7 @@ def _normalize_api_action(raw: Any) -> dict[str, Any] | None:
         "user_result_summary_template": str(raw.get("user_result_summary_template") or "").strip(),
         "ai_result_summary_enabled": bool(raw.get("ai_result_summary_enabled", True)),
         "ai_recovery_enabled": bool(raw.get("ai_recovery_enabled", False)),
+        "learning_warnings": raw.get("learning_warnings", []) if isinstance(raw.get("learning_warnings"), list) else [],
         "replay_hints": raw.get("replay_hints", []) if isinstance(raw.get("replay_hints"), list) else [],
         "wait_strategies": (
             raw.get("wait_strategies", []) if isinstance(raw.get("wait_strategies"), list) else []
@@ -160,6 +161,7 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
         "user_result_summary_template": str(data.get("user_result_summary_template") or "").strip(),
         "ai_result_summary_enabled": bool(data.get("ai_result_summary_enabled", True)),
         "ai_recovery_enabled": bool(data.get("ai_recovery_enabled", False)),
+        "learning_warnings": data.get("learning_warnings", []) if isinstance(data.get("learning_warnings"), list) else [],
         "replay_hints": data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
         "wait_strategies": (
             data.get("wait_strategies", []) if isinstance(data.get("wait_strategies"), list) else []

@@ -252,6 +252,14 @@ def _nome_variavel_sugerida(selector: str, index: int) -> str:
     return "_".join(tokens[-2:]) or f"campo_{index + 1}"
 
 
+def _descricao_entrada_indica_variavel(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    return any(
+        term in lowered
+        for term in ("grupo", "cota", "cpf", "cliente", "codigo", "código", "tipo", "opção", "opcao", "data")
+    )
+
+
 def _rotulo_variavel(variable: object) -> tuple[str, str, bool]:
     if isinstance(variable, dict):
         key = str(variable.get("key") or "").strip()
@@ -582,6 +590,10 @@ def _render_demo_v01() -> None:
                         value=suggested,
                         key=f"demo_variable_{session_id}_{index}",
                     )
+            elif _descricao_entrada_indica_variavel(str(guided.get("input_description") or "")):
+                st.warning(
+                    "Não identifiquei os campos digitados. Revise a gravação ou configure os campos manualmente."
+                )
 
             suggested_targets = [
                 str(step.get("nome") or "").replace("_", " ").strip()
@@ -715,6 +727,8 @@ def _render_demo_v01() -> None:
                         {
                             "label": str(candidate_options[item].get("label") or "resultado"),
                             "selector": str(candidate_options[item].get("selector") or ""),
+                            "frame_url": str(candidate_options[item].get("frame_url") or ""),
+                            "frame_name": str(candidate_options[item].get("frame_name") or ""),
                         }
                         for item in selected_candidates
                     ]
@@ -757,6 +771,8 @@ def _render_demo_v01() -> None:
         saved_action = st.session_state.get("demo_saved_action")
         if isinstance(saved_action, dict) and saved_action:
             st.markdown(f"**Replay determinístico:** {saved_action.get('name', '')}")
+            for warning in saved_action.get("learning_warnings", []):
+                st.warning(str(warning))
             observer_summary = str(saved_action.get("ai_observer_summary") or "").strip()
             if saved_action.get("ai_reviewed") is True:
                 st.success("Observador IA ativo")

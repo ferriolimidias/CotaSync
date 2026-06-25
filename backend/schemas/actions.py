@@ -39,6 +39,7 @@ class ActionSummary(BaseModel):
     user_result_summary_template: str | None = None
     ai_result_summary_enabled: bool = True
     ai_recovery_enabled: bool = False
+    learning_warnings: list[str] = Field(default_factory=list)
     external_system_name: str | None = None
     external_login_url: str | None = None
     access_profile_name: str | None = None

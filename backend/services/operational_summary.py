@@ -109,6 +109,22 @@ def _clean_scalar(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()[:300]
 
 
+def _normalize_label_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _friendly_extraction_label(value: str) -> str:
+    normalized = _normalize_label_key(value)
+    if (
+        "qtd pcls pagas" in normalized
+        or "qtd parcelas pagas" in normalized
+        or "quantidade parcelas pagas" in normalized
+        or "quantidade de parcelas pagas" in normalized
+    ):
+        return "Quantidade de parcelas pagas"
+    return str(value or "").replace("_", " ").strip()
+
+
 def _clean_text(value: Any, *, limit: int = 1200) -> str:
     if value is None or not isinstance(value, (str, int, float, bool)):
         return ""
@@ -344,7 +360,7 @@ def _safe_extracted_values(action: Any, result_payload: dict[str, Any] | None) -
             label = targets[index] if index < len(targets) else f"resultado {index + 1}"
         value = _clean_scalar(raw_value)
         if value:
-            safe[label.replace("_", " ").strip()] = value
+            safe[_friendly_extraction_label(label)] = value
     return safe
 
 
@@ -456,7 +472,9 @@ def deterministic_operational_summary(
         )
         if "precisa ser autenticada novamente" in error or "reauthentication_required" in error:
             return "Não consegui executar a ação porque a sessão precisa ser autenticada novamente."
-        if session_state in {"microsoft_password_required", "microsoft_mfa_required", "microsoft_consent_required"}:
+        if session_state == "microsoft_consent_required":
+            return "A Microsoft solicitou aceite/consentimento. Abra o navegador desktop, clique em Accept e depois continue."
+        if session_state in {"microsoft_password_required", "microsoft_mfa_required"}:
             return "Não consegui continuar porque a Microsoft solicitou senha ou MFA."
         if session_state == "microsoft_pick_account":
             return "Não consegui continuar porque a conta salva configurada não apareceu na tela da Microsoft."
@@ -519,6 +537,14 @@ def deterministic_operational_summary(
         targets = extraction_targets(action)
         target_text = " ".join(targets).replace("_", " ").casefold()
         objective_text = str(_metadata(action, "objective", "") or "").replace("_", " ").casefold()
+        normalized_target = _normalize_label_key(target_text)
+        if (
+            "qtd pcls pagas" in normalized_target
+            or "qtd parcelas pagas" in normalized_target
+            or "quantidade parcelas pagas" in normalized_target
+            or "quantidade de parcelas pagas" in normalized_target
+        ):
+            return "A ação foi executada, mas não encontrei o campo Qtd. Pcls. Pagas na tela final."
         if "parcela" in target_text or "parcela" in objective_text:
             return "A ação foi executada, mas não encontrei o valor da parcela atual na tela final."
         readable = targets[0].replace("_", " ") if targets else "resultado configurado"

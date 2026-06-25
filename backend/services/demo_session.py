@@ -20,6 +20,7 @@ from uuid import uuid4
 from playwright.async_api import (
     Browser,
     BrowserContext,
+    Frame,
     Locator,
     Page,
     Playwright,
@@ -325,6 +326,48 @@ def _normalize_variable_key(value: Any, fallback_selector: str = "", index: int 
     return candidate or _suggest_variable_key(fallback_selector, index)
 
 
+_INPUT_DESCRIPTION_VARIABLE_TERMS = (
+    "grupo",
+    "cota",
+    "cpf",
+    "cliente",
+    "codigo",
+    "código",
+    "tipo",
+    "opção",
+    "opcao",
+    "data",
+)
+
+
+def _expected_input_terms(text: str) -> list[str]:
+    lowered = str(text or "").casefold()
+    return [term for term in _INPUT_DESCRIPTION_VARIABLE_TERMS if term in lowered]
+
+
+def _missing_input_capture_warnings(input_description: str, variables: list[dict[str, Any]]) -> list[str]:
+    terms = _expected_input_terms(input_description)
+    if not terms or variables:
+        return []
+    return [
+        "Não identifiquei os campos digitados. Revise a gravação ou configure os campos manualmente."
+    ]
+
+
+def _frame_metadata(frame: Frame | None) -> dict[str, str]:
+    if frame is None:
+        return {}
+    try:
+        name = str(frame.name or "").strip()
+    except Exception:
+        name = ""
+    try:
+        url = _safe_page_url(str(frame.url or ""))
+    except Exception:
+        url = ""
+    return {"frame_name": name, "frame_url": url}
+
+
 def _objective_extraction_keywords(objective: str) -> list[str]:
     lowered = str(objective or "").casefold()
     keywords = ["valor", "parcela", "valor da parcela", "parcela atual", "vencimento", "número de parcelas", "numero de parcelas", "status"]
@@ -427,6 +470,8 @@ class DemoBrowserSession:
     output_candidates: list[dict[str, str]] = field(default_factory=list)
     learning_synthesis: dict[str, Any] = field(default_factory=dict)
     operator_recording_suppressed_until: float = 0.0
+    recorder_watched_pages: set[int] = field(default_factory=set)
+    recorder_context_watched: bool = False
 
 
 class DemoSessionManager:
@@ -478,8 +523,11 @@ class DemoSessionManager:
             return
 
         page = source.get("page") if isinstance(source, dict) else None
+        source_frame = source.get("frame") if isinstance(source, dict) else None
         if not isinstance(page, Page) or page.is_closed():
             page = session.page
+        if not isinstance(source_frame, Frame):
+            source_frame = None
         live_pages = [item for item in session.context.pages if not item.is_closed()]
         opened_new_page = len(live_pages) > session.last_page_count
         if opened_new_page and live_pages:
@@ -530,6 +578,7 @@ class DemoSessionManager:
             "active_page_changed": active_page_changed,
             "download_detected": session.download_detected,
         }
+        event.update(_frame_metadata(source_frame))
         from backend.services.ai_observer import deterministic_observe_learning_step, observe_learning_step_with_ai
 
         event.update(deterministic_observe_learning_step(event))
@@ -642,8 +691,11 @@ class DemoSessionManager:
             await self._prepare_reconnected_context(session.id, context)
             session.browser = browser
             session.context = context
+            session.recorder_context_watched = False
+            session.recorder_watched_pages.clear()
             if session.page.is_closed() or session.page.context != context:
                 session.page = connection.page
+            self._watch_recording_context(session)
             return True
         except Exception as exc:
             logger.info("Pagina CDP da sessao %s indisponivel: %s", session.id, type(exc).__name__)
@@ -709,6 +761,68 @@ class DemoSessionManager:
 
         await context.expose_binding("__cotasyncRecord", record_binding)
         await context.add_init_script(_RECORDER_SCRIPT)
+
+    async def _install_recorder_on_frame(self, session: DemoBrowserSession, frame: Frame) -> None:
+        if not session.recording:
+            return
+        try:
+            await frame.evaluate(_RECORDER_SCRIPT)
+        except Exception:
+            logger.debug("Recorder nao pode ser instalado no frame da sessao %s", session.id, exc_info=True)
+
+    def _watch_page_recording(self, session: DemoBrowserSession, page: Page) -> None:
+        page_id = id(page)
+        if page_id in session.recorder_watched_pages:
+            return
+        session.recorder_watched_pages.add(page_id)
+
+        def on_frame_navigated(frame: Frame) -> None:
+            if not session.recording:
+                return
+            task = asyncio.create_task(self._install_recorder_on_frame(session, frame))
+            session.observer_tasks.add(task)
+            task.add_done_callback(session.observer_tasks.discard)
+
+        page.on("framenavigated", on_frame_navigated)
+
+    def _watch_recording_context(self, session: DemoBrowserSession) -> None:
+        if not session.recorder_context_watched:
+            session.recorder_context_watched = True
+
+            def on_page(page: Page) -> None:
+                self._watch_page_recording(session, page)
+                if not session.recording:
+                    return
+                task = asyncio.create_task(self._install_recorder_for_session(session))
+                session.observer_tasks.add(task)
+                task.add_done_callback(session.observer_tasks.discard)
+
+            session.context.on("page", on_page)
+        for current_page in session.context.pages:
+            if not current_page.is_closed():
+                self._watch_page_recording(session, current_page)
+
+    async def _install_recorder_for_session(self, session: DemoBrowserSession) -> None:
+        self._watch_recording_context(session)
+        for current_page in [page for page in session.context.pages if not page.is_closed()]:
+            self._watch_page_recording(session, current_page)
+            for frame in current_page.frames:
+                await self._install_recorder_on_frame(session, frame)
+
+    async def _evaluate_all_frames(
+        self,
+        session: DemoBrowserSession,
+        script: str,
+    ) -> list[tuple[Page, Frame, Any]]:
+        results: list[tuple[Page, Frame, Any]] = []
+        for current_page in [page for page in session.context.pages if not page.is_closed()]:
+            self._watch_page_recording(session, current_page)
+            for frame in current_page.frames:
+                try:
+                    results.append((current_page, frame, await frame.evaluate(script)))
+                except Exception:
+                    logger.debug("Nao foi possivel avaliar frame da sessao %s", session.id, exc_info=True)
+        return results
 
     async def _restore_storage_state(self, session: DemoBrowserSession, expected_url: str) -> Page | None:
         path = session.storage_state_path
@@ -990,20 +1104,14 @@ class DemoSessionManager:
         ):
             raise DemoSessionError("Seletor inválido ou protegido para o Modo operador.")
         try:
-            locator = session.page.locator(safe_selector)
-            await locator.first.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
-            count = await locator.count()
-            if count == 1:
-                visible = True
-                enabled = await locator.first.is_enabled()
-            else:
-                visible = False
-                enabled = False
+            locator, state = await self._wait_actionable_locator(session.page, safe_selector, {})
+            count = int(state.get("count") or 0)
+            visible = bool(state.get("visible"))
+            enabled = bool(state.get("enabled"))
         except Exception as exc:
             raise DemoSessionError("Seletor inválido para a página ativa.") from exc
         if count != 1:
             raise DemoSessionError(f"O seletor deve identificar exatamente um elemento; encontrados: {count}.")
-        locator = locator.first
         if not visible or not enabled:
             raise DemoSessionError("O elemento precisa estar visível e habilitado.")
         return locator
@@ -1077,6 +1185,7 @@ class DemoSessionManager:
         locator = await self._operator_locator(session, selector, record_action=record_action)
         if not record_action:
             self._prepare_operator_utility(session)
+        step_count_before = len(session.steps)
         try:
             await locator.fill(safe_value, timeout=_REPLAY_STEP_TIMEOUT_MS)
             await locator.evaluate(
@@ -1085,6 +1194,29 @@ class DemoSessionManager:
             await asyncio.sleep(0.4)
         except Exception as exc:
             raise DemoSessionError("Não foi possível preencher o campo na página ativa.") from exc
+        if record_action and session.recording:
+            captured_by_listener = any(
+                step.get("tipo") == "preencher" and step.get("seletor") == selector
+                for step in session.steps[step_count_before:]
+            )
+            if not captured_by_listener:
+                now = _utc_now()
+                await self._record_live_step(
+                    session,
+                    {
+                        "tipo": "preencher",
+                        "event_type": "fill",
+                        "seletor": selector,
+                        "valor": "",
+                        "value_template": "{{input_value}}",
+                        "timestamp_before": now,
+                        "timestamp_after": now,
+                        "elapsed_ms": 0,
+                        "url_before": session.page.url,
+                        "url_after": session.page.url,
+                    },
+                    {"page": session.page},
+                )
         logger.info(
             "Modo operador preencheu elemento: session=%s recorded=%s",
             session.id,
@@ -1180,7 +1312,7 @@ class DemoSessionManager:
         session.learning_synthesis = {}
         session.recording = True
         session.status = "gravando"
-        await session.page.evaluate(_RECORDER_SCRIPT)
+        await self._install_recorder_for_session(session)
         baseline_path = session.storage_state_path.parent / "learning" / "recording_before.png"
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1198,7 +1330,8 @@ class DemoSessionManager:
         if not session.recording:
             raise DemoSessionError("Nao existe gravacao ativa nesta sessao.")
         await asyncio.sleep(0.7)
-        outputs = await session.page.evaluate(
+        output_results = await self._evaluate_all_frames(
+            session,
             """() => Array.from(document.querySelectorAll('[data-cotasync-output]'))
               .map((el) => ({
                 tipo: 'extrair_texto',
@@ -1209,7 +1342,9 @@ class DemoSessionManager:
               }))
               .filter((item) => item.seletor && item.texto)"""
         )
-        if isinstance(outputs, list):
+        for output_page, output_frame, outputs in output_results:
+            if not isinstance(outputs, list):
+                continue
             for output in outputs:
                 if not isinstance(output, dict):
                     continue
@@ -1219,8 +1354,9 @@ class DemoSessionManager:
                     for step in session.steps
                 ):
                     continue
-                await self._record_live_step(session, output)
-        candidates = await session.page.evaluate(
+                await self._record_live_step(session, output, {"page": output_page, "frame": output_frame})
+        candidate_results = await self._evaluate_all_frames(
+            session,
             """() => Array.from(document.querySelectorAll(
               '[data-cotasync-output], output, [role="status"], [aria-live], .result, table, h1, h2, h3'
             )).filter((el) => {
@@ -1234,15 +1370,29 @@ class DemoSessionManager:
               preview: String(el.innerText || el.value || '').trim().slice(0, 160)
             })).filter((item) => item.selector)"""
         )
-        session.output_candidates = [
-            {
-                "label": str(item.get("label") or "resultado")[:100],
-                "selector": str(item.get("selector") or "")[:500],
-                "preview": str(item.get("preview") or "")[:160],
-            }
-            for item in candidates
-            if isinstance(item, dict) and str(item.get("selector") or "").strip()
-        ] if isinstance(candidates, list) else []
+        session.output_candidates = []
+        seen_candidates: set[tuple[str, str]] = set()
+        for _candidate_page, candidate_frame, candidates in candidate_results:
+            if not isinstance(candidates, list):
+                continue
+            frame_info = _frame_metadata(candidate_frame)
+            for item in candidates:
+                if not isinstance(item, dict) or not str(item.get("selector") or "").strip():
+                    continue
+                candidate = {
+                    "label": str(item.get("label") or "resultado")[:100],
+                    "selector": str(item.get("selector") or "")[:500],
+                    "preview": str(item.get("preview") or "")[:160],
+                }
+                if frame_info.get("frame_url"):
+                    candidate["frame_url"] = frame_info["frame_url"][:500]
+                if frame_info.get("frame_name"):
+                    candidate["frame_name"] = frame_info["frame_name"][:200]
+                candidate_key = (candidate["selector"], candidate.get("frame_url", ""))
+                if candidate_key in seen_candidates:
+                    continue
+                seen_candidates.add(candidate_key)
+                session.output_candidates.append(candidate)
         objective_keywords = _objective_extraction_keywords(str(session.guided_learning.get("objective") or ""))
         focused: list[dict[str, str]] = []
         for item in session.output_candidates:
@@ -1327,6 +1477,7 @@ class DemoSessionManager:
                 continue
             steps[index]["variavel"] = variable
             steps[index]["valor"] = ""
+            steps[index]["value_template"] = f"{{{{{variable}}}}}"
             for event in learning_events:
                 if event.get("step_index") == index and event.get("event_type") == "fill":
                     event["variable_key"] = variable
@@ -1355,7 +1506,14 @@ class DemoSessionManager:
                     str(raw_target.get("label") or raw_target.get("name") or f"resultado_{index + 1}").strip(),
                 ).strip("_")
                 if selector and label and not _is_sensitive_selector(selector):
-                    steps.append({"tipo": "extrair_texto", "seletor": selector, "valor": "", "nome": label})
+                    extraction_step = {"tipo": "extrair_texto", "seletor": selector, "valor": "", "nome": label}
+                    frame_url = str(raw_target.get("frame_url") or "").strip()
+                    frame_name = str(raw_target.get("frame_name") or "").strip()
+                    if frame_url:
+                        extraction_step["frame_url"] = frame_url
+                    if frame_name:
+                        extraction_step["frame_name"] = frame_name
+                    steps.append(extraction_step)
             if extract_visible_text:
                 steps.append(
                     {
@@ -1403,6 +1561,8 @@ class DemoSessionManager:
                     "expected_selector_after": str(
                         steps[index + 1].get("seletor") if index + 1 < len(steps) else ""
                     ),
+                    "frame_url": str(event.get("frame_url") or step.get("frame_url") or ""),
+                    "frame_name": str(event.get("frame_name") or step.get("frame_name") or ""),
                 }
             )
             robust_steps.append(robust_step)
@@ -1420,6 +1580,7 @@ class DemoSessionManager:
         expected_result_text = str(expected_result or guided.get("expected_result") or "").strip()
         success_criteria_text = str(success_criteria or guided.get("success_criteria") or "").strip()
         output_type_text = str(output_type or guided.get("output_type") or "apenas abrir tela").strip()
+        learning_warnings = _missing_input_capture_warnings(input_description_text, variables)
         if return_downloaded_file and output_type_text == "texto/dados da tela":
             output_type_text = "ambos"
         if return_downloaded_file and not extraction_targets and not extract_visible_text:
@@ -1456,6 +1617,7 @@ class DemoSessionManager:
             "user_result_summary_template": str(user_result_summary_template or "").strip() or None,
             "ai_result_summary_enabled": bool(ai_result_summary_enabled),
             "ai_recovery_enabled": bool(ai_recovery_enabled),
+            "learning_warnings": learning_warnings,
             "requires_authenticated_session": (
                 bool(requires_authenticated_session)
                 if requires_authenticated_session is not None
@@ -1564,6 +1726,7 @@ class DemoSessionManager:
             "user_result_summary_template": learned_action["user_result_summary_template"],
             "ai_result_summary_enabled": learned_action["ai_result_summary_enabled"],
             "ai_recovery_enabled": learned_action["ai_recovery_enabled"],
+            "learning_warnings": learned_action["learning_warnings"],
             "download_expected": learned_action["download_expected"],
             "requires_authenticated_session": learned_action["requires_authenticated_session"],
             "action_timeout_seconds": learned_action["action_timeout_seconds"],
@@ -1751,7 +1914,7 @@ class DemoSessionManager:
                     time.monotonic(),
                 )
                 if selector and step_type != "extrair_texto":
-                    locator, state = await self._wait_actionable_locator(page, selector)
+                    locator, state = await self._wait_actionable_locator(page, selector, step)
                     state.update({"step_index": step_index, "step_type": step_type})
                     selector_diagnostics.append(state)
 
@@ -1888,7 +2051,12 @@ class DemoSessionManager:
                     label = str(step.get("nome") or selector)
                     result = "success"
                     try:
-                        locator = page.locator(selector).first
+                        locator, _state = await self._wait_actionable_locator(
+                            page,
+                            selector,
+                            step,
+                            require_enabled=False,
+                        )
                         await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
                         text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
                         extracted[label] = text.strip()
@@ -2018,24 +2186,62 @@ class DemoSessionManager:
             "final_page": {"title": final_title, "url": _safe_page_url(session.page.url)},
         }
 
-    async def _wait_actionable_locator(self, page: Page, selector: str) -> tuple[Locator, dict[str, Any]]:
-        locator = page.locator(selector).first
+    def _candidate_frames_for_step(self, page: Page, step: dict[str, Any]) -> list[Frame]:
+        frames = list(page.frames)
+        frame_url = _safe_page_url(str(step.get("frame_url") or ""))
+        frame_name = str(step.get("frame_name") or "").strip()
+        preferred: list[Frame] = []
+        if frame_url or frame_name:
+            for frame in frames:
+                metadata = _frame_metadata(frame)
+                if frame_url and metadata.get("frame_url") == frame_url:
+                    preferred.append(frame)
+                elif frame_name and metadata.get("frame_name") == frame_name:
+                    preferred.append(frame)
+        preferred_ids = {id(frame) for frame in preferred}
+        return preferred + [frame for frame in frames if id(frame) not in preferred_ids]
+
+    async def _wait_actionable_locator(
+        self,
+        page: Page,
+        selector: str,
+        step: dict[str, Any] | None = None,
+        *,
+        require_enabled: bool = True,
+    ) -> tuple[Locator, dict[str, Any]]:
+        step_data = step if isinstance(step, dict) else {}
+        owners: list[Page | Frame] = [page] + self._candidate_frames_for_step(page, step_data)
+        selected_owner: Page | Frame | None = None
+        for owner in owners:
+            try:
+                if await owner.locator(selector).count() > 0:
+                    selected_owner = owner
+                    break
+            except Exception:
+                continue
+        if selected_owner is None:
+            selected_owner = page
+        locator = selected_owner.locator(selector).first
         await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
         deadline = asyncio.get_running_loop().time() + (_REPLAY_STEP_TIMEOUT_MS / 1000)
-        while not await locator.is_enabled():
+        while require_enabled and not await locator.is_enabled():
             if asyncio.get_running_loop().time() >= deadline:
                 raise PlaywrightTimeoutError(f"Seletor nao ficou habilitado: {selector}")
             await page.wait_for_timeout(100)
-        return locator, await self._selector_state(page, selector)
+        state = await self._selector_state(selected_owner, selector)
+        if isinstance(selected_owner, Frame):
+            state.update(_frame_metadata(selected_owner))
+        return locator, state
 
-    async def _selector_state(self, page: Page, selector: str) -> dict[str, Any]:
+    async def _selector_state(self, page: Page | Frame, selector: str) -> dict[str, Any]:
         locator = page.locator(selector)
         count = await locator.count()
         first = locator.first
         visible = await first.is_visible() if count else False
         enabled = await first.is_enabled() if count else False
+        current_url = page.url if isinstance(page, Page) else page.page.url
         return {
-            "current_url": _safe_page_url(page.url),
+            "current_url": _safe_page_url(current_url),
             "selector": selector,
             "count": count,
             "visible": visible,
