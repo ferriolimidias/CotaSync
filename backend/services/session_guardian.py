@@ -20,6 +20,7 @@ SESSION_STATES = {
     "microsoft_mfa_required",
     "microsoft_consent_required",
     "microsoft_signed_out",
+    "unknown_microsoft_auth",
     "blocked_or_access_denied",
     "wrong_host",
     "system_loading",
@@ -33,6 +34,14 @@ _MICROSOFT_HOST_SUFFIXES = (
     "login.microsoft.com",
     "login.windows.net",
     "m365.cloud.microsoft",
+)
+_MICROSOFT_AUTH_PATH_MARKERS = (
+    "login",
+    "signin",
+    "sign-in",
+    "oauth",
+    "authorize",
+    "auth",
 )
 _PICK_ACCOUNT_WORDS = (
     "pick an account",
@@ -126,11 +135,23 @@ def _is_microsoft_host(host: str) -> bool:
     return any(host == suffix or host.endswith(f".{suffix}") for suffix in _MICROSOFT_HOST_SUFFIXES)
 
 
+def _is_microsoft_auth_url(url: str, host: str) -> bool:
+    if _is_microsoft_host(host):
+        return True
+    if not (host == "microsoft.com" or host.endswith(".microsoft.com")):
+        return False
+    try:
+        path = urlsplit(url).path.casefold()
+    except Exception:
+        path = ""
+    return any(marker in path for marker in _MICROSOFT_AUTH_PATH_MARKERS)
+
+
 def configured_saved_account_texts(action: Any) -> list[str]:
     configured = [
         _metadata(action, "microsoft_saved_account_text", ""),
+        _metadata(action, "microsoft_saved_account_identifier", ""),
         _metadata(action, "access_profile_email_or_identifier", ""),
-        _metadata(action, "access_profile_name", ""),
     ]
     default_text = os.getenv("COTASYNC_MICROSOFT_SAVED_ACCOUNT_TEXT", "").strip()
     default_email = os.getenv("COTASYNC_MICROSOFT_SAVED_ACCOUNT_EMAIL", "").strip()
@@ -138,8 +159,6 @@ def configured_saved_account_texts(action: Any) -> list[str]:
         configured.append(default_text)
     if default_email:
         configured.append(default_email)
-    if _metadata(action, "external_login_url", ""):
-        configured.extend(["Priscila Susin", "D0004267@rdmz.com.br"])
     seen: set[str] = set()
     result: list[str] = []
     for raw in configured:
@@ -271,8 +290,8 @@ class SessionGuardian:
                 operator_action_required=True,
                 reason="blocked_text",
             )
-        if _is_microsoft_host(host) or is_reauthentication_url(url, expected_action_hosts(action)):
-            return await self._classify_microsoft_page(page, url, host, title, ready_state, combined)
+        if _is_microsoft_auth_url(url, host) or is_reauthentication_url(url, expected_action_hosts(action)):
+            return await self._classify_microsoft_page(page, action, url, host, title, ready_state, combined)
 
         expected_hosts = expected_action_hosts(action)
         if expected_hosts and host not in expected_hosts:
@@ -328,6 +347,7 @@ class SessionGuardian:
     async def _classify_microsoft_page(
         self,
         page: Any,
+        action: Any,
         url: str,
         host: str,
         title: str,
@@ -390,15 +410,26 @@ class SessionGuardian:
                 retryable=True,
                 reason="pick_account",
             )
+        for account_text in configured_saved_account_texts(action):
+            if account_text and account_text.casefold() in text.casefold():
+                return PageSessionState(
+                    "microsoft_pick_account",
+                    host,
+                    url,
+                    title,
+                    ready_state,
+                    retryable=True,
+                    reason="configured_account_visible",
+                )
         return PageSessionState(
-            "microsoft_signed_out",
+            "unknown_microsoft_auth",
             host,
             url,
             title,
             ready_state,
             operator_action_required=True,
             retryable=True,
-            reason="microsoft_login_page",
+            reason="unknown_microsoft_auth_page",
         )
 
     async def ensure_authenticated(
@@ -429,7 +460,7 @@ class SessionGuardian:
                 "action": "none",
                 "result": "not_attempted",
             }
-            if state.state == "microsoft_pick_account":
+            if state.state in {"microsoft_pick_account", "microsoft_signed_out", "unknown_microsoft_auth"}:
                 step["action"] = "select_saved_microsoft_account"
                 selected = await self.click_configured_saved_account(page, action)
                 step["result"] = "clicked" if selected else "configured_account_not_visible"
@@ -444,7 +475,6 @@ class SessionGuardian:
                 "microsoft_password_required",
                 "microsoft_mfa_required",
                 "microsoft_consent_required",
-                "microsoft_signed_out",
                 "blocked_or_access_denied",
             }:
                 step["result"] = "manual_intervention_required"

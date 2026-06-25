@@ -89,6 +89,20 @@ def _acoes_ui_por_chave(actions: list[dict]) -> dict[str, dict]:
     }
 
 
+def _acao_configurada_para_execucao_rapida(action: dict) -> bool:
+    if bool(action.get("legacy_unconfigured", False)):
+        return False
+    return bool(
+        str(action.get("access_profile_name") or "").strip()
+        and str(action.get("microsoft_saved_account_text") or "").strip()
+        and (
+            str(action.get("microsoft_saved_account_identifier") or "").strip()
+            or str(action.get("access_profile_email_or_identifier") or "").strip()
+        )
+        and str(action.get("expected_system_host") or "").strip()
+    )
+
+
 def _excluir_acao_local(chave_acao: str) -> None:
     memoria = _carregar_ui_map()
     acoes = memoria.get("acoes_conhecidas", {})
@@ -402,6 +416,49 @@ def _render_demo_v01() -> None:
         recorded_steps = st.session_state.get("demo_recorded_steps")
         saved_action = st.session_state.get("demo_saved_action")
         if status == "autenticada" and not recorded_steps and not saved_action:
+            if session.get("using_external_system"):
+                st.markdown("**Perfil de acesso da gravação**")
+                profile_cols = st.columns(2)
+                profile_cols[0].text_input(
+                    "Sistema externo",
+                    value=str(session.get("external_system_name") or ""),
+                    disabled=True,
+                    key=f"demo_profile_system_{session_id}",
+                )
+                profile_cols[1].text_input(
+                    "Perfil de acesso / operador",
+                    value=str(session.get("access_profile_name") or ""),
+                    disabled=True,
+                    key=f"demo_profile_name_{session_id}",
+                )
+                profile_cols[0].text_input(
+                    "Conta Microsoft configurada",
+                    value=(
+                        f"{session.get('microsoft_saved_account_text') or ''} "
+                        f"({session.get('microsoft_saved_account_identifier') or ''})"
+                    ).strip(),
+                    disabled=True,
+                    key=f"demo_profile_ms_account_{session_id}",
+                )
+                profile_cols[1].text_input(
+                    "Host esperado do sistema",
+                    value=str(session.get("expected_system_host") or ""),
+                    disabled=True,
+                    key=f"demo_profile_expected_host_{session_id}",
+                )
+                profile_ready = all(
+                    str(session.get(key) or "").strip()
+                    for key in (
+                        "external_system_name",
+                        "access_profile_name",
+                        "microsoft_saved_account_text",
+                        "microsoft_saved_account_identifier",
+                        "expected_system_host",
+                    )
+                )
+                if not profile_ready:
+                    st.error("Configure o perfil de acesso antes de iniciar o aprendizado.")
+                    return
             st.markdown("**Aprendizado guiado**")
             st.caption("Descreva o resultado de negócio antes de iniciar a demonstração.")
             action_name_key = f"demo_guided_name_{session_id}"
@@ -1010,7 +1067,11 @@ with st.sidebar:
     )
     st.divider()
     st.markdown("#### ⚡ Execução Rápida")
-    acoes_sidebar = acoes_ui
+    acoes_sidebar = {
+        chave: dados
+        for chave, dados in acoes_ui.items()
+        if isinstance(dados, dict) and _acao_configurada_para_execucao_rapida(dados)
+    }
     if acoes_sidebar:
         opcoes_sidebar = {
             dados.get("name", chave): chave
@@ -1660,6 +1721,36 @@ elif menu_selecionado == "Configurações":
             value=str(external_config.get("auth_success_selector") or ""),
             help="Tem prioridade sobre auth_success_text e deve estar visível após o login.",
         )
+        st.markdown("**Perfil de acesso / operador**")
+        access_profile_name = st.text_input(
+            "access_profile_name",
+            value=str(external_config.get("access_profile_name") or "Priscila"),
+        )
+        microsoft_saved_account_text = st.text_input(
+            "microsoft_saved_account_text",
+            value=str(external_config.get("microsoft_saved_account_text") or "Priscila Susin"),
+        )
+        microsoft_saved_account_identifier = st.text_input(
+            "microsoft_saved_account_identifier",
+            value=str(
+                external_config.get("microsoft_saved_account_identifier")
+                or external_config.get("access_profile_email_or_identifier")
+                or "D0004267@rdmz.com.br"
+            ),
+        )
+        expected_system_host = st.text_input(
+            "expected_system_host",
+            value=str(external_config.get("expected_system_host") or "nwcweb.randonconsorcios.com.br"),
+        )
+        microsoft_hosts = st.text_input(
+            "microsoft_hosts",
+            value=", ".join(external_config.get("microsoft_hosts") or ["login.microsoftonline.com", "m365.cloud.microsoft"]),
+            help="Hosts Microsoft separados por vírgula.",
+        )
+        microsoft_saved_account_selector = st.text_input(
+            "microsoft_saved_account_selector (opcional)",
+            value=str(external_config.get("microsoft_saved_account_selector") or ""),
+        )
         validation_options = ["automática", "manual_confirmation"]
         configured_validation = str(external_config.get("validation") or "")
         validation = st.selectbox(
@@ -1679,6 +1770,17 @@ elif menu_selecionado == "Configurações":
                         "validation": "manual_confirmation" if validation == "manual_confirmation" else "",
                         "auth_success_text": auth_success_text,
                         "auth_success_selector": auth_success_selector,
+                        "access_profile_name": access_profile_name,
+                        "access_profile_email_or_identifier": microsoft_saved_account_identifier,
+                        "microsoft_saved_account_identifier": microsoft_saved_account_identifier,
+                        "microsoft_saved_account_selector": microsoft_saved_account_selector,
+                        "microsoft_saved_account_text": microsoft_saved_account_text,
+                        "expected_system_host": expected_system_host,
+                        "microsoft_hosts": [
+                            item.strip()
+                            for item in microsoft_hosts.split(",")
+                            if item.strip()
+                        ],
                     },
                     api_base_url=API_BASE_URL,
                 )

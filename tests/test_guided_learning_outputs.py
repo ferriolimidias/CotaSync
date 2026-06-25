@@ -10,6 +10,7 @@ from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import run_action_sync
 from backend.services.demo_session import DemoSessionManager
+from backend.services.external_systems import load_current_external_system
 from backend.services.operational_summary import build_operational_summary
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 
@@ -65,11 +66,41 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         browser_mode="browserless",
         external_system_name="",
         external_login_url="",
+        access_profile_name="",
+        access_profile_email_or_identifier="",
+        microsoft_saved_account_identifier="",
+        microsoft_saved_account_selector="",
+        microsoft_saved_account_text="",
+        expected_system_host="",
+        microsoft_hosts=[],
         page=FakePage(),
     )
 
 
+def _external_session() -> SimpleNamespace:
+    session = _session()
+    session.browser_mode = "desktop_browser"
+    session.external_system_name = "Sistema Priscila e Jonatan"
+    session.external_login_url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    session.access_profile_name = "Priscila"
+    session.access_profile_email_or_identifier = "D0004267@rdmz.com.br"
+    session.microsoft_saved_account_identifier = "D0004267@rdmz.com.br"
+    session.microsoft_saved_account_selector = ""
+    session.microsoft_saved_account_text = "Priscila Susin"
+    session.expected_system_host = "nwcweb.randonconsorcios.com.br"
+    session.microsoft_hosts = ["login.microsoftonline.com", "m365.cloud.microsoft"]
+    return session
+
+
 class GuidedLearningSaveTests(unittest.TestCase):
+    def test_default_access_profile_exists_for_demo_external_system(self) -> None:
+        config = load_current_external_system()
+        self.assertEqual(config["access_profile_name"], "Priscila")
+        self.assertEqual(config["microsoft_saved_account_text"], "Priscila Susin")
+        self.assertEqual(config["microsoft_saved_account_identifier"], "D0004267@rdmz.com.br")
+        self.assertEqual(config["expected_system_host"], "nwcweb.randonconsorcios.com.br")
+        self.assertIn("m365.cloud.microsoft", config["microsoft_hosts"])
+
     def test_guided_metadata_and_extraction_are_saved_and_sent_to_synthesis(self) -> None:
         manager = DemoSessionManager()
         manager._sessions["session"] = _session()  # type: ignore[attr-defined]
@@ -172,6 +203,33 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual([item["key"] for item in action["variaveis_necessarias"]], ["grupo", "cota", "tipo_consulta"])
         self.assertEqual([item["label"] for item in action["variable_schema"]], ["Grupo", "Cota", "Tipo Consulta"])
         self.assertEqual([item["key"] for item in saved["variables"]], ["grupo", "cota", "tipo_consulta"])
+
+    def test_external_learned_action_saves_access_profile_metadata(self) -> None:
+        manager = DemoSessionManager()
+        manager._sessions["session"] = _external_session()  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            saved = asyncio.run(
+                manager.save_action(
+                    "session",
+                    "Consultar externo",
+                    "Consulta externa.",
+                    {"0": "codigo"},
+                )
+            )
+        action = captured["acoes_conhecidas"]["Consultar externo"]  # type: ignore[index]
+        self.assertEqual(action["access_profile_name"], "Priscila")
+        self.assertEqual(action["microsoft_saved_account_text"], "Priscila Susin")
+        self.assertEqual(action["microsoft_saved_account_identifier"], "D0004267@rdmz.com.br")
+        self.assertEqual(action["expected_system_host"], "nwcweb.randonconsorcios.com.br")
+        self.assertTrue(action["requires_authenticated_session"])
+        self.assertTrue(action["session_guardian_enabled"])
+        self.assertEqual(saved["access_profile_name"], "Priscila")
 
 
 class OutputResultTests(unittest.TestCase):

@@ -14,6 +14,14 @@ from urllib.parse import urlsplit
 _ROOT = Path(__file__).resolve().parents[2]
 CURRENT_EXTERNAL_SYSTEM_PATH = _ROOT / "data" / "external_systems" / "current.json"
 
+DEFAULT_ACCESS_PROFILE = {
+    "access_profile_name": "Priscila",
+    "microsoft_saved_account_text": "Priscila Susin",
+    "microsoft_saved_account_identifier": "D0004267@rdmz.com.br",
+    "expected_system_host": "nwcweb.randonconsorcios.com.br",
+    "microsoft_hosts": ["login.microsoftonline.com", "m365.cloud.microsoft"],
+}
+
 
 class ExternalSystemConfigError(RuntimeError):
     """Erro seguro de validacao ou persistencia da configuracao externa."""
@@ -26,12 +34,45 @@ def empty_external_system() -> dict[str, Any]:
         "validation": "",
         "auth_success_text": "",
         "auth_success_selector": "",
-        "access_profile_name": "",
-        "access_profile_email_or_identifier": "",
+        "access_profile_name": DEFAULT_ACCESS_PROFILE["access_profile_name"],
+        "access_profile_email_or_identifier": DEFAULT_ACCESS_PROFILE["microsoft_saved_account_identifier"],
+        "microsoft_saved_account_identifier": DEFAULT_ACCESS_PROFILE["microsoft_saved_account_identifier"],
         "microsoft_saved_account_selector": "",
-        "microsoft_saved_account_text": "",
+        "microsoft_saved_account_text": DEFAULT_ACCESS_PROFILE["microsoft_saved_account_text"],
+        "expected_system_host": DEFAULT_ACCESS_PROFILE["expected_system_host"],
+        "microsoft_hosts": list(DEFAULT_ACCESS_PROFILE["microsoft_hosts"]),
         "updated_at": None,
     }
+
+
+def _string_keys() -> tuple[str, ...]:
+    return (
+        "external_system_name",
+        "external_login_url",
+        "validation",
+        "auth_success_text",
+        "auth_success_selector",
+        "access_profile_name",
+        "access_profile_email_or_identifier",
+        "microsoft_saved_account_identifier",
+        "microsoft_saved_account_selector",
+        "microsoft_saved_account_text",
+        "expected_system_host",
+    )
+
+
+def _normalize_microsoft_hosts(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        hosts = [str(item or "").strip().lower().rstrip(".") for item in raw]
+    else:
+        hosts = []
+    result: list[str] = []
+    seen: set[str] = set()
+    for host in hosts or DEFAULT_ACCESS_PROFILE["microsoft_hosts"]:
+        if host and host not in seen:
+            seen.add(host)
+            result.append(host)
+    return result
 
 
 def load_current_external_system() -> dict[str, Any]:
@@ -44,18 +85,18 @@ def load_current_external_system() -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ExternalSystemConfigError("Configuracao do sistema externo em formato invalido.")
     result = empty_external_system()
-    for key in (
-        "external_system_name",
-        "external_login_url",
-        "validation",
-        "auth_success_text",
-        "auth_success_selector",
-        "access_profile_name",
-        "access_profile_email_or_identifier",
-        "microsoft_saved_account_selector",
-        "microsoft_saved_account_text",
-    ):
+    for key in _string_keys():
         result[key] = str(payload.get(key) or "").strip()
+    if not result["microsoft_saved_account_identifier"]:
+        result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]
+    if not result["access_profile_email_or_identifier"]:
+        result["access_profile_email_or_identifier"] = result["microsoft_saved_account_identifier"]
+    for key, value in DEFAULT_ACCESS_PROFILE.items():
+        if key == "microsoft_hosts":
+            continue
+        if not result.get(key):
+            result[key] = str(value)
+    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
     if result["external_login_url"]:
         result["validation"] = _validation_mode(result)
     result["updated_at"] = payload.get("updated_at")
@@ -64,18 +105,18 @@ def load_current_external_system() -> dict[str, Any]:
 
 def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
     result = empty_external_system()
-    for key in (
-        "external_system_name",
-        "external_login_url",
-        "validation",
-        "auth_success_text",
-        "auth_success_selector",
-        "access_profile_name",
-        "access_profile_email_or_identifier",
-        "microsoft_saved_account_selector",
-        "microsoft_saved_account_text",
-    ):
+    for key in _string_keys():
         result[key] = str(payload.get(key) or "").strip()
+    if not result["microsoft_saved_account_identifier"]:
+        result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]
+    if not result["access_profile_email_or_identifier"]:
+        result["access_profile_email_or_identifier"] = result["microsoft_saved_account_identifier"]
+    for key, value in DEFAULT_ACCESS_PROFILE.items():
+        if key == "microsoft_hosts":
+            continue
+        if not result.get(key):
+            result[key] = str(value)
+    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
 
     login_url = result["external_login_url"]
     system_name = result["external_system_name"]

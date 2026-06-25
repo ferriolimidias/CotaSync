@@ -46,6 +46,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
+from backend.services.actions_repository import enrich_action_access_profile
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -404,8 +405,11 @@ class DemoBrowserSession:
     auth_success_selector: str = ""
     access_profile_name: str = ""
     access_profile_email_or_identifier: str = ""
+    microsoft_saved_account_identifier: str = ""
     microsoft_saved_account_selector: str = ""
     microsoft_saved_account_text: str = ""
+    expected_system_host: str = ""
+    microsoft_hosts: list[str] = field(default_factory=list)
     storage_state_path: Path = field(default_factory=Path)
     profile_reference: str = ""
     confirmed_page_url: str = ""
@@ -846,10 +850,21 @@ class DemoSessionManager:
                 access_profile_email_or_identifier=str(
                     external_config.get("access_profile_email_or_identifier") or ""
                 ).strip(),
+                microsoft_saved_account_identifier=str(
+                    external_config.get("microsoft_saved_account_identifier")
+                    or external_config.get("access_profile_email_or_identifier")
+                    or ""
+                ).strip(),
                 microsoft_saved_account_selector=str(
                     external_config.get("microsoft_saved_account_selector") or ""
                 ).strip(),
                 microsoft_saved_account_text=str(external_config.get("microsoft_saved_account_text") or "").strip(),
+                expected_system_host=str(external_config.get("expected_system_host") or "").strip(),
+                microsoft_hosts=(
+                    external_config.get("microsoft_hosts")
+                    if isinstance(external_config.get("microsoft_hosts"), list)
+                    else []
+                ),
                 storage_state_path=storage_state_path,
                 profile_reference=desktop_profile_dir() if selected_mode == "desktop_browser" else "",
             )
@@ -913,6 +928,10 @@ class DemoSessionManager:
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
             "using_external_system": bool(session.external_login_url),
+            "access_profile_name": session.access_profile_name,
+            "microsoft_saved_account_text": session.microsoft_saved_account_text,
+            "microsoft_saved_account_identifier": session.microsoft_saved_account_identifier,
+            "expected_system_host": session.expected_system_host,
             "auth_validation_mode": session.auth_validation_mode or "demo_target_markers",
             "storage_state_saved": session.storage_state_path.is_file(),
             "profile_reference": session.profile_reference,
@@ -1130,6 +1149,13 @@ class DemoSessionManager:
         session = self._get(session_id)
         if session.status != "autenticada":
             raise DemoSessionError("Confirme o login manual antes de iniciar o aprendizado.")
+        if session.external_login_url and not (
+            session.access_profile_name
+            and session.microsoft_saved_account_text
+            and session.microsoft_saved_account_identifier
+            and session.expected_system_host
+        ):
+            raise DemoSessionError("Configure o perfil de acesso/operador antes de iniciar o aprendizado.")
         session.steps = []
         session.learning_events = []
         for task in list(session.observer_tasks):
@@ -1402,8 +1428,15 @@ class DemoSessionManager:
             output_schema["main_file"] = {"type": "file", "format": "pdf"}
         access_profile_name = str(getattr(session, "access_profile_name", "") or "").strip()
         access_profile_email = str(getattr(session, "access_profile_email_or_identifier", "") or "").strip()
+        saved_account_identifier = str(getattr(session, "microsoft_saved_account_identifier", "") or "").strip()
         saved_account_selector = str(getattr(session, "microsoft_saved_account_selector", "") or "").strip()
         saved_account_text = str(getattr(session, "microsoft_saved_account_text", "") or "").strip()
+        expected_system_host = str(getattr(session, "expected_system_host", "") or "").strip()
+        microsoft_hosts = (
+            list(getattr(session, "microsoft_hosts", []))
+            if isinstance(getattr(session, "microsoft_hosts", []), list)
+            else []
+        )
 
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
@@ -1444,19 +1477,25 @@ class DemoSessionManager:
             "browser_mode": session.browser_mode,
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
-            "access_profile_name": access_profile_name or ("Priscila Susin" if session.external_login_url else ""),
+            "access_profile_name": access_profile_name,
             "access_profile_email_or_identifier": (
                 access_profile_email
-                or ("D0004267@rdmz.com.br" if session.external_login_url else "")
+                or saved_account_identifier
             ),
+            "microsoft_saved_account_identifier": saved_account_identifier or access_profile_email,
             "microsoft_saved_account_selector": saved_account_selector,
-            "microsoft_saved_account_text": (
-                saved_account_text
-                or access_profile_email
-                or access_profile_name
-                or ("Priscila Susin" if session.external_login_url else "")
-            ),
+            "microsoft_saved_account_text": saved_account_text,
+            "expected_system_host": expected_system_host,
+            "microsoft_hosts": microsoft_hosts,
+            "session_guardian_enabled": bool(session.external_login_url or session.browser_mode == "desktop_browser"),
         }
+        if session.external_login_url and not (
+            learned_action["access_profile_name"]
+            and learned_action["microsoft_saved_account_text"]
+            and learned_action["microsoft_saved_account_identifier"]
+            and learned_action["expected_system_host"]
+        ):
+            raise DemoSessionError("A acao externa precisa de um perfil de acesso configurado para ser salva.")
         from backend.services.ai_observer import analyze_recorded_action_with_ai
 
         # A síntese final inclui nomes de variáveis e saídas editados após a
@@ -1534,7 +1573,10 @@ class DemoSessionManager:
             "external_login_url": learned_action["external_login_url"],
             "access_profile_name": learned_action["access_profile_name"],
             "access_profile_email_or_identifier": learned_action["access_profile_email_or_identifier"],
+            "microsoft_saved_account_identifier": learned_action["microsoft_saved_account_identifier"],
             "microsoft_saved_account_text": learned_action["microsoft_saved_account_text"],
+            "expected_system_host": learned_action["expected_system_host"],
+            "session_guardian_enabled": learned_action["session_guardian_enabled"],
         }
 
     async def execute_action(
@@ -1552,6 +1594,7 @@ class DemoSessionManager:
         action = payload["acoes_conhecidas"].get(action_key)
         if not isinstance(action, dict):
             raise DemoSessionError("Acao aprendida nao encontrada.")
+        action = enrich_action_access_profile(action)
         steps = action.get("robust_steps") or action.get("passos_playwright", [])
         if not isinstance(steps, list) or not steps:
             raise DemoSessionError("A acao aprendida nao possui passos executaveis.")
@@ -1603,7 +1646,11 @@ class DemoSessionManager:
             nonlocal last_session_state
             nonlocal last_page_title
             nonlocal current_host
-            if guardian is None or not bool(action.get("requires_authenticated_session", True)):
+            if (
+                guardian is None
+                or not bool(action.get("requires_authenticated_session", True))
+                or not bool(action.get("session_guardian_enabled", True))
+            ):
                 return
             started_at = time.monotonic()
             result = await guardian.ensure_authenticated(

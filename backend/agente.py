@@ -30,6 +30,7 @@ from backend.motor_browser import (
     gerar_plano_acao,
 )
 from backend.services.operational_summary import build_operational_summary, build_operational_summary_result
+from backend.services.actions_repository import enrich_action_access_profile
 
 load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
@@ -483,7 +484,8 @@ async def executar_acao_fast_track(
     if not isinstance(acoes, dict) or nome_acao not in acoes:
         return {"texto": f"❌ A ação '{nome_acao}' não foi encontrada.", "estado": "NORMAL"}
 
-    acao = acoes.get(nome_acao, {})
+    raw_acao = acoes.get(nome_acao, {})
+    acao = enrich_action_access_profile(raw_acao) if isinstance(raw_acao, dict) else raw_acao
     browser_mode = str(acao.get("browser_mode") or "browserless") if isinstance(acao, dict) else "browserless"
     ai_recovery_enabled = bool(acao.get("ai_recovery_enabled", True)) if isinstance(acao, dict) else False
     if browser_mode == "desktop_browser" and isinstance(acao, dict):
@@ -520,6 +522,14 @@ async def executar_acao_fast_track(
             "dados_extraidos": resultado.get("dados_extraidos", {}),
             "passos_executados": resultado.get("passos_executados", len(passos_playwright)),
             "final_page": resultado.get("final_page", {}),
+            "session_state": resultado.get("session_state"),
+            "recovery_attempts": resultado.get("recovery_attempts"),
+            "recovery_steps": resultado.get("recovery_steps", []),
+            "recovery_attempted": resultado.get("recovery_attempted"),
+            "operator_action_required": resultado.get("operator_action_required"),
+            "last_page_title": resultado.get("last_page_title"),
+            "current_host": resultado.get("current_host"),
+            "checkpoint_diagnostics": resultado.get("checkpoint_diagnostics", []),
         }
         summary_result = await build_operational_summary_result(acao, status="success", result_payload=result_payload)
         return {

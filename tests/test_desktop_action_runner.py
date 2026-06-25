@@ -18,6 +18,7 @@ from backend.services.action_pages import (
     select_desktop_page_for_action,
 )
 from backend.services.action_runner import run_action_sync
+from backend.services.actions_repository import load_actions_catalog
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
 
 
@@ -35,6 +36,10 @@ def desktop_action() -> ActionDetail:
         has_url=True,
         browser_mode="desktop_browser",
         url_inicial=TARGET_URL,
+        access_profile_name="Priscila",
+        microsoft_saved_account_text="Priscila Susin",
+        microsoft_saved_account_identifier="D0004267@rdmz.com.br",
+        expected_system_host="nwcweb.randonconsorcios.com.br",
         ai_result_summary_enabled=False,
     )
 
@@ -218,6 +223,12 @@ class SessionGuardianTests(unittest.TestCase):
         state = asyncio.run(self._guardian().classify(page, desktop_action().model_dump()))
         self.assertEqual(state.state, "microsoft_pick_account")
 
+    def test_m365_host_classifies_as_unknown_microsoft_auth_not_empty(self) -> None:
+        page = FakeGuardianPage("https://m365.cloud.microsoft/", "", title="Microsoft 365")
+        state = asyncio.run(self._guardian().classify(page, desktop_action().model_dump()))
+        self.assertEqual(state.state, "unknown_microsoft_auth")
+        self.assertEqual(state.current_host, "m365.cloud.microsoft")
+
     def test_clicks_configured_saved_account_only_when_visible(self) -> None:
         action = desktop_action().model_dump()
         action["microsoft_saved_account_text"] = "Priscila Susin"
@@ -231,6 +242,52 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertTrue(clicked)
         self.assertIn("Priscila Susin", page.clicked_texts)
 
+    def test_recovery_clicks_matching_pick_account_and_increments_attempts(self) -> None:
+        action = desktop_action().model_dump()
+        page = FakeGuardianPage(
+            "https://m365.cloud.microsoft/",
+            "Pick an account\nPriscila Susin\nD0004267@rdmz.com.br",
+            click_redirect_url=TARGET_URL,
+            redirect_body_text="Intranet Newcon",
+        )
+
+        async def is_authenticated(_page: object) -> bool:
+            return page.url == TARGET_URL
+
+        result = asyncio.run(
+            self._guardian().ensure_authenticated(
+                page,
+                action,
+                is_authenticated=is_authenticated,
+                checkpoint="before_action_auth_check",
+            )
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.recovery_attempts, 1)
+        self.assertEqual(result.recovery_steps[0]["result"], "clicked")
+        self.assertIn("Priscila Susin", page.clicked_texts)
+
+    def test_pick_account_without_matching_profile_requires_operator_action(self) -> None:
+        action = desktop_action().model_dump()
+        action["microsoft_saved_account_text"] = "Priscila Susin"
+        action["microsoft_saved_account_identifier"] = "D0004267@rdmz.com.br"
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Pick an account\nOutra Pessoa",
+        )
+        result = asyncio.run(
+            self._guardian().ensure_authenticated(
+                page,
+                action,
+                is_authenticated=AsyncMock(return_value=False),
+                checkpoint="before_action_auth_check",
+            )
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.recovery_attempts, 1)
+        self.assertTrue(result.operator_action_required)
+        self.assertEqual(result.recovery_steps[0]["result"], "configured_account_not_visible")
+
     def test_does_not_click_random_saved_account_without_match(self) -> None:
         action = desktop_action().model_dump()
         action["microsoft_saved_account_text"] = "Priscila Susin"
@@ -240,6 +297,41 @@ class SessionGuardianTests(unittest.TestCase):
         )
         clicked = asyncio.run(self._guardian().click_configured_saved_account(page, action))
         self.assertFalse(clicked)
+        self.assertEqual(page.clicked_texts, [])
+
+    def test_profile_name_alone_is_not_a_saved_account_match(self) -> None:
+        action = desktop_action().model_dump()
+        action["access_profile_name"] = "Priscila"
+        action["microsoft_saved_account_text"] = "Priscila Susin"
+        action["microsoft_saved_account_identifier"] = "D0004267@rdmz.com.br"
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Pick an account\nPriscila Outro Perfil\noutra@rdmz.com.br",
+        )
+        clicked = asyncio.run(self._guardian().click_configured_saved_account(page, action))
+        self.assertFalse(clicked)
+        self.assertEqual(page.clicked_texts, [])
+
+    def test_recovery_requires_operator_when_only_profile_name_is_visible(self) -> None:
+        action = desktop_action().model_dump()
+        action["access_profile_name"] = "Priscila"
+        action["microsoft_saved_account_text"] = "Priscila Susin"
+        action["microsoft_saved_account_identifier"] = "D0004267@rdmz.com.br"
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Pick an account\nPriscila Outro Perfil\noutra@rdmz.com.br",
+        )
+        result = asyncio.run(
+            self._guardian().ensure_authenticated(
+                page,
+                action,
+                is_authenticated=AsyncMock(return_value=False),
+                checkpoint="before_action_auth_check",
+            )
+        )
+        self.assertFalse(result.ok)
+        self.assertTrue(result.operator_action_required)
+        self.assertEqual(result.recovery_attempts, 1)
         self.assertEqual(page.clicked_texts, [])
 
     def test_password_mfa_and_consent_require_manual_intervention(self) -> None:
@@ -257,6 +349,28 @@ class SessionGuardianTests(unittest.TestCase):
             state = asyncio.run(self._guardian().classify(page, desktop_action().model_dump()))
             self.assertEqual(state.state, expected)
             self.assertTrue(state.operator_action_required)
+
+    def test_password_mfa_and_consent_recovery_requires_operator_action(self) -> None:
+        for body in (
+            "Enter password",
+            "Verify your identity with Microsoft Authenticator",
+            "Permissions requested by this app",
+        ):
+            page = FakeGuardianPage(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                body,
+                password_visible="password" in body.casefold(),
+            )
+            result = asyncio.run(
+                self._guardian().ensure_authenticated(
+                    page,
+                    desktop_action().model_dump(),
+                    is_authenticated=AsyncMock(return_value=False),
+                )
+            )
+            self.assertFalse(result.ok)
+            self.assertTrue(result.operator_action_required)
+            self.assertEqual(result.recovery_attempts, 1)
 
     def test_recovery_refreshes_and_continues_when_session_recovers(self) -> None:
         page = FakeGuardianPage(TARGET_URL, "Carregando", ready_state="interactive")
@@ -278,6 +392,22 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(page.reload_calls, 1)
         self.assertTrue(result.recovery_attempted)
+
+
+class AccessProfileCatalogTests(unittest.TestCase):
+    def test_legacy_action_without_profile_is_marked_unconfigured_but_profile_is_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog_path = Path(tmp) / "ui_map.json"
+            catalog_path.write_text(
+                '{"acoes_conhecidas":{"Legada":{"nome_amigavel":"Legada","passos_playwright":[{"tipo":"clicar","seletor":"#x"}]}}}',
+                encoding="utf-8",
+            )
+            catalog = load_actions_catalog(catalog_path)
+        action = catalog.actions[0]
+        self.assertTrue(action.legacy_unconfigured)
+        self.assertEqual(action.access_profile_name, "Priscila")
+        self.assertEqual(action.microsoft_saved_account_identifier, "D0004267@rdmz.com.br")
+        self.assertEqual(action.expected_system_host, "nwcweb.randonconsorcios.com.br")
 
 
 class DesktopActionRunTests(unittest.TestCase):

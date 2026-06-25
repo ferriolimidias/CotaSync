@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.services.external_systems import (
     ExternalSystemConfigError,
@@ -25,8 +25,11 @@ class ExternalSystemRequest(BaseModel):
     auth_success_selector: str = ""
     access_profile_name: str = ""
     access_profile_email_or_identifier: str = ""
+    microsoft_saved_account_identifier: str = ""
     microsoft_saved_account_selector: str = ""
     microsoft_saved_account_text: str = ""
+    expected_system_host: str = ""
+    microsoft_hosts: list[str] = Field(default_factory=list)
 
 
 def _safe_call(operation: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

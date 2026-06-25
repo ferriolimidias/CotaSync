@@ -58,6 +58,7 @@ def expected_action_hosts(action: Any) -> set[str]:
     hosts = {
         url_host(_metadata(action, "url_inicial", "")),
         _redirect_uri_host(_metadata(action, "external_login_url", "")),
+        str(_metadata(action, "expected_system_host", "") or "").strip().lower().rstrip("."),
     }
 
     # A configuracao corrente so complementa a acao quando representa o mesmo
@@ -71,6 +72,7 @@ def expected_action_hosts(action: Any) -> set[str]:
             current = load_current_external_system()
             if str(current.get("external_system_name") or "").strip() == action_system:
                 hosts.add(_redirect_uri_host(current.get("external_login_url")))
+                hosts.add(str(current.get("expected_system_host") or "").strip().lower().rstrip("."))
         except Exception:
             pass
     return {host for host in hosts if host}

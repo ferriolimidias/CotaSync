@@ -32,6 +32,7 @@ from backend.services.action_pages import (
 )
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
+from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
 
 load_dotenv()
 os.makedirs("data", exist_ok=True)
@@ -1040,11 +1041,79 @@ async def executar_acao_rapida(
     _LOGGER.info(f"[FAST-TRACK] Iniciando execução rápida da ação: {nome_acao}")
     try:
         async with async_playwright() as p:
+            guardian = SessionGuardian() if browser_mode == "desktop_browser" else None
+            recovery_attempted = False
+            total_recovery_attempts = 0
+            recovery_steps: list[dict[str, Any]] = []
+            checkpoint_diagnostics: list[dict[str, Any]] = []
+            last_session_state = ""
+            last_page_title = ""
+            current_host = ""
+
+            async def is_authenticated(page_to_check: Any) -> bool:
+                try:
+                    validate_action_page_url(action_config, getattr(page_to_check, "url", ""))
+                    return True
+                except ActionPageError:
+                    return False
+
+            async def run_session_checkpoint(page_to_check: Any, checkpoint: str) -> None:
+                nonlocal recovery_attempted
+                nonlocal total_recovery_attempts
+                nonlocal recovery_steps
+                nonlocal last_session_state
+                nonlocal last_page_title
+                nonlocal current_host
+                if (
+                    guardian is None
+                    or not bool(action_config.get("requires_authenticated_session", True))
+                    or not bool(action_config.get("session_guardian_enabled", True))
+                ):
+                    return
+                started_at = time.monotonic()
+                result = await guardian.ensure_authenticated(
+                    page_to_check,
+                    action_config,
+                    is_authenticated=is_authenticated,
+                    checkpoint=checkpoint,
+                )
+                last_session_state = result.state.state
+                last_page_title = result.state.title
+                current_host = result.state.current_host
+                total_recovery_attempts += result.recovery_attempts
+                recovery_attempted = recovery_attempted or result.recovery_attempted
+                recovery_steps.extend(result.recovery_steps)
+                checkpoint_diagnostics.append(
+                    {
+                        "checkpoint": checkpoint,
+                        "session_state": result.state.state,
+                        "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                        "recovery_attempted": result.recovery_attempted,
+                        "recovery_attempts": result.recovery_attempts,
+                        "result": "success" if result.ok else "failed",
+                        "current_host": result.state.current_host,
+                        "last_page_title": result.state.title,
+                    }
+                )
+                if not result.ok:
+                    diagnostics = result.diagnostics()
+                    diagnostics["checkpoint_diagnostics"] = checkpoint_diagnostics
+                    raise SessionGuardianError(
+                        session_failure_message(result.state.state, result.state.reason),
+                        diagnostics,
+                    )
+
             if browser_mode == "desktop_browser":
                 connection = await provider.connect(p, f"action-{nome_arquivo}")
                 browser = connection.browser
                 context = connection.context
-                page = await select_desktop_page_for_action(action_config, context, connection.page)
+                try:
+                    page = await select_desktop_page_for_action(action_config, context, connection.page)
+                except ActionPageError as exc:
+                    if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
+                        raise
+                    page = connection.page
+                await run_session_checkpoint(page, "before_action_auth_check")
                 _LOGGER.info("[FAST-TRACK] Pagina desktop do sistema alvo selecionada.")
             else:
                 # Mantem o fluxo historico do Browserless: sessao isolada, nova
@@ -1067,6 +1136,8 @@ async def executar_acao_rapida(
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
 
                 logging.info(f"[FAST-TRACK] Executando passo: {tipo_acao} em {seletor}")
+                if browser_mode == "desktop_browser":
+                    await run_session_checkpoint(page, "before_step_auth_check")
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
                     try:
@@ -1098,6 +1169,8 @@ async def executar_acao_rapida(
                             if browser_mode == "desktop_browser":
                                 validate_action_page_url(action_config, nova_aba.url)
                             page = nova_aba
+                            if browser_mode == "desktop_browser":
+                                await run_session_checkpoint(page, "after_new_page_check")
                             logging.info(f"[NAVEGAÇÃO] Popup/Nova Aba detetada! Foco transferido para: {page.url}")
 
                         except ActionPageError:
@@ -1117,6 +1190,7 @@ async def executar_acao_rapida(
                         await asyncio.sleep(2)
                         if browser_mode == "desktop_browser":
                             validate_action_page_url(action_config, page.url)
+                            await run_session_checkpoint(page, "after_step_stability_check")
 
                     elif tipo_acao == "preencher":
                         if "variavel" in passo and dados_variaveis and str(passo["variavel"]) in dados_variaveis:
@@ -1173,6 +1247,7 @@ async def executar_acao_rapida(
 
             await asyncio.sleep(1)
             if browser_mode == "desktop_browser":
+                await run_session_checkpoint(page, "final_auth_check")
                 validate_action_page_url(action_config, page.url)
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
@@ -1187,7 +1262,18 @@ async def executar_acao_rapida(
                 "dados_extraidos": dados_extraidos,
                 "passos_executados": len(passos_playwright),
                 "final_page": {"title": final_title, "url": _safe_result_url(page.url)},
+                "session_state": last_session_state or ("authenticated_system" if browser_mode == "desktop_browser" else ""),
+                "recovery_attempts": total_recovery_attempts,
+                "recovery_steps": recovery_steps,
+                "recovery_attempted": recovery_attempted,
+                "operator_action_required": False,
+                "last_page_title": last_page_title,
+                "current_host": current_host,
+                "checkpoint_diagnostics": checkpoint_diagnostics,
             }
+    except SessionGuardianError as exc:
+        _LOGGER.info(f"[ERRO] Sessao invalida na execução rápida '{nome_acao}': {exc}")
+        return {"status": "erro", "motivo": str(exc), "page_diagnostics": exc.diagnostics}
     except ActionPageError as exc:
         _LOGGER.info(f"[ERRO] Falha operacional na execução rápida '{nome_acao}': {exc}")
         return {"status": "erro", "motivo": str(exc), "page_diagnostics": exc.diagnostics}

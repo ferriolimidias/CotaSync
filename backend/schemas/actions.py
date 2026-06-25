@@ -43,9 +43,14 @@ class ActionSummary(BaseModel):
     external_login_url: str | None = None
     access_profile_name: str | None = None
     access_profile_email_or_identifier: str | None = None
+    microsoft_saved_account_identifier: str | None = None
     microsoft_saved_account_selector: str | None = None
     microsoft_saved_account_text: str | None = None
+    expected_system_host: str | None = None
+    microsoft_hosts: list[str] = Field(default_factory=list)
     requires_authenticated_session: bool = True
+    session_guardian_enabled: bool = True
+    legacy_unconfigured: bool = False
     action_timeout_seconds: int | None = None
     browser_mode: str = "browserless"
     url_inicial: str | None = None

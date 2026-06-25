@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
+from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
 
 logger = logging.getLogger("cotasync.actions")
 
@@ -139,8 +140,64 @@ def _extraction_targets(data: dict[str, Any], raw_steps: Any) -> list[str]:
     return targets
 
 
+def _default_access_profile() -> dict[str, Any]:
+    try:
+        return load_current_external_system()
+    except Exception:
+        return dict(DEFAULT_ACCESS_PROFILE)
+
+
+def action_has_access_profile(data: dict[str, Any]) -> bool:
+    return bool(
+        str(data.get("access_profile_name") or "").strip()
+        and (
+            str(data.get("microsoft_saved_account_identifier") or "").strip()
+            or str(data.get("access_profile_email_or_identifier") or "").strip()
+        )
+        and str(data.get("microsoft_saved_account_text") or "").strip()
+        and str(data.get("expected_system_host") or "").strip()
+    )
+
+
+def enrich_action_access_profile(data: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(data)
+    profile = _default_access_profile()
+    identifier = str(
+        enriched.get("microsoft_saved_account_identifier")
+        or enriched.get("access_profile_email_or_identifier")
+        or profile.get("microsoft_saved_account_identifier")
+        or profile.get("access_profile_email_or_identifier")
+        or ""
+    ).strip()
+    defaults = {
+        "access_profile_name": profile.get("access_profile_name") or DEFAULT_ACCESS_PROFILE["access_profile_name"],
+        "access_profile_email_or_identifier": identifier,
+        "microsoft_saved_account_identifier": identifier,
+        "microsoft_saved_account_selector": profile.get("microsoft_saved_account_selector") or "",
+        "microsoft_saved_account_text": (
+            profile.get("microsoft_saved_account_text")
+            or DEFAULT_ACCESS_PROFILE["microsoft_saved_account_text"]
+        ),
+        "expected_system_host": profile.get("expected_system_host") or DEFAULT_ACCESS_PROFILE["expected_system_host"],
+        "microsoft_hosts": profile.get("microsoft_hosts") or DEFAULT_ACCESS_PROFILE["microsoft_hosts"],
+        "requires_authenticated_session": True,
+        "session_guardian_enabled": True,
+    }
+    for key, value in defaults.items():
+        if key in {"requires_authenticated_session", "session_guardian_enabled"}:
+            enriched[key] = bool(enriched.get(key, value))
+        elif key == "microsoft_hosts":
+            raw_hosts = enriched.get(key)
+            enriched[key] = raw_hosts if isinstance(raw_hosts, list) and raw_hosts else list(value)
+        elif not str(enriched.get(key) or "").strip():
+            enriched[key] = value
+    return enriched
+
+
 def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDetail:
     data = raw_action if isinstance(raw_action, dict) else {}
+    has_profile_metadata = action_has_access_profile(data)
+    normalized_profile = enrich_action_access_profile(data)
     name = str(data.get("nome_amigavel") or data.get("name") or key).strip() or key
     description = str(data.get("descricao") or data.get("description") or "").strip()
     raw_steps = data.get("passos_playwright", [])
@@ -182,11 +239,28 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ai_recovery_enabled=bool(data.get("ai_recovery_enabled", False)),
         external_system_name=str(data.get("external_system_name") or "").strip() or None,
         external_login_url=str(data.get("external_login_url") or "").strip() or None,
-        access_profile_name=str(data.get("access_profile_name") or "").strip() or None,
-        access_profile_email_or_identifier=str(data.get("access_profile_email_or_identifier") or "").strip() or None,
-        microsoft_saved_account_selector=str(data.get("microsoft_saved_account_selector") or "").strip() or None,
-        microsoft_saved_account_text=str(data.get("microsoft_saved_account_text") or "").strip() or None,
-        requires_authenticated_session=bool(data.get("requires_authenticated_session", True)),
+        access_profile_name=str(normalized_profile.get("access_profile_name") or "").strip() or None,
+        access_profile_email_or_identifier=str(
+            normalized_profile.get("access_profile_email_or_identifier") or ""
+        ).strip() or None,
+        microsoft_saved_account_identifier=str(
+            normalized_profile.get("microsoft_saved_account_identifier") or ""
+        ).strip() or None,
+        microsoft_saved_account_selector=str(
+            normalized_profile.get("microsoft_saved_account_selector") or ""
+        ).strip() or None,
+        microsoft_saved_account_text=str(
+            normalized_profile.get("microsoft_saved_account_text") or ""
+        ).strip() or None,
+        expected_system_host=str(normalized_profile.get("expected_system_host") or "").strip() or None,
+        microsoft_hosts=(
+            normalized_profile.get("microsoft_hosts")
+            if isinstance(normalized_profile.get("microsoft_hosts"), list)
+            else []
+        ),
+        requires_authenticated_session=bool(normalized_profile.get("requires_authenticated_session", True)),
+        session_guardian_enabled=bool(normalized_profile.get("session_guardian_enabled", True)),
+        legacy_unconfigured=not has_profile_metadata,
         action_timeout_seconds=(
             int(data["action_timeout_seconds"])
             if str(data.get("action_timeout_seconds") or "").strip().isdigit()
