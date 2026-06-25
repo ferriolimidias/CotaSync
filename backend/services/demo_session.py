@@ -49,7 +49,19 @@ _DATA_DIR = _ROOT / "data"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _DEMO_SESSIONS_DIR = _DATA_DIR / "demo_sessions"
 _MAX_RECORDED_STEPS = 200
-_REPLAY_STEP_TIMEOUT_MS = 5000
+
+
+def _env_seconds(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+_REPLAY_STEP_TIMEOUT_MS = _env_seconds("COTASYNC_STEP_TIMEOUT_SECONDS", 30) * 1000
+_REPLAY_ACTION_TIMEOUT_MS = _env_seconds("COTASYNC_ACTION_TIMEOUT_SECONDS", 180) * 1000
+_REPLAY_NAVIGATION_TIMEOUT_MS = _env_seconds("COTASYNC_NAVIGATION_TIMEOUT_SECONDS", 45) * 1000
+_REPLAY_FALLBACK_DELAY_MS = 1200
 _MANUAL_CONFIRMATION_BLOCK_TEXTS = (
     "acesso bloqueado",
     "access blocked",
@@ -235,6 +247,13 @@ def _safe_page_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def _safe_url_host(url: str) -> str:
+    try:
+        return urlsplit(str(url or "")).hostname or ""
+    except Exception:
+        return ""
+
+
 def _expected_replay_url(saved_url: Any) -> str:
     candidate = str(saved_url or "").strip()
     if urlsplit(candidate).scheme in {"http", "https"}:
@@ -252,6 +271,71 @@ def _safe_file_name(value: str) -> str:
 
 def _is_sensitive_selector(selector: str) -> bool:
     return bool(re.search(r"password|senha|secret|token|otp|captcha", selector, flags=re.IGNORECASE))
+
+
+def _title_label(value: str) -> str:
+    text = re.sub(r"[_\-]+", " ", str(value or "")).strip()
+    if not text:
+        return "Campo"
+    return " ".join(part.capitalize() for part in text.split())
+
+
+def _suggest_variable_key(selector: str, index: int = 0) -> str:
+    raw = str(selector or "")
+    lowered = raw.casefold()
+    direct = (
+        ("edtgrupo", "grupo"),
+        ("grupo", "grupo"),
+        ("edtcota", "cota"),
+        ("cota", "cota"),
+        ("cpf", "cpf"),
+        ("cliente", "cliente"),
+        ("data_base", "data_base"),
+        ("data base", "data_base"),
+    )
+    for needle, key in direct:
+        if needle in lowered:
+            return key
+    if "select" in lowered:
+        return "tipo_consulta" if index <= 1 else f"select_{index + 1}"
+    tokens = [
+        token.lower()
+        for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", raw)
+        if token.lower() not in {"input", "textarea", "select", "name", "nth", "of", "type", "ctl00", "conteudo"}
+    ]
+    cleaned = "_".join(tokens[-2:]).strip("_")
+    return cleaned or f"campo_{index + 1}"
+
+
+def _normalize_variable_key(value: Any, fallback_selector: str = "", index: int = 0) -> str:
+    candidate = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    if candidate.startswith("conteudo_edtgrupo") or candidate == "edtgrupo":
+        return "grupo"
+    if candidate.startswith("conteudo_edtcota") or candidate == "edtcota":
+        return "cota"
+    if candidate in {"select", "select_1"}:
+        return "tipo_consulta"
+    return candidate or _suggest_variable_key(fallback_selector, index)
+
+
+def _objective_extraction_keywords(objective: str) -> list[str]:
+    lowered = str(objective or "").casefold()
+    keywords = ["valor", "parcela", "valor da parcela", "parcela atual", "vencimento", "número de parcelas", "numero de parcelas", "status"]
+    if "parcela" in lowered or "valor" in lowered:
+        return keywords
+    return ["resultado", "status", "valor", "vencimento"]
+
+
+def _target_label(step: dict[str, Any], step_type: str, selector: str) -> str:
+    if step.get("nome"):
+        return _title_label(str(step.get("nome")))
+    if step.get("variavel"):
+        return _title_label(str(step.get("variavel")))
+    if step_type == "download_pdf":
+        return "Download"
+    if selector:
+        return "Elemento da rotina"
+    return "Página"
 
 
 def _storage_state_path(session_id: str) -> Path:
@@ -1115,6 +1199,17 @@ class DemoSessionManager:
             for item in candidates
             if isinstance(item, dict) and str(item.get("selector") or "").strip()
         ] if isinstance(candidates, list) else []
+        objective_keywords = _objective_extraction_keywords(str(session.guided_learning.get("objective") or ""))
+        focused: list[dict[str, str]] = []
+        for item in session.output_candidates:
+            haystack = f"{item.get('label', '')} {item.get('preview', '')}".casefold()
+            if any(keyword.casefold() in haystack for keyword in objective_keywords):
+                focused.append({**item, "objective_match": "true"})
+        if focused:
+            focused_selectors = {item.get("selector") for item in focused}
+            session.output_candidates = focused + [
+                item for item in session.output_candidates if item.get("selector") not in focused_selectors
+            ]
         session.recording = False
         session.status = "autenticada"
         if not session.steps:
@@ -1173,13 +1268,15 @@ class DemoSessionManager:
 
         steps = [dict(step) for step in session.steps]
         learning_events = [dict(event) for event in session.learning_events]
-        variables: list[str] = []
+        variable_schema: list[dict[str, Any]] = []
+        variables: list[dict[str, Any]] = []
         for index_raw, variable_raw in variable_names.items():
             try:
                 index = int(index_raw)
             except (TypeError, ValueError):
                 continue
-            variable = re.sub(r"[^a-zA-Z0-9_]+", "_", str(variable_raw or "").strip()).strip("_")
+            selector = str(steps[index].get("seletor") or "") if 0 <= index < len(steps) else ""
+            variable = _normalize_variable_key(variable_raw, selector, index)
             if not variable or index < 0 or index >= len(steps) or steps[index].get("tipo") != "preencher":
                 continue
             steps[index]["variavel"] = variable
@@ -1188,8 +1285,16 @@ class DemoSessionManager:
                 if event.get("step_index") == index and event.get("event_type") == "fill":
                     event["variable_key"] = variable
                     event["value_template"] = f"{{{{{variable}}}}}"
-            if variable not in variables:
-                variables.append(variable)
+            if not any(item.get("key") == variable for item in variable_schema):
+                variable_schema.append(
+                    {
+                        "key": variable,
+                        "label": _title_label(variable),
+                        "required": True,
+                        "source_step_index": index,
+                    }
+                )
+                variables.append({"key": variable, "label": _title_label(variable), "required": True})
 
         requested_extractions = extraction_targets if isinstance(extraction_targets, list) else []
         if requested_extractions or extract_visible_text:
@@ -1312,6 +1417,15 @@ class DemoSessionManager:
         # gravação; a pré-síntese de stop_recording continua disponível na UI.
         ai_review = await analyze_recorded_action_with_ai(learned_action)
         learned_action.update(ai_review)
+        reviewed_variables = learned_action.get("variable_schema")
+        if isinstance(reviewed_variables, list) and reviewed_variables:
+            by_key = {str(item.get("key") or ""): item for item in reviewed_variables if isinstance(item, dict)}
+            for item in variable_schema:
+                reviewed = by_key.get(str(item.get("key") or ""))
+                if isinstance(reviewed, dict):
+                    item["label"] = str(reviewed.get("label") or item.get("label") or item.get("key")).strip()
+        learned_action["variable_schema"] = variable_schema
+        learned_action["variaveis_necessarias"] = variables
         if not learned_action["objective"]:
             learned_action["objective"] = str(
                 learned_action.get("ai_observer_summary") or f"Executar a ação {action_name}"
@@ -1410,12 +1524,29 @@ class DemoSessionManager:
         extracted: dict[str, str] = {}
         downloaded_files: list[dict[str, object]] = []
         selector_diagnostics: list[dict[str, Any]] = []
+        step_diagnostics: list[dict[str, Any]] = []
         automatically_revalidated = False
+        action_deadline = time.monotonic() + (_REPLAY_ACTION_TIMEOUT_MS / 1000)
         for step_index, step in enumerate(steps):
+            if time.monotonic() >= action_deadline:
+                diagnostic = {
+                    "step_index": step_index,
+                    "action_type": "timeout",
+                    "target_label": "Ação",
+                    "wait_strategy": "action_timeout",
+                    "waited_ms": _REPLAY_ACTION_TIMEOUT_MS,
+                    "result": "timeout",
+                    "condition": "COTASYNC_ACTION_TIMEOUT_SECONDS",
+                }
+                raise DemoReplayStepError(
+                    "O sistema demorou para abrir a próxima tela dentro do tempo total da ação.",
+                    {"step_diagnostics": [diagnostic], "retryable": True},
+                )
             if not isinstance(step, dict):
                 continue
             step_type = str(step.get("tipo") or "").strip().lower()
             selector = str(step.get("seletor") or "").strip()
+            step_diag: dict[str, Any] | None = None
             try:
                 step_expected_url = _expected_replay_url(step.get("expected_url_before") or expected_url)
                 authenticated, revalidated = await self._revalidate_for_replay(session, step_expected_url)
@@ -1431,7 +1562,14 @@ class DemoSessionManager:
 
                 locator: Locator | None = None
                 state: dict[str, Any] | None = None
-                if selector:
+                step_diag = await self._base_step_diagnostic(
+                    page,
+                    step_index,
+                    step_type,
+                    _target_label(step, step_type, selector),
+                    time.monotonic(),
+                )
+                if selector and step_type != "extrair_texto":
                     locator, state = await self._wait_actionable_locator(page, selector)
                     state.update({"step_index": step_index, "step_type": step_type})
                     selector_diagnostics.append(state)
@@ -1443,9 +1581,22 @@ class DemoSessionManager:
                         raise DemoSessionError(f"Valor obrigatorio ausente: {variable}.")
                     assert locator is not None
                     await locator.fill(str(value), timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy="actionable_selector",
+                            result="success",
+                        )
+                    )
                 elif step_type == "clicar":
                     assert locator is not None and state is not None
-                    pages_before = {id(item) for item in session.context.pages if not item.is_closed()}
+                    page_task: asyncio.Task[Any] | None = asyncio.create_task(
+                        session.context.wait_for_event("page", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    )
+                    download_task: asyncio.Task[Any] | None = asyncio.create_task(
+                        page.wait_for_event("download", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    )
                     await locator.scroll_into_view_if_needed(timeout=_REPLAY_STEP_TIMEOUT_MS)
                     click_marker = f"__cotasyncReplayClick_{run_id.replace('-', '')}_{step_index}"
                     await locator.evaluate(
@@ -1477,39 +1628,100 @@ class DemoSessionManager:
                             await page.evaluate("marker => { delete window[marker]; }", click_marker)
                         except Exception:
                             pass
-                    recorded_wait_ms = min(max(int(step.get("elapsed_ms") or 0), 500), 5000)
-                    await page.wait_for_timeout(recorded_wait_ms)
-                    new_pages = [
-                        item
-                        for item in session.context.pages
-                        if not item.is_closed() and id(item) not in pages_before
-                    ]
-                    if new_pages:
-                        page = new_pages[-1]
-                        await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
-                        if action_browser_mode == "desktop_browser":
-                            validate_action_page_url(action, page.url)
-                        await self._set_active_page(session, page)
-                        state["new_page_detected"] = True
+                    wait_strategy = "dom_stable_then_fallback_delay"
+                    wait_result = "success"
+                    condition = ""
                     expected_after = str(step.get("expected_url_after") or "").strip()
-                    if expected_after and _safe_page_url(page.url) != _safe_page_url(expected_after):
-                        await page.wait_for_url(_safe_page_url(expected_after), timeout=_REPLAY_STEP_TIMEOUT_MS)
                     expected_selector = str(step.get("expected_selector_after") or "").strip()
-                    if expected_selector:
-                        await page.locator(expected_selector).first.wait_for(
-                            state="visible",
-                            timeout=_REPLAY_STEP_TIMEOUT_MS,
+                    try:
+                        opened_page = await self._await_new_page_if_ready(
+                            session,
+                            action,
+                            page_task,
+                            500 if not step.get("opened_new_page") else _REPLAY_STEP_TIMEOUT_MS,
                         )
-                    state["recorded_wait_ms"] = recorded_wait_ms
+                        if opened_page is not None:
+                            page = opened_page
+                            state["new_page_detected"] = True
+                            wait_strategy = "new_page"
+                            wait_result = "new_page"
+                        if expected_selector:
+                            await page.locator(expected_selector).first.wait_for(
+                                state="visible",
+                                timeout=_REPLAY_STEP_TIMEOUT_MS,
+                            )
+                            wait_strategy = "expected_selector_after"
+                            condition = "expected_selector_after"
+                        elif expected_after and _safe_page_url(page.url) != _safe_page_url(expected_after):
+                            await page.wait_for_url(_safe_page_url(expected_after), timeout=_REPLAY_NAVIGATION_TIMEOUT_MS)
+                            wait_strategy = "expected_url_after"
+                            condition = _safe_page_url(expected_after)
+                        elif await self._capture_download_if_ready(
+                            download_task,
+                            action_key,
+                            run_id,
+                            step_index,
+                            downloaded_files,
+                            timeout_ms=1200,
+                        ):
+                            wait_strategy = "download"
+                            wait_result = "download"
+                        else:
+                            await self._wait_dom_stable(page, _REPLAY_STEP_TIMEOUT_MS)
+                            recorded_wait_ms = min(
+                                max(int(step.get("elapsed_ms") or 0), _REPLAY_FALLBACK_DELAY_MS),
+                                5000,
+                            )
+                            await page.wait_for_timeout(recorded_wait_ms)
+                            state["recorded_wait_ms"] = recorded_wait_ms
+                    finally:
+                        self._cancel_replay_task(page_task)
+                        self._cancel_replay_task(download_task)
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy=wait_strategy,
+                            result=wait_result,
+                            condition=condition,
+                        )
+                    )
                     state["wait_hint"] = str(step.get("wait_hint") or "")
                     state["replay_hint"] = str(step.get("replay_hint") or "")
                 elif step_type == "teclar":
                     await page.keyboard.press(str(step.get("valor") or "Enter"))
-                    await page.wait_for_timeout(300)
+                    await self._wait_dom_stable(page, _REPLAY_STEP_TIMEOUT_MS)
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy="dom_stable",
+                            result="success",
+                        )
+                    )
                 elif step_type == "extrair_texto":
-                    assert locator is not None
-                    text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
-                    extracted[str(step.get("nome") or selector)] = text.strip()
+                    label = str(step.get("nome") or selector)
+                    result = "success"
+                    try:
+                        locator = page.locator(selector).first
+                        await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        extracted[label] = text.strip()
+                        if not text.strip():
+                            result = "target_empty"
+                    except Exception as extraction_exc:
+                        extracted[label] = ""
+                        result = "target_not_found"
+                        if step_diag is not None:
+                            step_diag["error"] = str(extraction_exc)[:500]
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy="extraction_target",
+                            result=result,
+                        )
+                    )
                 elif step_type == "download_pdf":
                     from backend.motor_browser import _extrator_universal_de_download
 
@@ -1520,6 +1732,14 @@ class DemoSessionManager:
                     )
                     await _extrator_universal_de_download(page, selector, str(download_path))
                     downloaded_files.append(runtime_file_metadata(download_path))
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy="download",
+                            result="download",
+                        )
+                    )
                 if action_browser_mode == "desktop_browser":
                     validate_action_page_url(action, session.page.url)
             except ActionPageError as exc:
@@ -1527,6 +1747,16 @@ class DemoSessionManager:
             except DemoSessionError:
                 raise
             except Exception as exc:
+                if step_diag is not None:
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy=str(step_diag.get("wait_strategy") or "step_execution"),
+                            result="timeout" if isinstance(exc, PlaywrightTimeoutError) else "error",
+                            error=str(exc),
+                        )
+                    )
                 diagnostics = await self._capture_step_diagnostics(
                     session,
                     run_id,
@@ -1537,7 +1767,11 @@ class DemoSessionManager:
                 )
                 raise DemoReplayStepError(
                     f"Falha ao executar o passo '{step_type}'. Consulte o diagnostico da run.",
-                    diagnostics,
+                    {
+                        "selector_diagnostics": [diagnostics],
+                        "step_diagnostics": step_diagnostics,
+                        "retryable": isinstance(exc, PlaywrightTimeoutError),
+                    },
                 ) from exc
 
         if action_browser_mode == "desktop_browser":
@@ -1561,6 +1795,9 @@ class DemoSessionManager:
             "passos_executados": len(steps),
             "session_revalidated": automatically_revalidated,
             "selector_diagnostics": selector_diagnostics,
+            "step_diagnostics": step_diagnostics,
+            "input_variables": {str(key): "[informado]" for key in variables.keys()},
+            "retryable": False,
             "final_page": {"title": final_title, "url": _safe_page_url(session.page.url)},
         }
 
@@ -1587,6 +1824,118 @@ class DemoSessionManager:
             "visible": visible,
             "enabled": enabled,
         }
+
+    async def _current_title(self, page: Page) -> str:
+        try:
+            return (await page.title()).strip()[:200]
+        except Exception:
+            return ""
+
+    async def _base_step_diagnostic(
+        self,
+        page: Page,
+        step_index: int,
+        step_type: str,
+        target_label: str,
+        started_at: float,
+    ) -> dict[str, Any]:
+        return {
+            "step_index": step_index,
+            "action_type": step_type,
+            "target_label": target_label,
+            "wait_strategy": "not_started",
+            "waited_ms": 0,
+            "result": "running",
+            "current_url_host": _safe_url_host(page.url),
+            "current_title": await self._current_title(page),
+            "_started_at": started_at,
+        }
+
+    async def _finish_step_diagnostic(
+        self,
+        page: Page,
+        diagnostic: dict[str, Any],
+        *,
+        wait_strategy: str,
+        result: str,
+        error: str = "",
+        condition: str = "",
+    ) -> dict[str, Any]:
+        started_at = float(diagnostic.pop("_started_at", time.monotonic()))
+        diagnostic.update(
+            {
+                "wait_strategy": wait_strategy,
+                "waited_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                "result": result,
+                "current_url_host": _safe_url_host(page.url),
+                "current_title": await self._current_title(page),
+            }
+        )
+        if error:
+            diagnostic["error"] = str(error)[:500]
+        if condition:
+            diagnostic["condition"] = condition[:500]
+        return diagnostic
+
+    async def _wait_dom_stable(self, page: Page, timeout_ms: int) -> None:
+        try:
+            await page.wait_for_load_state("networkidle", timeout=min(timeout_ms, _REPLAY_NAVIGATION_TIMEOUT_MS))
+            return
+        except Exception:
+            pass
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=min(timeout_ms, _REPLAY_NAVIGATION_TIMEOUT_MS))
+        except Exception:
+            await page.wait_for_timeout(_REPLAY_FALLBACK_DELAY_MS)
+
+    async def _await_new_page_if_ready(
+        self,
+        session: DemoBrowserSession,
+        action: dict[str, Any],
+        page_task: asyncio.Task[Any] | None,
+        timeout_ms: int,
+    ) -> Page | None:
+        if page_task is None:
+            return None
+        try:
+            page = await asyncio.wait_for(asyncio.shield(page_task), timeout=timeout_ms / 1000)
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            return None
+        if not isinstance(page, Page) or page.is_closed():
+            return None
+        await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_NAVIGATION_TIMEOUT_MS)
+        validate_action_page_url(action, page.url)
+        await self._set_active_page(session, page)
+        return page
+
+    async def _capture_download_if_ready(
+        self,
+        download_task: asyncio.Task[Any] | None,
+        action_key: str,
+        run_id: str,
+        step_index: int,
+        downloaded_files: list[dict[str, object]],
+        timeout_ms: int = 500,
+    ) -> bool:
+        if download_task is None:
+            return False
+        try:
+            download = await asyncio.wait_for(asyncio.shield(download_task), timeout=timeout_ms / 1000)
+        except asyncio.TimeoutError:
+            return False
+        except Exception:
+            return False
+        suffix = Path(str(getattr(download, "suggested_filename", "") or "")).suffix or ".pdf"
+        download_path = runtime_download_path(action_key, f"{run_id}-{step_index}", suffix)
+        await download.save_as(str(download_path))
+        downloaded_files.append(runtime_file_metadata(download_path))
+        return True
+
+    def _cancel_replay_task(self, task: asyncio.Task[Any] | None) -> None:
+        if task is not None and not task.done():
+            task.cancel()
 
     async def _capture_step_diagnostics(
         self,

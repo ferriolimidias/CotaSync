@@ -142,6 +142,33 @@ class OperationalSummaryTests(unittest.TestCase):
         )
         self.assertIn("Arquivo disponível", summary)
 
+    def test_missing_valor_parcela_target_has_specific_summary(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(
+                objective="Consultar valor da parcela atual",
+                extraction_targets=["valor_da_parcela_atual"],
+            ),
+            status="success",
+            result_payload={"dados_extraidos": {"valor_da_parcela_atual": ""}},
+        )
+        self.assertEqual(
+            summary,
+            "A ação foi executada, mas não encontrei o valor da parcela atual na tela final.",
+        )
+
+    def test_timeout_with_step_diagnostics_has_actionable_summary(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(),
+            status="error",
+            error_message="timeout esperando expected_selector_after",
+            result_payload={"step_diagnostics": [{"result": "timeout", "step_index": 1}]},
+        )
+        self.assertEqual(
+            summary,
+            "Não consegui concluir a ação porque o sistema demorou para abrir a próxima tela. "
+            "Tente novamente ou reautentique a sessão se necessário.",
+        )
+
     def test_fallback_works_without_openai_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             summary = asyncio.run(
@@ -344,8 +371,21 @@ class OperationalSummaryTests(unittest.TestCase):
     def test_frontend_chat_keeps_raw_extracted_data_in_expander(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
         self.assertIn('st.expander("Ver dados extraídos", expanded=False)', source)
+        self.assertIn('st.expander("Ver diagnóstico técnico", expanded=False)', source)
         self.assertIn('st.expander("Ver JSON/result_payload", expanded=False)', source)
         self.assertNotIn('st.write("Textos / dados extraídos nesta execução:")', source)
+
+    def test_frontend_quick_execution_uses_friendly_variable_labels_and_runs_api(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("_rotulo_variavel(variable)", source)
+        self.assertIn('f"/api/actions/{action_id}/run"', source)
+        self.assertIn('"requested_by": "streamlit-quick"', source)
+
+    def test_frontend_objective_extraction_mentions_parcela_targets(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('"valor da parcela"', source)
+        self.assertIn('"parcela atual"', source)
+        self.assertIn('"Extrair texto visível da tela final (menos preciso)"', source)
 
 
 if __name__ == "__main__":

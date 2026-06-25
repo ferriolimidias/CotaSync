@@ -139,6 +139,40 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["output_schema"]["main_file"]["type"], "file")
         self.assertTrue(action["download_expected"])
 
+    def test_variable_names_are_suggested_as_friendly_schema_and_renamable(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = [
+            {"tipo": "preencher", "seletor": "#ctl00_Conteudo_edtGrupo", "valor": ""},
+            {"tipo": "preencher", "seletor": "#ctl00_Conteudo_edtCota", "valor": ""},
+            {"tipo": "preencher", "seletor": "select:nth-of-type(1)", "valor": ""},
+        ]
+        session.learning_events = [
+            {"step_index": 0, "event_type": "fill", "selector": "#ctl00_Conteudo_edtGrupo"},
+            {"step_index": 1, "event_type": "fill", "selector": "#ctl00_Conteudo_edtCota"},
+            {"step_index": 2, "event_type": "fill", "selector": "select:nth-of-type(1)"},
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            saved = asyncio.run(
+                manager.save_action(
+                    "session",
+                    "Consultar parcela",
+                    "Consulta.",
+                    {"0": "conteudo_edtgrupo", "1": "conteudo_edtcota", "2": "tipo_consulta"},
+                )
+            )
+        action = captured["acoes_conhecidas"]["Consultar parcela"]  # type: ignore[index]
+        self.assertEqual([item["key"] for item in action["variaveis_necessarias"]], ["grupo", "cota", "tipo_consulta"])
+        self.assertEqual([item["label"] for item in action["variable_schema"]], ["Grupo", "Cota", "Tipo Consulta"])
+        self.assertEqual([item["key"] for item in saved["variables"]], ["grupo", "cota", "tipo_consulta"])
+
 
 class OutputResultTests(unittest.TestCase):
     def test_run_keeps_deterministic_extraction(self) -> None:

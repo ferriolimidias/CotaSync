@@ -117,11 +117,19 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "passos_executados",
         "session_revalidated",
         "selector_diagnostics",
+        "step_diagnostics",
         "final_page",
+        "input_variables",
+        "retryable",
     ):
         value = result.get(key)
-        if value:
+        if value is not None and value != [] and value != {}:
             if key == "dados_extraidos" and isinstance(value, dict):
+                payload[key] = {
+                    str(item_key): mask_value_for_key(str(item_key), item)
+                    for item_key, item in value.items()
+                }
+            elif key == "input_variables" and isinstance(value, dict):
                 payload[key] = {
                     str(item_key): mask_value_for_key(str(item_key), item)
                     for item_key, item in value.items()
@@ -206,6 +214,8 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             _validate_desktop_result(action, result)
             run.status = "success"
             run.result_payload = _safe_result_payload(result)
+            if run.result_payload is not None:
+                run.result_payload.setdefault("input_variables", mask_variables(request.variables))
         else:
             result = await executar_acao_fast_track(action.key, request.variables, run.id)
             text = str(result.get("texto") or "").strip()
@@ -222,13 +232,30 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             _validate_desktop_result(action, result)
             run.status = "success"
             run.result_payload = _safe_result_payload(result)
+            if run.result_payload is not None:
+                run.result_payload.setdefault("input_variables", mask_variables(request.variables))
     except Exception as exc:
         safe_error = _safe_error_message(exc)
         logger.info("Run %s finalizada com erro do tipo %s", run.id, type(exc).__name__)
         run.status = "error"
         run.error_message = safe_error
         diagnostics = getattr(exc, "diagnostics", None)
-        run.result_payload = {"selector_diagnostics": [diagnostics]} if isinstance(diagnostics, dict) else None
+        if isinstance(diagnostics, dict):
+            payload: dict[str, Any] = {"retryable": bool(diagnostics.get("retryable", False))}
+            if isinstance(diagnostics.get("selector_diagnostics"), list):
+                payload["selector_diagnostics"] = diagnostics["selector_diagnostics"]
+            elif any(key in diagnostics for key in ("selector", "current_url", "page_title")):
+                payload["selector_diagnostics"] = [diagnostics]
+            elif diagnostics:
+                payload["selector_diagnostics"] = [diagnostics]
+            if isinstance(diagnostics.get("step_diagnostics"), list):
+                payload["step_diagnostics"] = diagnostics["step_diagnostics"]
+            elif isinstance(diagnostics.get("step_diagnostic"), dict):
+                payload["step_diagnostics"] = [diagnostics["step_diagnostic"]]
+            payload["input_variables"] = mask_variables(request.variables)
+            run.result_payload = payload
+        else:
+            run.result_payload = {"input_variables": mask_variables(request.variables), "retryable": False}
     finally:
         summary_result = await build_operational_summary_result(
             action,

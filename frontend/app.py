@@ -39,7 +39,7 @@ _DATA_DIR.mkdir(parents=True, exist_ok=True)
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from backend.agente import executar_acao_fast_track, processar_mensagem  # noqa: E402
+from backend.agente import processar_mensagem  # noqa: E402
 from backend.services.ai_observer import openai_configuration_status  # noqa: E402
 from frontend.api_client import DemoApiError, demo_api_request, get_actions_for_ui  # noqa: E402
 
@@ -162,12 +162,34 @@ def _render_desktop_view_access(state_suffix: str) -> None:
 
 
 def _nome_variavel_sugerida(selector: str, index: int) -> str:
+    lowered = str(selector or "").casefold()
+    if "edtgrupo" in lowered or "grupo" in lowered:
+        return "grupo"
+    if "edtcota" in lowered or "cota" in lowered:
+        return "cota"
+    if "cpf" in lowered:
+        return "cpf"
+    if "cliente" in lowered:
+        return "cliente"
+    if "data base" in lowered or "database" in lowered or "data_base" in lowered:
+        return "data_base"
+    if "select" in lowered:
+        return "tipo_consulta"
     tokens = [
         token.lower()
         for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", str(selector or ""))
-        if token.lower() not in {"input", "textarea", "name", "nth", "of", "type"}
+        if token.lower() not in {"input", "textarea", "select", "name", "nth", "of", "type", "ctl00", "conteudo"}
     ]
     return "_".join(tokens[-2:]) or f"campo_{index + 1}"
+
+
+def _rotulo_variavel(variable: object) -> tuple[str, str, bool]:
+    if isinstance(variable, dict):
+        key = str(variable.get("key") or "").strip()
+        label = str(variable.get("label") or key).strip() or key
+        return key, label, bool(variable.get("required", True))
+    key = str(variable or "").strip()
+    return key, key, True
 
 
 def _render_demo_v01() -> None:
@@ -464,6 +486,7 @@ def _render_demo_v01() -> None:
                 st.info(str(synthesis.get("ai_observer_summary") or "Análise local concluída."))
             st.markdown("**Passos capturados**")
             variable_names: dict[str, str] = {}
+            captured_variable_rows: list[tuple[int, str, str]] = []
             for step in recorded_steps:
                 if not isinstance(step, dict):
                     continue
@@ -472,9 +495,14 @@ def _render_demo_v01() -> None:
                 selector = str(step.get("seletor", ""))
                 st.code(f"{index + 1}. {step_type} → {selector}", language=None)
                 if step_type == "preencher":
+                    captured_variable_rows.append((index, selector, _nome_variavel_sugerida(selector, index)))
+
+            if captured_variable_rows:
+                st.markdown("**Revisar variáveis**")
+                for index, selector, suggested in captured_variable_rows:
                     variable_names[str(index)] = st.text_input(
-                        f"Nome da variável do passo {index + 1}",
-                        value=_nome_variavel_sugerida(selector, index),
+                        f"Rótulo/chave da variável do passo {index + 1}",
+                        value=suggested,
                         key=f"demo_variable_{session_id}_{index}",
                     )
 
@@ -525,6 +553,15 @@ def _render_demo_v01() -> None:
             ai_candidates = synthesis.get("suggested_extraction_targets", []) if isinstance(synthesis, dict) else []
             if isinstance(ai_candidates, list):
                 candidates = candidates + [item for item in ai_candidates if isinstance(item, dict)]
+            objective_terms = ("valor", "parcela", "valor da parcela", "parcela atual", "vencimento", "número de parcelas", "numero de parcelas", "status")
+            objective_text = f"{action_objective} {expected_result}".casefold()
+            if any(term in objective_text for term in ("valor", "parcela")):
+                focused = [
+                    item for item in candidates
+                    if isinstance(item, dict)
+                    and any(term in f"{item.get('label', '')} {item.get('preview', '')}".casefold() for term in objective_terms)
+                ]
+                candidates = focused + [item for item in candidates if item not in focused]
             candidate_options = {
                 f"{item.get('label', 'resultado')}: {item.get('preview', '')}": item
                 for item in candidates
@@ -546,7 +583,7 @@ def _render_demo_v01() -> None:
                 placeholder="#resultado ou .valor-final",
             )
             extract_visible_text = st.checkbox(
-                "Extrair texto visível da tela final",
+                "Extrair texto visível da tela final (menos preciso)",
                 key=f"demo_extract_visible_{session_id}",
             )
             download_detected = bool(recording_result.get("download_detected"))
@@ -613,9 +650,11 @@ def _render_demo_v01() -> None:
                 st.info(observer_summary)
             run_variables: dict[str, str] = {}
             for variable in saved_action.get("variables", []):
-                variable_name = str(variable)
+                variable_name, variable_label, _required = _rotulo_variavel(variable)
+                if not variable_name:
+                    continue
                 run_variables[variable_name] = st.text_input(
-                    f"Valor para {variable_name}",
+                    variable_label,
                     placeholder="Ex.: PED-2002",
                     key=f"demo_run_variable_{session_id}_{variable_name}",
                 )
@@ -656,6 +695,10 @@ def _render_demo_v01() -> None:
                 if extracted:
                     with st.expander("Ver dados extraídos", expanded=False):
                         st.json(extracted)
+                diagnostics = payload.get("step_diagnostics") or payload.get("selector_diagnostics")
+                if diagnostics:
+                    with st.expander("Ver diagnóstico técnico", expanded=False):
+                        st.json(diagnostics)
                 with st.expander("Ver JSON/result_payload", expanded=False):
                     st.json(payload)
                 _render_runtime_downloads(
@@ -901,7 +944,7 @@ with st.sidebar:
         acao_sidebar_dados = acoes_sidebar.get(chave_acao, {}) if isinstance(acoes_sidebar, dict) else {}
         variaveis_necessarias = (
             [
-                variable.get("key")
+                variable
                 for variable in acao_sidebar_dados.get("variables", [])
                 if isinstance(variable, dict) and variable.get("required", True) and variable.get("key")
             ]
@@ -910,29 +953,46 @@ with st.sidebar:
         )
         dados_digitados: dict[str, str] = {}
         if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
-            for var_nome in variaveis_necessarias:
-                chave_var = str(var_nome)
+            for variable in variaveis_necessarias:
+                chave_var, rotulo_var, _required = _rotulo_variavel(variable)
                 if not chave_var:
                     continue
                 dados_digitados[chave_var] = st.text_input(
-                    f"Preencha {chave_var}",
+                    rotulo_var,
                     key=f"acao_var_{chave_acao}_{chave_var}",
                 )
         if st.button("🚀 Disparar Ação", use_container_width=True, key="acao_sidebar_btn"):
             if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
-                faltantes = [str(v) for v in variaveis_necessarias if not str(dados_digitados.get(str(v), "")).strip()]
+                faltantes = [
+                    _rotulo_variavel(v)[1]
+                    for v in variaveis_necessarias
+                    if not str(dados_digitados.get(_rotulo_variavel(v)[0], "")).strip()
+                ]
                 if faltantes:
                     st.warning(f"Preencha as variáveis obrigatórias: {', '.join(faltantes)}")
                 else:
                     st.session_state.messages.append({"role": "user", "content": chave_acao})
                     salvar_historico_disco(st.session_state.messages)
                     with st.spinner("Executando ação parametrizada..."):
-                        resultado_direto = asyncio.run(
-                            executar_acao_fast_track(
-                                chave_acao,
-                                dados_digitados,
-                            )
+                        action_id = quote(str(acao_sidebar_dados.get("id") or chave_acao), safe="")
+                        run_response = demo_api_request(
+                            "POST",
+                            f"/api/actions/{action_id}/run",
+                            {"variables": dados_digitados, "mode": "sync", "requested_by": "streamlit-quick"},
+                            api_base_url=API_BASE_URL,
+                            timeout=60,
                         )
+                        run = run_response.get("run", {})
+                        payload = run.get("result_payload") if isinstance(run, dict) else {}
+                        payload = payload if isinstance(payload, dict) else {}
+                        resultado_direto = {
+                            "texto": str(run.get("operational_summary") or "Execução concluída."),
+                            "result_payload": payload,
+                            "downloaded_files": payload.get("downloaded_files", []),
+                            "main_file": payload.get("main_file"),
+                            "status": run.get("status"),
+                            "estado": "NORMAL",
+                        }
                     if isinstance(resultado_direto, dict):
                         st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
                     st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
@@ -942,12 +1002,25 @@ with st.sidebar:
                 st.session_state.messages.append({"role": "user", "content": chave_acao})
                 salvar_historico_disco(st.session_state.messages)
                 with st.spinner("Executando ação rápida..."):
-                    resultado_direto = asyncio.run(
-                        executar_acao_fast_track(
-                            chave_acao,
-                            None,
-                        )
+                    action_id = quote(str(acao_sidebar_dados.get("id") or chave_acao), safe="")
+                    run_response = demo_api_request(
+                        "POST",
+                        f"/api/actions/{action_id}/run",
+                        {"variables": {}, "mode": "sync", "requested_by": "streamlit-quick"},
+                        api_base_url=API_BASE_URL,
+                        timeout=60,
                     )
+                    run = run_response.get("run", {})
+                    payload = run.get("result_payload") if isinstance(run, dict) else {}
+                    payload = payload if isinstance(payload, dict) else {}
+                    resultado_direto = {
+                        "texto": str(run.get("operational_summary") or "Execução concluída."),
+                        "result_payload": payload,
+                        "downloaded_files": payload.get("downloaded_files", []),
+                        "main_file": payload.get("main_file"),
+                        "status": run.get("status"),
+                        "estado": "NORMAL",
+                    }
                 if isinstance(resultado_direto, dict):
                     st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
                 st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))

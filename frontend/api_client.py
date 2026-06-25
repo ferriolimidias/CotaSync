@@ -120,12 +120,20 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
     steps = data.get("passos_playwright", [])
     if not isinstance(steps, list):
         steps = []
+    variables = _normalize_variables(data.get("variaveis_necessarias", []))
+    schema_variables = _normalize_variables(data.get("variable_schema", []))
+    if schema_variables:
+        labels_by_key = {item["key"]: item["label"] for item in schema_variables}
+        if variables:
+            variables = [{**item, "label": labels_by_key.get(item["key"], item["label"])} for item in variables]
+        else:
+            variables = schema_variables
     return {
         "id": key,
         "key": key,
         "name": str(data.get("nome_amigavel") or key).strip() or key,
         "description": str(data.get("descricao") or "").strip(),
-        "variables": _normalize_variables(data.get("variaveis_necessarias", [])),
+        "variables": variables,
         "steps_count": len(steps),
         "has_url": bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
         "test_mode": bool(data.get("modo_teste", False)),

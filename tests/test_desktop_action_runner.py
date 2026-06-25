@@ -156,6 +156,36 @@ class DesktopActionRunTests(unittest.TestCase):
             listed = client.get("/api/runs").json()["runs"]
         self.assertTrue(any(item["id"] == created["id"] for item in listed))
 
+    def test_step_timeout_error_keeps_step_diagnostics_in_result_payload(self) -> None:
+        diagnostic = {
+            "step_diagnostics": [
+                {
+                    "step_index": 2,
+                    "action_type": "clicar",
+                    "target_label": "Elemento da rotina",
+                    "wait_strategy": "expected_selector_after",
+                    "waited_ms": 30000,
+                    "result": "timeout",
+                    "current_url_host": "nwcweb.randonconsorcios.com.br",
+                    "current_title": "Consulta",
+                }
+            ],
+            "retryable": True,
+        }
+        error = RuntimeError("timeout esperando expected_selector_after")
+        error.diagnostics = diagnostic  # type: ignore[attr-defined]
+        with patch("backend.services.action_runner.append_run"), patch(
+            "backend.services.action_runner.update_run"
+        ), patch(
+            "backend.services.action_runner.executar_acao_fast_track",
+            new=AsyncMock(side_effect=error),
+        ):
+            run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest(variables={"grupo": "123"})))
+        self.assertEqual(run.status, "error")
+        self.assertEqual(run.result_payload["step_diagnostics"][0]["result"], "timeout")  # type: ignore[index]
+        self.assertTrue(run.result_payload["retryable"])  # type: ignore[index]
+        self.assertIn("demorou para abrir a próxima tela", run.operational_summary or "")
+
 
 if __name__ == "__main__":
     unittest.main()

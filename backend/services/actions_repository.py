@@ -76,6 +76,18 @@ def _normalize_variables(raw_variables: Any) -> list[ActionVariable]:
     return variables
 
 
+def _friendly_variables(data: dict[str, Any]) -> list[ActionVariable]:
+    variables = _normalize_variables(data.get("variaveis_necessarias", []))
+    schema_variables = _normalize_variables(data.get("variable_schema", []))
+    if not variables:
+        return schema_variables
+    labels_by_key = {item.key: item.label for item in schema_variables if item.label}
+    return [
+        variable.model_copy(update={"label": labels_by_key.get(variable.key, variable.label)})
+        for variable in variables
+    ]
+
+
 def _steps_preview(raw_steps: Any, limit: int = 10) -> list[ActionStepPreview]:
     if not isinstance(raw_steps, list):
         return []
@@ -143,7 +155,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         key=key,
         name=name,
         description=description,
-        variables=_normalize_variables(data.get("variaveis_necessarias", [])),
+        variables=_friendly_variables(data),
         steps_count=steps_count,
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
         test_mode=bool(data.get("modo_teste", False)),

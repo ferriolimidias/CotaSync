@@ -445,6 +445,13 @@ def deterministic_operational_summary(
 ) -> str:
     if str(status).lower() != "success":
         error = str(error_message or "").casefold()
+        payload = result_payload if isinstance(result_payload, dict) else {}
+        step_diagnostics = payload.get("step_diagnostics", [])
+        has_step_timeout = isinstance(step_diagnostics, list) and any(
+            str(item.get("result") or "").casefold() == "timeout"
+            for item in step_diagnostics
+            if isinstance(item, dict)
+        )
         if "precisa ser autenticada novamente" in error or "reauthentication_required" in error:
             return "Não consegui executar a ação porque a sessão precisa ser autenticada novamente."
         if "pagina do sistema esperado" in error or "unexpected_page_host" in error:
@@ -453,8 +460,11 @@ def deterministic_operational_summary(
             return "Não foi possível concluir a ação porque a sessão do sistema não está autenticada."
         if "não encontr" in error or "nao encontr" in error:
             return "Não foi possível concluir a ação porque a informação solicitada não foi encontrada."
-        if "indispon" in error or "timeout" in error:
-            return "Não foi possível concluir a ação porque o sistema não respondeu a tempo."
+        if has_step_timeout or "indispon" in error or "timeout" in error or "demorou" in error:
+            return (
+                "Não consegui concluir a ação porque o sistema demorou para abrir a próxima tela. "
+                "Tente novamente ou reautentique a sessão se necessário."
+            )
         if "não possui passos" in error or "nao possui passos" in error:
             return "Não foi possível executar a ação porque ela ainda não possui uma rotina configurada."
         return "Não foi possível concluir a ação no sistema. Tente novamente ou verifique se o serviço está disponível."
@@ -496,7 +506,13 @@ def deterministic_operational_summary(
         suffix = " Arquivo disponível." if has_files else ""
         return f"Consulta concluída. Encontrei: {values}.{suffix}"
     if extraction_targets(action):
-        return "Ação executada com sucesso, mas o resultado configurado não foi encontrado ou está vazio."
+        targets = extraction_targets(action)
+        target_text = " ".join(targets).replace("_", " ").casefold()
+        objective_text = str(_metadata(action, "objective", "") or "").replace("_", " ").casefold()
+        if "parcela" in target_text or "parcela" in objective_text:
+            return "A ação foi executada, mas não encontrei o valor da parcela atual na tela final."
+        readable = targets[0].replace("_", " ") if targets else "resultado configurado"
+        return f"A ação foi executada, mas não encontrei {readable} na tela final."
     if has_files:
         return "Arquivo gerado com sucesso. Arquivo disponível."
     output_type = str(_metadata(action, "output_type", "") or "").strip().casefold()
@@ -642,5 +658,10 @@ def build_technical_summary(
     payload = result_payload if isinstance(result_payload, dict) else {}
     diagnostics = payload.get("selector_diagnostics", [])
     diagnostic_count = len(diagnostics) if isinstance(diagnostics, list) else 0
+    step_diagnostics = payload.get("step_diagnostics", [])
+    step_diagnostic_count = len(step_diagnostics) if isinstance(step_diagnostics, list) else 0
     outcome = "concluída" if str(status).lower() == "success" else "falhou"
-    return f"Execução {outcome}; passos={max(0, int(executed_steps))}; diagnósticos={diagnostic_count}."
+    return (
+        f"Execução {outcome}; passos={max(0, int(executed_steps))}; "
+        f"diagnósticos={diagnostic_count}; step_diagnostics={step_diagnostic_count}."
+    )
