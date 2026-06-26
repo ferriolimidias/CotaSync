@@ -156,6 +156,16 @@ async def clear_demo_saved_session(session_id: str) -> dict[str, Any]:
     return {"status": "ok", **result}
 
 
+@router.post("/api/demo/sessions/{session_id}/saved-session/reopen")
+async def reopen_demo_saved_session(session_id: str) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.reopen_with_saved_session(session_id)
+    except DemoSessionError as exc:
+        _raise_safe(exc)
+    session = result.pop("session")
+    return {"status": "ok", "session": session, "saved_session": result}
+
+
 @router.post("/api/demo/sessions/{session_id}/recording/start")
 async def start_demo_recording(
     session_id: str,

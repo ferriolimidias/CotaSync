@@ -38,8 +38,16 @@ def _review() -> dict[str, object]:
 class FakePage:
     url = "https://example.test/consulta"
 
+    def is_closed(self) -> bool:
+        return False
+
     async def screenshot(self, **_kwargs: object) -> None:
         return None
+
+
+class FakeBrowser:
+    def is_connected(self) -> bool:
+        return True
 
 
 class FakeLocator:
@@ -81,6 +89,7 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         status="gravando",
         operator_recording_suppressed_until=0.0,
         browser_mode="browserless",
+        browser=FakeBrowser(),
         external_system_name="",
         external_login_url="",
         access_profile_name="",
@@ -138,6 +147,63 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(session.guided_learning["objective"], "")
         self.assertTrue(session.guided_learning["ai_result_summary_enabled"])
         self.assertEqual(result["id"], "session")
+
+    def test_recording_can_start_from_waiting_login_screen(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.status = "aguardando_login"
+        session.recording = False
+        session.observer_tasks = set()
+        session.context = SimpleNamespace(pages=[])
+        session.storage_state_path = Path(tempfile.gettempdir()) / "cotasync-unit" / "waiting-login-state.json"
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_install_recorder_for_session", new=AsyncMock()), patch.object(
+            manager,
+            "status",
+            new=AsyncMock(return_value={"id": "session", "status": "gravando", "recording": True}),
+        ):
+            result = asyncio.run(manager.start_recording("session", {"name": "Gravar login"}))
+        self.assertTrue(session.recording)
+        self.assertEqual(session.status, "gravando")
+        self.assertEqual(result["status"], "gravando")
+
+    def test_status_exposes_saved_session_metadata(self) -> None:
+        manager = DemoSessionManager()
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "storage_state.json"
+            state_path.write_text('{"cookies":[],"origins":[]}', encoding="utf-8")
+            session = _session()  # type: ignore[assignment]
+            session.status = "aguardando_login"
+            session.storage_state_path = state_path
+            session.created_at = "2026-01-01T00:00:00+00:00"
+            session.tracking_id = "cotasync-session"
+            session.live_url = ""
+            session.public_devtools_host = ""
+            session.page = SimpleNamespace(
+                url="https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                title=AsyncMock(return_value="Sign in to your account"),
+                is_closed=lambda: False,
+            )
+            session.browser = FakeBrowser()
+            session.target_id = "target"
+            session.external_system_name = "Sistema"
+            session.external_login_url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+            session.expected_system_host = "nwcweb.randonconsorcios.com.br"
+            session.microsoft_hosts = ["login.microsoftonline.com"]
+            session.auth_validation_mode = "manual_confirmation"
+            session.profile_reference = "/data/profile"
+            session.manual_login_confirmed = False
+            session.confirmed_page_url = ""
+            session.confirmed_page_title = ""
+            manager._sessions["session"] = session  # type: ignore[attr-defined]
+
+            result = asyncio.run(manager.status("session"))
+
+        self.assertTrue(result["saved_session_exists"])
+        self.assertTrue(result["storage_state_saved"])
+        self.assertIsNotNone(result["saved_session_last_saved_at"])
+        self.assertEqual(result["saved_session_test_status"], "microsoft_login")
+        self.assertEqual(result["saved_session_current_title"], "Sign in to your account")
 
     def test_guided_metadata_and_extraction_are_saved_and_sent_to_synthesis(self) -> None:
         manager = DemoSessionManager()

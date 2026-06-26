@@ -336,6 +336,12 @@ def _render_demo_v01() -> None:
             return
 
         status = str(session.get("status", "desconhecida"))
+        page_url = str(session.get("page_url", "") or "")
+        saved_session_exists = bool(session.get("saved_session_exists") or session.get("storage_state_saved"))
+        saved_session_test_status = str(session.get("saved_session_test_status") or "")
+        current_page_is_login = saved_session_test_status == "microsoft_login" or any(
+            host in page_url for host in ("login.microsoftonline.com", "m365.cloud.microsoft", "login.microsoft.com")
+        )
         status_labels = {
             "aguardando_login": "Aguardando login manual",
             "autenticada": "Sessão autenticada",
@@ -368,10 +374,19 @@ def _render_demo_v01() -> None:
                 st.caption(f"DevTools público: `{public_devtools_host}`")
             st.caption("Se a janela remota não aceitar teclado, use Modo operador.")
 
-        if status == "aguardando_login":
+        if saved_session_exists:
+            st.success("Sessão salva encontrada.")
+            if session.get("saved_session_last_saved_at"):
+                st.caption(f"Último salvamento: `{session.get('saved_session_last_saved_at')}`")
+        elif status == "aguardando_login":
             st.info(
-                "A sessão ainda não foi salva/autenticada. Use Configurações > Sistema externo para abrir o navegador, "
-                "fazer login manualmente e salvar a sessão antes de ensinar a rotina."
+                "Nenhuma sessão salva foi encontrada. Configurações > Sistema externo continua sendo o caminho "
+                "recomendado para salvar o login, mas você também pode gravar desde a tela atual."
+            )
+
+        if current_page_is_login and status != "gravando":
+            st.warning(
+                "A página atual ainda está no login. Você pode reabrir o sistema com a sessão salva ou gravar desde a tela atual."
             )
 
         if status in {"aguardando_login", "autenticada", "gravando"}:
@@ -483,7 +498,7 @@ def _render_demo_v01() -> None:
 
         recorded_steps = st.session_state.get("demo_recorded_steps")
         saved_action = st.session_state.get("demo_saved_action")
-        if status == "autenticada" and not recorded_steps and not saved_action:
+        if status != "expirada" and status != "gravando" and not recorded_steps and not saved_action:
             st.markdown("**Ensinar Nova Rotina**")
             action_name_key = f"demo_guided_name_{session_id}"
             st.text_input(
@@ -491,7 +506,25 @@ def _render_demo_v01() -> None:
                 key=action_name_key,
                 placeholder="Ex.: Consultar quantidade de parcelas pagas",
             )
-            if st.button("Iniciar gravação", key="demo_start_recording", type="primary", use_container_width=True):
+            if saved_session_exists:
+                st.caption("Usar sessão salva para ensinar é o caminho recomendado.")
+                if st.button(
+                    "Reabrir sistema com sessão salva",
+                    key=f"demo_reopen_saved_session_{session_id}",
+                    use_container_width=True,
+                ):
+                    try:
+                        demo_api_request(
+                            "POST",
+                            f"/api/demo/sessions/{encoded_session}/saved-session/reopen",
+                            api_base_url=API_BASE_URL,
+                        )
+                        st.rerun()
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+
+            start_label = "Gravar desde a tela atual" if current_page_is_login or not saved_session_exists else "Iniciar gravação"
+            if st.button(start_label, key="demo_start_recording", type="primary", use_container_width=True):
                 try:
                     demo_api_request(
                         "POST",

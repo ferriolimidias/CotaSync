@@ -308,6 +308,21 @@ def _safe_url_host(url: str) -> str:
         return ""
 
 
+def _host_matches(host: str, expected_host: str) -> bool:
+    current = str(host or "").strip().lower().rstrip(".")
+    expected = str(expected_host or "").strip().lower().rstrip(".")
+    return bool(current and expected and (current == expected or current.endswith(f".{expected}")))
+
+
+def _storage_state_last_saved_at(path: Path) -> str | None:
+    try:
+        if not path.is_file():
+            return None
+        return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+    except OSError:
+        return None
+
+
 def _expected_replay_url(saved_url: Any) -> str:
     candidate = str(saved_url or "").strip()
     if urlsplit(candidate).scheme in {"http", "https"}:
@@ -677,6 +692,9 @@ class DemoSessionManager:
                 return False
             if session.external_login_url:
                 if session.auth_validation_mode == "manual_confirmation":
+                    current_host = _safe_url_host(str(page.url or ""))
+                    if session.expected_system_host and _host_matches(current_host, session.expected_system_host):
+                        return await self._page_is_valid_for_manual_confirmation(session, page)
                     return (
                         session.manual_login_confirmed
                         and await self._page_is_valid_for_manual_confirmation(session, page)
@@ -821,6 +839,69 @@ class DemoSessionManager:
             if tmp_path is not None:
                 tmp_path.unlink(missing_ok=True)
 
+    def _target_url_for_saved_session(self, session: DemoBrowserSession) -> str:
+        if session.external_login_url:
+            return _safe_page_url(session.external_login_url)
+        if session.expected_system_host:
+            return f"https://{session.expected_system_host.strip().strip('/')}/"
+        return _demo_target_url()
+
+    def _saved_session_test_status(self, session: DemoBrowserSession, current_url: str) -> str:
+        if not session.storage_state_path.is_file():
+            return "missing"
+        current_host = _safe_url_host(current_url)
+        if session.expected_system_host and _host_matches(current_host, session.expected_system_host):
+            return "authenticated"
+        microsoft_hosts = (
+            session.microsoft_hosts
+            if isinstance(session.microsoft_hosts, list) and session.microsoft_hosts
+            else ["login.microsoftonline.com", "m365.cloud.microsoft"]
+        )
+        if any(_host_matches(current_host, str(host)) for host in microsoft_hosts):
+            return "microsoft_login"
+        if session.status in {"autenticada", "gravando"}:
+            return "authenticated"
+        return "available"
+
+    async def _apply_saved_storage_state(self, session: DemoBrowserSession) -> bool:
+        path = session.storage_state_path
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        if not isinstance(state, dict):
+            return False
+
+        cookies = state.get("cookies", [])
+        if isinstance(cookies, list) and cookies:
+            await session.context.add_cookies(cookies)
+
+        local_storage_by_origin: dict[str, dict[str, str]] = {}
+        origins = state.get("origins", [])
+        if isinstance(origins, list):
+            for origin_state in origins:
+                if not isinstance(origin_state, dict):
+                    continue
+                origin = str(origin_state.get("origin") or "")
+                entries = origin_state.get("localStorage", [])
+                if not origin or not isinstance(entries, list):
+                    continue
+                local_storage_by_origin[origin] = {
+                    str(item.get("name")): str(item.get("value"))
+                    for item in entries
+                    if isinstance(item, dict) and item.get("name") is not None
+                }
+        if local_storage_by_origin:
+            serialized = json.dumps(local_storage_by_origin, ensure_ascii=False)
+            await session.context.add_init_script(
+                f"""() => {{
+                  const stored = {serialized};
+                  const entries = stored[window.location.origin] || {{}};
+                  for (const [key, value] of Object.entries(entries)) localStorage.setItem(key, value);
+                }}"""
+            )
+        return True
+
     async def _prepare_reconnected_context(self, session_id: str, context: BrowserContext) -> None:
         async def record_binding(source: Any, payload: Any) -> None:
             current = self._sessions.get(session_id)
@@ -896,48 +977,12 @@ class DemoSessionManager:
         return results
 
     async def _restore_storage_state(self, session: DemoBrowserSession, expected_url: str) -> Page | None:
-        path = session.storage_state_path
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(state, dict):
-            return None
-
         try:
             if not await self._reconnect_live_browser(session):
                 return None
+            if not await self._apply_saved_storage_state(session):
+                return None
             context = session.context
-
-            cookies = state.get("cookies", [])
-            if isinstance(cookies, list) and cookies:
-                await context.add_cookies(cookies)
-
-            local_storage_by_origin: dict[str, dict[str, str]] = {}
-            origins = state.get("origins", [])
-            if isinstance(origins, list):
-                for origin_state in origins:
-                    if not isinstance(origin_state, dict):
-                        continue
-                    origin = str(origin_state.get("origin") or "")
-                    entries = origin_state.get("localStorage", [])
-                    if not origin or not isinstance(entries, list):
-                        continue
-                    local_storage_by_origin[origin] = {
-                        str(item.get("name")): str(item.get("value"))
-                        for item in entries
-                        if isinstance(item, dict) and item.get("name") is not None
-                    }
-            if local_storage_by_origin:
-                serialized = json.dumps(local_storage_by_origin, ensure_ascii=False)
-                await context.add_init_script(
-                    f"""() => {{
-                      const stored = {serialized};
-                      const entries = stored[window.location.origin] || {{}};
-                      for (const [key, value] of Object.entries(entries)) localStorage.setItem(key, value);
-                    }}"""
-                )
-
             page = session.page if not session.page.is_closed() and session.page.context == context else None
             if page is None:
                 page = next((item for item in context.pages if not item.is_closed()), None)
@@ -1095,6 +1140,10 @@ class DemoSessionManager:
                 title = await session.page.title()
             except Exception:
                 session.status = "expirada"
+        page_url = _safe_page_url(session.page.url)
+        saved_session_exists = session.storage_state_path.is_file()
+        saved_session_last_saved_at = _storage_state_last_saved_at(session.storage_state_path)
+        saved_session_test_status = self._saved_session_test_status(session, page_url)
         return {
             "id": session.id,
             "status": session.status,
@@ -1105,7 +1154,7 @@ class DemoSessionManager:
             "public_devtools_host": (
                 public_devtools_host(session.live_url) if session.browser_mode == "browserless" else ""
             ),
-            "page_url": _safe_page_url(session.page.url),
+            "page_url": page_url,
             "page_title": title,
             "recording": session.recording,
             "steps_count": len(session.steps),
@@ -1118,7 +1167,12 @@ class DemoSessionManager:
             "microsoft_saved_account_identifier": session.microsoft_saved_account_identifier,
             "expected_system_host": session.expected_system_host,
             "auth_validation_mode": session.auth_validation_mode or "demo_target_markers",
-            "storage_state_saved": session.storage_state_path.is_file(),
+            "storage_state_saved": saved_session_exists,
+            "saved_session_exists": saved_session_exists,
+            "saved_session_last_saved_at": saved_session_last_saved_at,
+            "saved_session_test_status": saved_session_test_status,
+            "saved_session_current_url": page_url,
+            "saved_session_current_title": title,
             "profile_reference": session.profile_reference,
             "manual_confirmed": session.manual_login_confirmed,
             "confirmed_page_url": session.confirmed_page_url,
@@ -1394,14 +1448,88 @@ class DemoSessionManager:
             "storage_state_saved": session.storage_state_path.is_file(),
         }
 
+    async def reopen_with_saved_session(self, session_id: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        if not await self._reconnect_live_browser(session):
+            session.status = "expirada"
+            raise DemoSessionError("A sessão do navegador não está disponível.")
+
+        storage_applied = False
+        if session.storage_state_path.is_file():
+            try:
+                storage_applied = await self._apply_saved_storage_state(session)
+            except Exception as exc:
+                logger.info("Nao foi possivel aplicar sessao salva %s: %s", session.id, exc)
+
+        page = session.page if not session.page.is_closed() and session.page.context == session.context else None
+        if page is None:
+            page = next((item for item in session.context.pages if not item.is_closed()), None)
+        if page is None:
+            page = await session.context.new_page()
+
+        target_url = self._target_url_for_saved_session(session)
+        navigation_error = ""
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+        except Exception as exc:
+            navigation_error = type(exc).__name__
+
+        await self._set_active_page(session, page)
+        current_url = _safe_page_url(page.url)
+        current_host = _safe_url_host(current_url)
+        microsoft_hosts = (
+            session.microsoft_hosts
+            if isinstance(session.microsoft_hosts, list) and session.microsoft_hosts
+            else ["login.microsoftonline.com", "m365.cloud.microsoft"]
+        )
+        reached_expected_host = bool(
+            session.expected_system_host and _host_matches(current_host, session.expected_system_host)
+        )
+        microsoft_login_visible = any(_host_matches(current_host, str(host)) for host in microsoft_hosts)
+        authenticated = await self._page_is_authenticated(session, page)
+        if reached_expected_host or authenticated:
+            session.status = "autenticada"
+            await self._save_storage_state(session, required=False)
+        elif session.status != "gravando":
+            session.status = "aguardando_login"
+
+        title = ""
+        try:
+            title = await page.title()
+        except Exception:
+            pass
+        return {
+            "reopen_status": (
+                "authenticated"
+                if session.status == "autenticada"
+                else "microsoft_login"
+                if microsoft_login_visible
+                else "opened"
+            ),
+            "target_url": target_url,
+            "current_url": current_url,
+            "current_title": title,
+            "expected_system_host": session.expected_system_host,
+            "storage_applied": storage_applied,
+            "saved_session_exists": session.storage_state_path.is_file(),
+            "reached_expected_host": reached_expected_host,
+            "microsoft_login_visible": microsoft_login_visible,
+            "navigation_error": navigation_error,
+            "session": await self.status(session_id),
+        }
+
     async def start_recording(
         self,
         session_id: str,
         guided_learning: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session = self._get(session_id)
-        if session.status != "autenticada":
-            raise DemoSessionError("Confirme o login manual antes de iniciar o aprendizado.")
+        if session.status == "expirada" or session.page.is_closed() or not session.browser.is_connected():
+            raise DemoSessionError("A sessão do navegador não está disponível.")
         session.steps = []
         session.learning_events = []
         for task in list(session.observer_tasks):

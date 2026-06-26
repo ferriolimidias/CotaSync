@@ -56,6 +56,25 @@ class DemoAccessProfileUiTests(unittest.TestCase):
         self.assertNotIn('"Uso de IA na execução"', source)
         self.assertNotIn('"Timeout máximo da ação (segundos)"', source)
 
+    def test_saved_session_and_record_current_options_are_visible_in_demo(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("Sessão salva encontrada.", source)
+        self.assertIn("Reabrir sistema com sessão salva", source)
+        self.assertIn("Gravar desde a tela atual", source)
+        self.assertIn("Iniciar gravação", source)
+        self.assertIn("A página atual ainda está no login", source)
+        self.assertNotIn("A sessão ainda não foi salva/autenticada", source)
+
+    def test_waiting_login_no_longer_hides_all_recording_options(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+        service = (ROOT / "backend" / "services" / "demo_session.py").read_text(encoding="utf-8")
+
+        self.assertIn('status != "expirada" and status != "gravando"', source)
+        self.assertNotIn('if status == "autenticada" and not recorded_steps and not saved_action', source)
+        self.assertNotIn('if session.status != "autenticada":', service)
+        self.assertIn('if session.status == "expirada"', service)
+
     def test_learning_review_warns_when_expected_inputs_have_no_fill_steps(self) -> None:
         source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
         self.assertIn("Nenhum campo digitado foi capturado", source)
