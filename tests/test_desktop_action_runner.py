@@ -17,8 +17,9 @@ from backend.services.action_pages import (
     expected_action_hosts,
     select_desktop_page_for_action,
 )
-from backend.services.action_runner import run_action_sync
+from backend.services.action_runner import finish_action_run, run_action_sync, start_action_run
 from backend.services.actions_repository import load_actions_catalog
+from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
 
 
@@ -460,6 +461,42 @@ class DesktopActionRunTests(unittest.TestCase):
             created = response.json()["run"]
             listed = client.get("/api/runs").json()["runs"]
         self.assertTrue(any(item["id"] == created["id"] for item in listed))
+
+    def test_async_run_persists_running_then_latest_result(self) -> None:
+        action = desktop_action().model_copy(
+            update={"browser_mode": "browserless", "url_inicial": None, "has_url": False}
+        )
+        execution = {
+            "status": "success",
+            "texto": "concluida",
+            "passos_executados": 1,
+            "final_page": {"title": "Demo", "url": "http://demo.local/resultado"},
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.services.runs_repository.default_runs_path",
+            return_value=Path(tmp) / "runs.json",
+        ), patch(
+            "backend.services.action_runner.executar_acao_fast_track",
+            new=AsyncMock(return_value=execution),
+        ):
+            request = ActionRunRequest(mode="async", variables={"grupo": "123"})
+            run = start_action_run(action, request)
+            persisted = get_run(run.id)
+            self.assertIsNotNone(persisted)
+            self.assertEqual(persisted.status, "running")  # type: ignore[union-attr]
+
+            finished = asyncio.run(finish_action_run(action, request, run))
+            persisted_finished = get_run(run.id)
+            client = TestClient(app)
+            latest = client.get("/api/runs?limit=1").json()["runs"][0]
+
+        self.assertEqual(finished.status, "success")
+        self.assertIsNotNone(persisted_finished)
+        self.assertEqual(persisted_finished.status, "success")  # type: ignore[union-attr]
+        self.assertEqual(latest["id"], run.id)
+        self.assertEqual(latest["status"], "success")
+        self.assertIn("operational_summary", latest)
+        self.assertEqual(latest["result_payload"]["passos_executados"], 1)
 
     def test_step_timeout_error_keeps_step_diagnostics_in_result_payload(self) -> None:
         diagnostic = {

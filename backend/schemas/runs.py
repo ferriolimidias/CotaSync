@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 RunStatus = Literal["pending", "running", "success", "error"]
-RunMode = Literal["sync"]
+RunMode = Literal["sync", "async"]
 
 
 class ActionRunRequest(BaseModel):

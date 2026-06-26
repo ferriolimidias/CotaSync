@@ -15,7 +15,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from urllib.parse import quote
 
 import pandas as pd
@@ -41,7 +41,13 @@ if str(_ROOT) not in sys.path:
 
 from backend.agente import processar_mensagem  # noqa: E402
 from backend.services.ai_observer import openai_configuration_status  # noqa: E402
-from frontend.api_client import DemoApiError, demo_api_request, get_actions_for_ui  # noqa: E402
+from frontend.api_client import (  # noqa: E402
+    DEMO_API_TIMEOUT_MESSAGE,
+    DemoApiError,
+    DemoApiTimeout,
+    demo_api_request,
+    get_actions_for_ui,
+)
 
 _EVIDENCIA = "data/print_teste.png"
 _UI_MAP_PATH = _DATA_DIR / "ui_map.json"
@@ -55,6 +61,108 @@ if not API_BASE_URL:
         API_BASE_URL = str(st.secrets["API_BASE_URL"]).strip()
     except Exception:
         API_BASE_URL = "http://cotasync_test_backend:8000"
+
+QUICK_ACTION_START_TIMEOUT_SECONDS = 20
+QUICK_ACTION_POLL_TIMEOUT_SECONDS = 10
+QUICK_ACTION_MAX_WAIT_SECONDS = 300
+QUICK_ACTION_POLL_INTERVAL_SECONDS = 2
+
+
+def _run_to_resultado_direto(run: dict[str, object]) -> dict[str, object]:
+    payload = run.get("result_payload") if isinstance(run, dict) else {}
+    payload = payload if isinstance(payload, dict) else {}
+    status = str(run.get("status") or "")
+    if status in {"pending", "running"}:
+        texto = DEMO_API_TIMEOUT_MESSAGE
+    else:
+        texto = str(run.get("operational_summary") or "Execução concluída.")
+    return {
+        "texto": texto,
+        "result_payload": payload,
+        "downloaded_files": payload.get("downloaded_files", []),
+        "main_file": payload.get("main_file"),
+        "status": status,
+        "estado": "NORMAL",
+    }
+
+
+def _buscar_run_mais_recente(action_id: str) -> dict[str, object] | None:
+    response = demo_api_request(
+        "GET",
+        f"/api/runs?action_id={quote(str(action_id), safe='')}&limit=1",
+        api_base_url=API_BASE_URL,
+        timeout=QUICK_ACTION_POLL_TIMEOUT_SECONDS,
+    )
+    runs = response.get("runs", [])
+    if isinstance(runs, list) and runs and isinstance(runs[0], dict):
+        return runs[0]
+    return None
+
+
+def _executar_acao_aprendida_com_polling(
+    action_id: str,
+    variables: dict[str, object],
+    *,
+    requested_by: str,
+    session_id: str | None = None,
+) -> dict[str, object]:
+    encoded_action_id = quote(str(action_id), safe="")
+    request_payload: dict[str, object] = {"variables": variables, "mode": "async", "requested_by": requested_by}
+    if session_id:
+        request_payload["session_id"] = session_id
+    try:
+        run_response = demo_api_request(
+            "POST",
+            f"/api/actions/{encoded_action_id}/run",
+            request_payload,
+            api_base_url=API_BASE_URL,
+            timeout=QUICK_ACTION_START_TIMEOUT_SECONDS,
+        )
+    except DemoApiTimeout:
+        st.info(DEMO_API_TIMEOUT_MESSAGE)
+        latest = _buscar_run_mais_recente(action_id)
+        return _run_to_resultado_direto(latest) if latest is not None else {
+            "texto": DEMO_API_TIMEOUT_MESSAGE,
+            "status": "running",
+            "estado": "NORMAL",
+        }
+
+    run = run_response.get("run", {})
+    if not isinstance(run, dict):
+        raise DemoApiError("Resposta invalida da API da demonstracao.")
+    run_id = str(run.get("id") or "").strip()
+    if not run_id:
+        raise DemoApiError("Run nao identificada pela API da demonstracao.")
+
+    status_slot = st.empty()
+    deadline = monotonic() + QUICK_ACTION_MAX_WAIT_SECONDS
+    while str(run.get("status") or "") in {"pending", "running"}:
+        remaining = int(max(0, deadline - monotonic()))
+        status_slot.info(f"Executando ação... até {remaining}s restantes.")
+        if monotonic() >= deadline:
+            st.info(DEMO_API_TIMEOUT_MESSAGE)
+            latest = _buscar_run_mais_recente(action_id)
+            return _run_to_resultado_direto(latest) if latest is not None else _run_to_resultado_direto(run)
+        sleep(QUICK_ACTION_POLL_INTERVAL_SECONDS)
+        try:
+            detail = demo_api_request(
+                "GET",
+                f"/api/runs/{quote(run_id, safe='')}",
+                api_base_url=API_BASE_URL,
+                timeout=QUICK_ACTION_POLL_TIMEOUT_SECONDS,
+            )
+        except DemoApiTimeout:
+            st.info(DEMO_API_TIMEOUT_MESSAGE)
+            latest = _buscar_run_mais_recente(action_id)
+            if latest is not None:
+                run = latest
+            continue
+        run = detail.get("run", {}) if isinstance(detail, dict) else {}
+        if not isinstance(run, dict):
+            raise DemoApiError("Resposta invalida da API da demonstracao.")
+
+    status_slot.empty()
+    return _run_to_resultado_direto(run)
 
 
 def _defaults_sessao_agendamentos() -> None:
@@ -862,20 +970,17 @@ def _render_demo_v01() -> None:
                 )
             if st.button("Executar ação aprendida", key="demo_run_action", type="primary", use_container_width=True):
                 try:
-                    action_id = quote(str(saved_action.get("id", "")), safe="")
-                    result = demo_api_request(
-                        "POST",
-                        f"/api/actions/{action_id}/run",
-                        {
-                            "variables": run_variables,
-                            "mode": "sync",
-                            "requested_by": "streamlit-demo",
-                            "session_id": session_id,
-                        },
-                        api_base_url=API_BASE_URL,
-                        timeout=30,
+                    result = _executar_acao_aprendida_com_polling(
+                        str(saved_action.get("id", "")),
+                        run_variables,
+                        requested_by="streamlit-demo",
+                        session_id=session_id,
                     )
-                    st.session_state.demo_last_run = result.get("run", {})
+                    st.session_state.demo_last_run = {
+                        "status": result.get("status"),
+                        "operational_summary": result.get("texto"),
+                        "result_payload": result.get("result_payload", {}),
+                    }
                     st.rerun()
                 except DemoApiError as exc:
                     st.error(str(exc))
@@ -1209,7 +1314,13 @@ with st.sidebar:
                     rotulo_var,
                     key=f"acao_var_{chave_acao}_{chave_var}",
                 )
-        if st.button("🚀 Disparar Ação", use_container_width=True, key="acao_sidebar_btn"):
+        quick_action_running = bool(st.session_state.get("quick_action_running", False))
+        if st.button(
+            "🚀 Disparar Ação",
+            use_container_width=True,
+            key="acao_sidebar_btn",
+            disabled=quick_action_running,
+        ):
             if isinstance(variaveis_necessarias, list) and variaveis_necessarias:
                 faltantes = [
                     _rotulo_variavel(v)[1]
@@ -1221,59 +1332,47 @@ with st.sidebar:
                 else:
                     st.session_state.messages.append({"role": "user", "content": chave_acao})
                     salvar_historico_disco(st.session_state.messages)
-                    with st.spinner("Executando ação parametrizada..."):
-                        action_id = quote(str(acao_sidebar_dados.get("id") or chave_acao), safe="")
-                        run_response = demo_api_request(
-                            "POST",
-                            f"/api/actions/{action_id}/run",
-                            {"variables": dados_digitados, "mode": "sync", "requested_by": "streamlit-quick"},
-                            api_base_url=API_BASE_URL,
-                            timeout=60,
+                    st.session_state.quick_action_running = True
+                    try:
+                        with st.spinner("Executando ação parametrizada..."):
+                            action_id = str(acao_sidebar_dados.get("id") or chave_acao)
+                            resultado_direto = _executar_acao_aprendida_com_polling(
+                                action_id,
+                                dados_digitados,
+                                requested_by="streamlit-quick",
+                            )
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+                    else:
+                        if isinstance(resultado_direto, dict):
+                            st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
+                        st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
+                        salvar_historico_disco(st.session_state.messages)
+                        st.rerun()
+                    finally:
+                        st.session_state.quick_action_running = False
+            else:
+                st.session_state.messages.append({"role": "user", "content": chave_acao})
+                salvar_historico_disco(st.session_state.messages)
+                st.session_state.quick_action_running = True
+                try:
+                    with st.spinner("Executando ação rápida..."):
+                        action_id = str(acao_sidebar_dados.get("id") or chave_acao)
+                        resultado_direto = _executar_acao_aprendida_com_polling(
+                            action_id,
+                            {},
+                            requested_by="streamlit-quick",
                         )
-                        run = run_response.get("run", {})
-                        payload = run.get("result_payload") if isinstance(run, dict) else {}
-                        payload = payload if isinstance(payload, dict) else {}
-                        resultado_direto = {
-                            "texto": str(run.get("operational_summary") or "Execução concluída."),
-                            "result_payload": payload,
-                            "downloaded_files": payload.get("downloaded_files", []),
-                            "main_file": payload.get("main_file"),
-                            "status": run.get("status"),
-                            "estado": "NORMAL",
-                        }
+                except DemoApiError as exc:
+                    st.error(str(exc))
+                else:
                     if isinstance(resultado_direto, dict):
                         st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
                     st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
                     salvar_historico_disco(st.session_state.messages)
                     st.rerun()
-            else:
-                st.session_state.messages.append({"role": "user", "content": chave_acao})
-                salvar_historico_disco(st.session_state.messages)
-                with st.spinner("Executando ação rápida..."):
-                    action_id = quote(str(acao_sidebar_dados.get("id") or chave_acao), safe="")
-                    run_response = demo_api_request(
-                        "POST",
-                        f"/api/actions/{action_id}/run",
-                        {"variables": {}, "mode": "sync", "requested_by": "streamlit-quick"},
-                        api_base_url=API_BASE_URL,
-                        timeout=60,
-                    )
-                    run = run_response.get("run", {})
-                    payload = run.get("result_payload") if isinstance(run, dict) else {}
-                    payload = payload if isinstance(payload, dict) else {}
-                    resultado_direto = {
-                        "texto": str(run.get("operational_summary") or "Execução concluída."),
-                        "result_payload": payload,
-                        "downloaded_files": payload.get("downloaded_files", []),
-                        "main_file": payload.get("main_file"),
-                        "status": run.get("status"),
-                        "estado": "NORMAL",
-                    }
-                if isinstance(resultado_direto, dict):
-                    st.session_state.estado_agente = str(resultado_direto.get("estado", "NORMAL"))
-                st.session_state.messages.append(_normalizar_resposta_assistente(resultado_direto))
-                salvar_historico_disco(st.session_state.messages)
-                st.rerun()
+                finally:
+                    st.session_state.quick_action_running = False
     else:
         st.caption("Nenhuma ação aprendida ainda.")
 

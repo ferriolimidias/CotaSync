@@ -187,7 +187,7 @@ def _validate_desktop_result(action: ActionDetail, result: dict[str, Any]) -> No
     validate_action_page_url(action, final_url)
 
 
-async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
+def start_action_run(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
     created_at = utc_now_iso()
     run = RunRecord(
         id=str(uuid4()),
@@ -205,7 +205,10 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
     run.status = "running"
     run.started_at = utc_now_iso()
     update_run(run)
+    return run
 
+
+async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run: RunRecord) -> RunRecord:
     try:
         if _is_local_fixture(action):
             run.status = "success"
@@ -307,3 +310,8 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
         update_run(run)
 
     return run
+
+
+async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
+    run = start_action_run(action, request)
+    return await finish_action_run(action, request, run)

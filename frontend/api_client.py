@@ -23,6 +23,16 @@ class DemoApiError(RuntimeError):
     """Falha controlada no ciclo assistido da demonstracao."""
 
 
+class DemoApiTimeout(DemoApiError):
+    """Timeout controlado em chamadas longas da demonstracao."""
+
+
+DEMO_API_TIMEOUT_MESSAGE = (
+    "A ação ainda está em execução ou demorou mais que o esperado. "
+    "Vou buscar o resultado mais recente."
+)
+
+
 @dataclass(frozen=True)
 class ActionsUiResult:
     actions: list[dict[str, Any]]
@@ -296,6 +306,8 @@ def demo_api_request(
             raise DemoApiError(str(detail or "Operacao da demonstracao indisponivel."))
     except DemoApiError:
         raise
+    except requests.Timeout as exc:
+        raise DemoApiTimeout(DEMO_API_TIMEOUT_MESSAGE) from exc
     except requests.RequestException as exc:
         raise DemoApiError("API da demonstracao indisponivel.") from exc
 

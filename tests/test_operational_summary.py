@@ -7,6 +7,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import requests
+
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import run_action_sync
@@ -16,6 +18,7 @@ from backend.services.operational_summary import (
     deterministic_operational_summary,
 )
 from backend.services.extraction_targets import extract_value_near_label
+from frontend.api_client import DemoApiError, DemoApiTimeout, demo_api_request
 
 
 def _action(**overrides: object) -> dict[str, object]:
@@ -434,14 +437,35 @@ class OperationalSummaryTests(unittest.TestCase):
     def test_frontend_quick_execution_uses_friendly_variable_labels_and_runs_api(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
         self.assertIn("_rotulo_variavel(variable)", source)
-        self.assertIn('f"/api/actions/{action_id}/run"', source)
-        self.assertIn('"requested_by": "streamlit-quick"', source)
+        self.assertIn('f"/api/actions/{encoded_action_id}/run"', source)
+        self.assertIn('"requested_by": requested_by', source)
+        self.assertIn('requested_by="streamlit-quick"', source)
+        self.assertIn('"mode": "async"', source)
+        self.assertIn("QUICK_ACTION_MAX_WAIT_SECONDS = 300", source)
+        self.assertIn("DEMO_API_TIMEOUT_MESSAGE", source)
 
     def test_frontend_objective_extraction_mentions_parcela_targets(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
         self.assertIn("Qtd. Pcls. Pagas", source)
         self.assertIn("O que esta rotina deve retornar?", source)
         self.assertIn("Digitar nome do campo desejado", source)
+
+
+class FrontendApiClientTests(unittest.TestCase):
+    def test_demo_api_request_distinguishes_timeout_from_unavailable_api(self) -> None:
+        with patch("frontend.api_client.requests.request", side_effect=requests.Timeout("read timed out")):
+            with self.assertRaises(DemoApiTimeout) as raised:
+                demo_api_request("POST", "/api/actions/test/run", timeout=0.01)
+
+        self.assertIn("A ação ainda está em execução", str(raised.exception))
+        self.assertNotIn("indisponivel", str(raised.exception).casefold())
+
+    def test_demo_api_request_connection_error_stays_unavailable_api(self) -> None:
+        with patch("frontend.api_client.requests.request", side_effect=requests.ConnectionError("refused")):
+            with self.assertRaises(DemoApiError) as raised:
+                demo_api_request("GET", "/health", timeout=0.01)
+
+        self.assertEqual("API da demonstracao indisponivel.", str(raised.exception))
 
 
 if __name__ == "__main__":

@@ -75,6 +75,26 @@ def _normalize_microsoft_hosts(raw: Any) -> list[str]:
     return result
 
 
+def _looks_like_url(value: str) -> bool:
+    parsed = urlsplit(str(value or "").strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _normalize_access_profile_fields(result: dict[str, Any]) -> None:
+    for key in ("access_profile_email_or_identifier", "microsoft_saved_account_identifier"):
+        if _looks_like_url(str(result.get(key) or "")):
+            result[key] = ""
+
+    host = str(result.get("expected_system_host") or "").strip().lower().rstrip(".")
+    if _looks_like_url(host):
+        host = urlsplit(host).netloc.lower().rstrip(".")
+    microsoft_hosts = set(_normalize_microsoft_hosts(result.get("microsoft_hosts")))
+    if not host or "/" in host or "?" in host or host in microsoft_hosts:
+        result["expected_system_host"] = ""
+    else:
+        result["expected_system_host"] = host
+
+
 def load_current_external_system() -> dict[str, Any]:
     if not CURRENT_EXTERNAL_SYSTEM_PATH.is_file():
         return empty_external_system()
@@ -87,6 +107,8 @@ def load_current_external_system() -> dict[str, Any]:
     result = empty_external_system()
     for key in _string_keys():
         result[key] = str(payload.get(key) or "").strip()
+    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
+    _normalize_access_profile_fields(result)
     if not result["microsoft_saved_account_identifier"]:
         result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]
     if not result["access_profile_email_or_identifier"]:
@@ -96,7 +118,6 @@ def load_current_external_system() -> dict[str, Any]:
             continue
         if not result.get(key):
             result[key] = str(value)
-    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
     if result["external_login_url"]:
         result["validation"] = _validation_mode(result)
     result["updated_at"] = payload.get("updated_at")
@@ -107,6 +128,8 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
     result = empty_external_system()
     for key in _string_keys():
         result[key] = str(payload.get(key) or "").strip()
+    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
+    _normalize_access_profile_fields(result)
     if not result["microsoft_saved_account_identifier"]:
         result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]
     if not result["access_profile_email_or_identifier"]:
@@ -116,7 +139,6 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         if not result.get(key):
             result[key] = str(value)
-    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
 
     login_url = result["external_login_url"]
     system_name = result["external_system_name"]
