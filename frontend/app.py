@@ -272,6 +272,10 @@ def _render_recording_diagnostics(session_id: str, encoded_session: str) -> None
             st.write(
                 {
                     "recorder_installed": bool(diagnostics.get("recorder_installed")),
+                    "active_recording_session_id": diagnostics.get("active_recording_session_id", ""),
+                    "operator_request_session_id": diagnostics.get("operator_request_session_id", ""),
+                    "reviewed_session_id": diagnostics.get("reviewed_session_id", ""),
+                    "last_recorded_event_session_id": diagnostics.get("last_recorded_event_session_id", ""),
                     "active_page_url": diagnostics.get("active_page_url", ""),
                     "active_page_title": diagnostics.get("active_page_title", ""),
                     "frame_count": diagnostics.get("frame_count", 0),
@@ -286,12 +290,23 @@ def _render_recording_diagnostics(session_id: str, encoded_session: str) -> None
                     "operator_click_attempt_count": diagnostics.get("operator_click_attempt_count", 0),
                     "operator_click_recorded_count": diagnostics.get("operator_click_recorded_count", 0),
                     "browser_recorder_event_count": diagnostics.get("browser_recorder_event_count", 0),
+                    "last_operator_result": diagnostics.get("last_operator_result", {}),
+                    "last_backend_recorded_event": diagnostics.get("last_backend_recorded_event", {}),
+                    "direct_typing_capture_status": diagnostics.get("direct_typing_capture_status", ""),
                     "last_event_type": diagnostics.get("last_event_type", ""),
                     "last_event_selector": diagnostics.get("last_event_selector", ""),
                     "last_event_frame_url": diagnostics.get("last_event_frame_url", ""),
                     "recorder_errors": diagnostics.get("recorder_errors", []),
                 }
             )
+            expected_ids = [
+                str(diagnostics.get("active_recording_session_id") or ""),
+                str(diagnostics.get("operator_request_session_id") or ""),
+                str(diagnostics.get("last_recorded_event_session_id") or ""),
+            ]
+            non_empty_ids = {item for item in expected_ids if item}
+            if len(non_empty_ids) > 1:
+                st.error("Diagnóstico de sessão inconsistente: eventos gravados em sessão diferente da gravação ativa.")
         except DemoApiError as exc:
             st.warning(str(exc))
 
@@ -401,9 +416,9 @@ def _render_demo_v01() -> None:
                 st.caption(
                     "Insira texto sem depender da área de transferência do navegador remoto. "
                     + (
-                        "Ações por seletor serão capturadas pela gravação."
+                        "Ações por seletor serão capturadas pela gravação ativa."
                         if records_business_action
-                        else "Durante o login, estas ações não entram no aprendizado."
+                        else "Fora da gravação, estas ações são apenas apoio operacional."
                     )
                 )
                 text_key = f"demo_operator_text_{session_id}"
@@ -413,41 +428,63 @@ def _render_demo_v01() -> None:
                 def run_operator_request(operation: str) -> None:
                     text_value = str(st.session_state.get(text_key, "") or "")
                     selector_value = str(st.session_state.get(selector_key, "") or "").strip()
+                    active_recording_session_id = str(
+                        st.session_state.get("demo_active_recording_session_id")
+                        or (session_id if records_business_action else "")
+                    )
                     try:
                         if operation == "insert_active":
-                            demo_api_request(
+                            response = demo_api_request(
                                 "POST",
                                 f"/api/demo/sessions/{encoded_session}/operator/insert-active",
                                 {"value": text_value},
                                 api_base_url=API_BASE_URL,
                             )
-                            message = "Texto inserido no campo ativo sem entrar no aprendizado."
+                            operator_result = response.get("operator", {})
+                            st.session_state.demo_last_operator_result = operator_result
+                            message = (
+                                "Texto inserido no campo ativo; aguardando captura do listener da gravação."
+                                if records_business_action
+                                else "Texto inserido no campo ativo sem entrar no aprendizado."
+                            )
                         elif operation == "fill":
-                            demo_api_request(
+                            response = demo_api_request(
                                 "POST",
                                 f"/api/demo/sessions/{encoded_session}/operator/fill",
                                 {
                                     "selector": selector_value,
                                     "value": text_value,
                                     "record_action": records_business_action,
+                                    "operator_request_session_id": session_id,
+                                    "active_recording_session_id": active_recording_session_id,
                                 },
                                 api_base_url=API_BASE_URL,
                             )
+                            operator_result = response.get("operator", {})
+                            st.session_state.demo_last_operator_result = operator_result
+                            if records_business_action and not operator_result.get("recorded"):
+                                raise DemoApiError("Modo operador não gravou evento na sessão ativa.")
                             message = (
                                 "Campo preenchido e capturado pela gravação."
                                 if records_business_action
                                 else "Campo preenchido sem entrar no aprendizado."
                             )
                         else:
-                            demo_api_request(
+                            response = demo_api_request(
                                 "POST",
                                 f"/api/demo/sessions/{encoded_session}/operator/click",
                                 {
                                     "selector": selector_value,
                                     "record_action": records_business_action,
+                                    "operator_request_session_id": session_id,
+                                    "active_recording_session_id": active_recording_session_id,
                                 },
                                 api_base_url=API_BASE_URL,
                             )
+                            operator_result = response.get("operator", {})
+                            st.session_state.demo_last_operator_result = operator_result
+                            if records_business_action and not operator_result.get("recorded"):
+                                raise DemoApiError("Modo operador não gravou evento na sessão ativa.")
                             message = (
                                 "Clique enviado e capturado pela gravação."
                                 if records_business_action
@@ -501,6 +538,15 @@ def _render_demo_v01() -> None:
                         st.success(flash[1])
                     else:
                         st.error(flash[1])
+                last_operator_result = st.session_state.get("demo_last_operator_result")
+                if isinstance(last_operator_result, dict) and last_operator_result:
+                    st.caption(
+                        "Último operador: "
+                        f"session={last_operator_result.get('session_id', '')}; "
+                        f"recording={last_operator_result.get('recording_active', '')}; "
+                        f"recorded={last_operator_result.get('recorded', '')}; "
+                        f"event={last_operator_result.get('event_type', '')}#{last_operator_result.get('event_id', '')}."
+                    )
 
         recorded_steps = st.session_state.get("demo_recorded_steps")
         saved_action = st.session_state.get("demo_saved_action")
@@ -543,6 +589,12 @@ def _render_demo_v01() -> None:
                         },
                         api_base_url=API_BASE_URL,
                     )
+                    st.session_state.demo_active_recording_session_id = session_id
+                    st.session_state.pop("demo_recorded_steps", None)
+                    st.session_state.pop("demo_recording_result", None)
+                    st.session_state.pop("demo_saved_action", None)
+                    st.session_state.pop("demo_last_run", None)
+                    st.session_state.pop("demo_last_operator_result", None)
                     st.rerun()
                 except DemoApiError as exc:
                     st.error(str(exc))
@@ -557,8 +609,12 @@ def _render_demo_v01() -> None:
                         f"/api/demo/sessions/{encoded_session}/recording/stop",
                         api_base_url=API_BASE_URL,
                     )
+                    reviewed_session_id = str(result.get("review_summary", {}).get("reviewed_session_id") or "")
+                    if reviewed_session_id and reviewed_session_id != session_id:
+                        raise DemoApiError("Review retornou sessão diferente da sessão ativa.")
                     st.session_state.demo_recorded_steps = result.get("steps", [])
                     st.session_state.demo_recording_result = result
+                    st.session_state.pop("demo_active_recording_session_id", None)
                     st.rerun()
                 except DemoApiError as exc:
                     st.error(str(exc))
@@ -586,6 +642,21 @@ def _render_demo_v01() -> None:
             metrics[5].metric("Downloads", "sim" if review.get("downloads") else "não")
             if review.get("final_page_captured"):
                 st.caption("Página final capturada.")
+            session_ids = {
+                "active_recording_session_id": str(review.get("active_recording_session_id") or ""),
+                "operator_request_session_id": str(review.get("operator_request_session_id") or ""),
+                "reviewed_session_id": str(review.get("reviewed_session_id") or ""),
+                "last_recorded_event_session_id": str(review.get("last_recorded_event_session_id") or ""),
+            }
+            comparable_session_ids = {
+                value
+                for key, value in session_ids.items()
+                if value and key != "operator_request_session_id"
+            }
+            if session_ids["operator_request_session_id"]:
+                comparable_session_ids.add(session_ids["operator_request_session_id"])
+            if len(comparable_session_ids) > 1:
+                st.error("A gravação, o operador e o review apontam para sessões diferentes.")
             hard_warning = str(review.get("hard_warning") or "")
             if hard_warning:
                 st.error(hard_warning)
@@ -653,6 +724,29 @@ def _render_demo_v01() -> None:
                             "operator_fill_count": int(review.get("operator_fill_count") or 0),
                         }
                     )
+            with st.expander("Diagnóstico final da gravação", expanded=False):
+                final_diagnostics = review.get("diagnostics", {})
+                st.write(
+                    {
+                        **session_ids,
+                        "raw_event_count": (
+                            int(final_diagnostics.get("raw_event_count") or 0)
+                            if isinstance(final_diagnostics, dict)
+                            else len(raw_event_summary)
+                        ),
+                        "fill_event_count": int(review.get("fills_captured") or 0),
+                        "select_event_count": int(review.get("selects_captured") or 0),
+                        "operator_attempts": int(review.get("operator_fill_attempt_count") or 0),
+                        "operator_variable_events": int(review.get("operator_fill_count") or 0),
+                        "last_operator_result": review.get("last_operator_result", {}),
+                        "last_backend_recorded_event": review.get("last_backend_recorded_event", {}),
+                        "direct_typing_capture_status": (
+                            final_diagnostics.get("direct_typing_capture_status", "")
+                            if isinstance(final_diagnostics, dict)
+                            else ""
+                        ),
+                    }
+                )
 
             st.markdown("**O que esta rotina deve retornar?**")
             extraction_target = st.text_input(

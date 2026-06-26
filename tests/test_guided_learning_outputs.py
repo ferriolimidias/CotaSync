@@ -109,6 +109,11 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         operator_fill_recorded_count=0,
         operator_click_attempt_count=0,
         operator_click_recorded_count=0,
+        active_recording_session_id="session",
+        last_operator_result={},
+        last_backend_recorded_event={},
+        last_recorded_event_session_id="",
+        observer_tasks=set(),
         context=SimpleNamespace(pages=[]),
         storage_state_path=Path(tempfile.gettempdir()) / "cotasync-unit" / "storage_state.json",
         last_screenshot_path="",
@@ -487,6 +492,13 @@ class GuidedLearningSaveTests(unittest.TestCase):
             "_record_live_step",
             new=recorder,
         ):
+            recorder.return_value = {
+                "session_id": "session",
+                "event_type": "fill",
+                "selector": "#ctl00_Conteudo_edtGrupo",
+                "source": "operator_mode",
+                "variable_key": "grupo",
+            }
             result = asyncio.run(manager.operator_fill("session", "#ctl00_Conteudo_edtGrupo", "123", record_action=True))
         self.assertTrue(result["recorded"])
         raw_event = recorder.await_args.args[1]
@@ -518,6 +530,64 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(diagnostics["operator_fill_count"], 1)
         self.assertEqual(diagnostics["operator_fill_attempt_count"], 1)
 
+    def test_operator_fill_with_stale_ui_record_action_false_still_records_active_session(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        session.active_recording_session_id = "session"
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeLocator())):
+            result = asyncio.run(
+                manager.operator_fill(
+                    "session",
+                    "#ctl00_Conteudo_edtGrupo",
+                    "123",
+                    record_action=False,
+                    active_recording_session_id="session",
+                )
+            )
+        self.assertTrue(result["recorded"])
+        self.assertEqual(result["operator_request_session_id"], "session")
+        self.assertEqual(result["active_recording_session_id"], "session")
+        self.assertEqual(result["last_recorded_event_session_id"], "session")
+        self.assertEqual(result["event_type"], "fill")
+        self.assertEqual(session.operator_fill_attempt_count, 1)
+        self.assertEqual(session.operator_fill_recorded_count, 1)
+        self.assertEqual(session.learning_events[0]["session_id"], "session")
+        self.assertEqual(session.learning_events[0]["source"], "operator_mode")
+
+    def test_operator_fill_session_id_mismatch_is_rejected(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.active_recording_session_id = "session"
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with self.assertRaisesRegex(Exception, "Sessao ativa"):
+            asyncio.run(
+                manager.operator_fill(
+                    "session",
+                    "#ctl00_Conteudo_edtGrupo",
+                    "123",
+                    record_action=True,
+                    active_recording_session_id="other-session",
+                )
+            )
+
+    def test_operator_fill_during_login_screen_records_when_recording_active(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.status = "gravando"
+        session.recording = True
+        session.page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+        session.steps = []
+        session.learning_events = []
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeLocator())):
+            result = asyncio.run(manager.operator_fill("session", "#ctl00_Conteudo_edtGrupo", "123"))
+        self.assertTrue(result["recorded"])
+        self.assertEqual(session.learning_events[0]["event_type"], "fill")
+        self.assertEqual(session.learning_events[0]["url_before"], "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
+
     def test_operator_fill_outside_recording_does_not_create_learned_variable(self) -> None:
         manager = DemoSessionManager()
         session = _session()  # type: ignore[assignment]
@@ -531,6 +601,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertFalse(result["recorded"])
         self.assertEqual(session.steps, [])
         self.assertEqual(session.learning_events, [])
+        self.assertEqual(session.operator_fill_attempt_count, 0)
 
     def test_normal_input_textarea_and_select_events_create_variables(self) -> None:
         manager = DemoSessionManager()
@@ -572,6 +643,10 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual([step["variavel"] for step in session.steps], ["grupo", "cliente", "tipo_consulta"])
         self.assertEqual([step["valor"] for step in session.steps], ["", "", ""])
         self.assertEqual([event["event_type"] for event in session.learning_events], ["fill", "fill", "select"])
+        diagnostics = asyncio.run(manager.recording_diagnostics("session"))
+        self.assertEqual(diagnostics["fill_event_count"], 2)
+        self.assertEqual(diagnostics["select_event_count"], 1)
+        self.assertEqual(diagnostics["direct_typing_capture_status"], "field_events_observed")
 
     def test_variable_key_suggestions_cover_cota_and_unknown_selector(self) -> None:
         manager = DemoSessionManager()
@@ -622,6 +697,54 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(session.steps[0]["tipo"], "selecionar")
         self.assertEqual(session.steps[0]["variavel"], "tipo_consulta")
         self.assertEqual(session.learning_events[0]["event_type"], "select")
+
+    def test_stop_recording_returns_latest_operator_counts_in_review(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = [{"tipo": "preencher", "seletor": "#ctl00_Conteudo_edtGrupo", "valor": "", "variavel": "grupo"}]
+        session.learning_events = [
+            {
+                "session_id": "session",
+                "step_index": 0,
+                "event_type": "fill",
+                "selector": "#ctl00_Conteudo_edtGrupo",
+                "source": "operator_mode",
+                "variable_key": "grupo",
+            }
+        ]
+        session.operator_fill_attempt_count = 1
+        session.operator_fill_recorded_count = 1
+        session.active_recording_session_id = "session"
+        session.last_recorded_event_session_id = "session"
+        session.last_backend_recorded_event = {
+            "session_id": "session",
+            "event_id": 0,
+            "event_type": "fill",
+            "selector": "#ctl00_Conteudo_edtGrupo",
+            "source": "operator_mode",
+            "variable_key": "grupo",
+        }
+        session.last_operator_result = {
+            "session_id": "session",
+            "operator_request_session_id": "session",
+            "recorded": True,
+            "event_id": 0,
+            "event_type": "fill",
+        }
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_evaluate_all_frames", new=AsyncMock(return_value=[])), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ), patch.object(manager, "status", new=AsyncMock(return_value={"id": "session", "status": "autenticada"})):
+            result = asyncio.run(manager.stop_recording("session"))
+        review = result["review_summary"]
+        self.assertEqual(review["reviewed_session_id"], "session")
+        self.assertEqual(review["active_recording_session_id"], "session")
+        self.assertEqual(review["last_recorded_event_session_id"], "session")
+        self.assertEqual(review["fills_captured"], 1)
+        self.assertEqual(review["operator_fill_attempt_count"], 1)
+        self.assertEqual(review["operator_fill_count"], 1)
+        self.assertEqual(review["diagnostics"]["raw_event_count"], 1)
 
     def test_missing_expected_input_capture_is_persisted_as_warning(self) -> None:
         manager = DemoSessionManager()
@@ -676,6 +799,27 @@ class GuidedLearningSaveTests(unittest.TestCase):
             catalog = load_actions_catalog(Path(tmp.name))
         self.assertEqual(catalog.actions[0].variables[0].key, "grupo")
         self.assertEqual(catalog.actions[0].variables[0].label, "Grupo")
+
+    def test_saved_operator_fill_exposes_quick_execution_variable(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeLocator())):
+            asyncio.run(manager.operator_fill("session", "#ctl00_Conteudo_edtGrupo", "123", record_action=True))
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            saved = asyncio.run(manager.save_action("session", "Consultar grupo", "Consulta.", {}))
+        self.assertEqual(saved["variables"], [{"key": "grupo", "label": "Grupo", "required": True}])
+        action = captured["acoes_conhecidas"]["Consultar grupo"]  # type: ignore[index]
+        self.assertEqual(action["passos_playwright"][0]["variavel"], "grupo")
+        self.assertEqual(action["passos_playwright"][0]["value_template"], "{{grupo}}")
 
     def test_external_learned_action_saves_access_profile_metadata(self) -> None:
         manager = DemoSessionManager()

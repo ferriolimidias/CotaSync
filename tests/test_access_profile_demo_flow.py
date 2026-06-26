@@ -80,6 +80,16 @@ class DemoAccessProfileUiTests(unittest.TestCase):
         self.assertIn("Nenhum campo digitado foi capturado", source)
         self.assertIn("Salvar mesmo sem variáveis capturadas", source)
 
+    def test_operator_ui_uses_active_session_id_and_live_diagnostics(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn('"operator_request_session_id": session_id', source)
+        self.assertIn('"active_recording_session_id": active_recording_session_id', source)
+        self.assertIn("st.session_state.demo_active_recording_session_id = session_id", source)
+        self.assertIn("Modo operador não gravou evento na sessão ativa.", source)
+        self.assertIn("last_backend_recorded_event", source)
+        self.assertIn("direct_typing_capture_status", source)
+        self.assertNotIn("Durante o login, estas ações não entram no aprendizado.", source)
+
     def test_session_save_test_clear_controls_exist_in_settings(self) -> None:
         source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
         self.assertIn("Abrir navegador para login", source)

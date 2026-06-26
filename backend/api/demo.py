@@ -48,6 +48,8 @@ class OperatorFillRequest(BaseModel):
     selector: str
     value: str = ""
     record_action: bool = True
+    active_recording_session_id: str = ""
+    operator_request_session_id: str = ""
 
 
 class OperatorInsertActiveRequest(BaseModel):
@@ -57,6 +59,8 @@ class OperatorInsertActiveRequest(BaseModel):
 class OperatorClickRequest(BaseModel):
     selector: str
     record_action: bool = True
+    active_recording_session_id: str = ""
+    operator_request_session_id: str = ""
 
 
 def _raise_safe(exc: DemoSessionError, status_code: int = 409) -> None:
@@ -101,12 +105,14 @@ async def get_recording_diagnostics(session_id: str) -> dict[str, Any]:
 
 @router.post("/api/demo/sessions/{session_id}/operator/fill")
 async def operator_fill(session_id: str, payload: OperatorFillRequest) -> dict[str, Any]:
+    expected_session = payload.active_recording_session_id or payload.operator_request_session_id
     try:
         result = await demo_session_manager.operator_fill(
             session_id,
             payload.selector,
             payload.value,
             record_action=payload.record_action,
+            active_recording_session_id=expected_session,
         )
     except DemoSessionError as exc:
         _raise_safe(exc)
@@ -127,11 +133,13 @@ async def operator_insert_active(
 
 @router.post("/api/demo/sessions/{session_id}/operator/click")
 async def operator_click(session_id: str, payload: OperatorClickRequest) -> dict[str, Any]:
+    expected_session = payload.active_recording_session_id or payload.operator_request_session_id
     try:
         result = await demo_session_manager.operator_click(
             session_id,
             payload.selector,
             record_action=payload.record_action,
+            active_recording_session_id=expected_session,
         )
     except DemoSessionError as exc:
         _raise_safe(exc)

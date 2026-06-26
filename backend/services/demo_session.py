@@ -570,6 +570,10 @@ class DemoBrowserSession:
     operator_fill_recorded_count: int = 0
     operator_click_attempt_count: int = 0
     operator_click_recorded_count: int = 0
+    active_recording_session_id: str = ""
+    last_operator_result: dict[str, Any] = field(default_factory=dict)
+    last_backend_recorded_event: dict[str, Any] = field(default_factory=dict)
+    last_recorded_event_session_id: str = ""
 
 
 class DemoSessionManager:
@@ -714,7 +718,7 @@ class DemoSessionManager:
         field_metadata: dict[str, Any] | None = None,
         frame_metadata: dict[str, str] | None = None,
         bypass_operator_suppression: bool = False,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         session = self._get(session_id)
         now = _utc_now()
         kind = str(field_kind or "").strip().lower()
@@ -737,7 +741,7 @@ class DemoSessionManager:
             field_kind=kind,
             source=source,
         )
-        await self._record_live_step(
+        return await self._record_live_step(
             session,
             raw,
             {"page": session.page, "frame_metadata": frame_metadata or {}},
@@ -751,7 +755,7 @@ class DemoSessionManager:
         source: Any = None,
         *,
         bypass_operator_suppression: bool = False,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         if isinstance(raw, dict) and str(raw.get("tipo") or "").strip().lower() in {"preencher", "selecionar"}:
             raw = self._normalize_field_variable_raw(
                 session,
@@ -764,7 +768,7 @@ class DemoSessionManager:
             bypass_operator_suppression=bypass_operator_suppression,
         )
         if step_index is None or not isinstance(raw, dict):
-            return
+            return None
 
         page = source.get("page") if isinstance(source, dict) else None
         source_frame = source.get("frame") if isinstance(source, dict) else None
@@ -803,6 +807,7 @@ class DemoSessionManager:
                 "teclar": "wait",
             }.get(str(raw.get("tipo") or ""), "wait")
         event: dict[str, Any] = {
+            "session_id": session.id,
             "step_index": step_index,
             "event_type": event_type,
             "selector": str(raw.get("seletor") or ""),
@@ -834,9 +839,19 @@ class DemoSessionManager:
 
         event.update(deterministic_observe_learning_step(event))
         session.learning_events.append(event)
+        session.last_recorded_event_session_id = session.id
+        session.last_backend_recorded_event = {
+            "session_id": session.id,
+            "event_id": len(session.learning_events) - 1,
+            "event_type": event_type,
+            "selector": str(event.get("selector") or ""),
+            "source": str(event.get("source") or ""),
+            "variable_key": str(event.get("variable_key") or ""),
+        }
         session.last_screenshot_path = screenshot_after_path or session.last_screenshot_path
         session.last_page_count = len(live_pages)
         session.download_detected = False
+        return event
 
     async def _page_is_authenticated(self, session: DemoBrowserSession, page: Page) -> bool:
         """Valida os sinais publicos aceitos pela demo sem depender do status em memoria."""
@@ -1378,7 +1393,33 @@ class DemoSessionManager:
         last_event = session.learning_events[-1] if session.learning_events else {}
         event_types = [str(event.get("event_type") or "") for event in session.learning_events]
         source_types = [str(event.get("source") or "") for event in session.learning_events]
+        last_operator_result = getattr(session, "last_operator_result", {}) or {}
+        last_backend_recorded_event = getattr(session, "last_backend_recorded_event", {}) or {}
+        fill_count = event_types.count("fill")
+        select_count = event_types.count("select")
+        if fill_count + select_count > 0:
+            direct_typing_status = "field_events_observed"
+        elif frame_count <= 0:
+            direct_typing_status = "wrong_page_or_no_frames"
+        elif instrumented_frames <= 0:
+            direct_typing_status = "recorder_not_installed"
+        elif any("frame_diagnostic_inaccessible" in item for item in session.recorder_errors):
+            direct_typing_status = "cross_origin_or_inaccessible_frame"
+        elif not session.recording:
+            direct_typing_status = "recording_inactive"
+        else:
+            direct_typing_status = "no_input_events_observed"
         return {
+            "active_recording_session_id": str(
+                getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
+            ),
+            "reviewed_session_id": session.id,
+            "operator_request_session_id": str(
+                last_operator_result.get("operator_request_session_id")
+                or last_operator_result.get("session_id")
+                or ""
+            ),
+            "last_recorded_event_session_id": str(getattr(session, "last_recorded_event_session_id", "") or ""),
             "recorder_installed": instrumented_frames > 0,
             "active_page_url": _safe_page_url(session.page.url),
             "active_page_title": active_title[:200],
@@ -1386,8 +1427,8 @@ class DemoSessionManager:
             "instrumented_frame_count": instrumented_frames,
             "raw_event_count": len(session.learning_events),
             "click_event_count": event_types.count("click"),
-            "fill_event_count": event_types.count("fill"),
-            "select_event_count": event_types.count("select"),
+            "fill_event_count": fill_count,
+            "select_event_count": select_count,
             "operator_fill_count": sum(
                 1
                 for event in session.learning_events
@@ -1402,6 +1443,9 @@ class DemoSessionManager:
             "last_event_type": str(last_event.get("event_type") or ""),
             "last_event_selector": str(last_event.get("selector") or ""),
             "last_event_frame_url": str(last_event.get("frame_url") or ""),
+            "last_operator_result": dict(last_operator_result),
+            "last_backend_recorded_event": dict(last_backend_recorded_event),
+            "direct_typing_capture_status": direct_typing_status,
             "recorder_errors": list(session.recorder_errors[-20:]),
         }
 
@@ -1451,7 +1495,8 @@ class DemoSessionManager:
         safe_value = str(value or "")
         if len(safe_value) > 20_000:
             raise DemoSessionError("O texto excede o limite do Modo operador.")
-        self._prepare_operator_utility(session)
+        if not session.recording:
+            self._prepare_operator_utility(session)
         try:
             editable = await session.page.evaluate(
                 """() => {
@@ -1493,11 +1538,19 @@ class DemoSessionManager:
         except Exception as exc:
             raise DemoSessionError("Não foi possível inserir texto no campo ativo.") from exc
         logger.info("Modo operador inseriu texto no campo ativo: session=%s", session.id)
-        return {
+        result = {
             "session_id": session.id,
+            "operator_request_session_id": session.id,
+            "active_recording_session_id": str(
+                getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
+            ),
             "operation": "insert_active_text",
+            "recording": session.recording,
+            "recording_active": session.recording,
             "recorded": False,
         }
+        session.last_operator_result = dict(result)
+        return result
 
     async def operator_fill(
         self,
@@ -1506,14 +1559,19 @@ class DemoSessionManager:
         value: str,
         *,
         record_action: bool = True,
+        active_recording_session_id: str = "",
     ) -> dict[str, Any]:
         session = self._get(session_id)
-        if record_action and session.recording:
+        requested_active_session = str(active_recording_session_id or "").strip()
+        if requested_active_session and requested_active_session != session.id:
+            raise DemoSessionError("Sessao ativa da gravacao difere da sessao usada no Modo operador.")
+        effective_record_action = bool(session.recording)
+        if effective_record_action:
             session.operator_fill_attempt_count += 1
         safe_value = str(value or "")
         if len(safe_value) > 20_000:
             raise DemoSessionError("O texto excede o limite do Modo operador.")
-        locator = await self._operator_locator(session, selector, record_action=record_action)
+        locator = await self._operator_locator(session, selector, record_action=effective_record_action)
         field_metadata: dict[str, str] = {}
         field_kind = "operator_fill"
         try:
@@ -1551,9 +1609,14 @@ class DemoSessionManager:
                     field_kind = "operator_select"
         except Exception:
             field_metadata = {}
-        if not record_action:
+        if effective_record_action:
+            # Evita duplicar o evento emitido pelo listener do navegador; o
+            # evento de operador abaixo é gravado diretamente com bypass.
+            self._prepare_operator_utility(session, duration=1.5)
+        else:
             self._prepare_operator_utility(session)
-        step_count_before = len(session.steps)
+        event_count_before = len(session.learning_events)
+        recorded_event: dict[str, Any] | None = None
         try:
             if field_kind == "operator_select":
                 await locator.select_option(safe_value, timeout=_REPLAY_STEP_TIMEOUT_MS)
@@ -1568,37 +1631,42 @@ class DemoSessionManager:
             await asyncio.sleep(0.4)
         except Exception as exc:
             raise DemoSessionError("Não foi possível preencher o campo na página ativa.") from exc
-        if record_action and session.recording:
-            captured_by_listener = any(
-                step.get("tipo") in {"preencher", "selecionar"} and step.get("seletor") == selector
-                for step in session.steps[step_count_before:]
+        if effective_record_action and session.recording:
+            recorded_event = await self.record_field_variable_event(
+                session.id,
+                selector,
+                field_kind=field_kind,
+                source="operator_mode",
+                example_value=safe_value,
+                field_metadata=field_metadata,
+                bypass_operator_suppression=True,
             )
-            if not captured_by_listener:
-                await self.record_field_variable_event(
-                    session.id,
-                    selector,
-                    field_kind=field_kind,
-                    source="operator_mode",
-                    example_value=safe_value,
-                    field_metadata=field_metadata,
-                    bypass_operator_suppression=True,
-                )
-            if any(
-                step.get("tipo") in {"preencher", "selecionar"} and step.get("seletor") == selector
-                for step in session.steps[step_count_before:]
-            ):
-                session.operator_fill_recorded_count += 1
+            if not recorded_event or recorded_event.get("session_id") != session.id:
+                raise DemoSessionError("Modo operador retornaria sucesso sem evento na sessão ativa.")
+            session.operator_fill_recorded_count += 1
+        event_id = len(session.learning_events) - 1 if len(session.learning_events) > event_count_before else None
+        recorded = bool(recorded_event and effective_record_action and session.recording)
+        result = {
+            "session_id": session.id,
+            "operator_request_session_id": session.id,
+            "active_recording_session_id": str(
+                getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
+            ),
+            "operation": "fill",
+            "recording": session.recording,
+            "recording_active": session.recording,
+            "recorded": recorded,
+            "event_id": event_id,
+            "event_type": str(recorded_event.get("event_type") or "") if recorded_event else "",
+            "last_recorded_event_session_id": str(getattr(session, "last_recorded_event_session_id", "") or ""),
+        }
+        session.last_operator_result = dict(result)
         logger.info(
             "Modo operador preencheu elemento: session=%s recorded=%s",
             session.id,
-            record_action,
+            recorded,
         )
-        return {
-            "session_id": session.id,
-            "operation": "fill",
-            "recording": session.recording,
-            "recorded": bool(record_action and session.recording),
-        }
+        return result
 
     async def operator_click(
         self,
@@ -1606,55 +1674,68 @@ class DemoSessionManager:
         selector: str,
         *,
         record_action: bool = True,
+        active_recording_session_id: str = "",
     ) -> dict[str, Any]:
         session = self._get(session_id)
-        if record_action and session.recording:
+        requested_active_session = str(active_recording_session_id or "").strip()
+        if requested_active_session and requested_active_session != session.id:
+            raise DemoSessionError("Sessao ativa da gravacao difere da sessao usada no Modo operador.")
+        effective_record_action = bool(session.recording)
+        if effective_record_action:
             session.operator_click_attempt_count += 1
-        locator = await self._operator_locator(session, selector, record_action=record_action)
-        if not record_action:
+        locator = await self._operator_locator(session, selector, record_action=effective_record_action)
+        if effective_record_action:
+            self._prepare_operator_utility(session, duration=1.5)
+        else:
             self._prepare_operator_utility(session, duration=2.5)
-        step_count_before = len(session.steps)
+        event_count_before = len(session.learning_events)
+        recorded_event: dict[str, Any] | None = None
         try:
             await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
             await asyncio.sleep(1.1)
         except Exception as exc:
             raise DemoSessionError("Não foi possível clicar no elemento da página ativa.") from exc
-        if record_action and session.recording:
-            captured_by_listener = any(
-                step.get("tipo") == "clicar" and step.get("seletor") == selector
-                for step in session.steps[step_count_before:]
+        if effective_record_action and session.recording:
+            now = _utc_now()
+            recorded_event = await self._record_live_step(
+                session,
+                {
+                    "tipo": "clicar",
+                    "event_type": "click",
+                    "seletor": selector,
+                    "valor": "",
+                    "timestamp_before": now,
+                    "timestamp_after": now,
+                    "elapsed_ms": 0,
+                    "url_before": session.page.url,
+                    "url_after": session.page.url,
+                    "source": "operator_mode",
+                },
+                {"page": session.page},
+                bypass_operator_suppression=True,
             )
-            if not captured_by_listener:
-                now = _utc_now()
-                await self._record_live_step(
-                    session,
-                    {
-                        "tipo": "clicar",
-                        "event_type": "click",
-                        "seletor": selector,
-                        "valor": "",
-                        "timestamp_before": now,
-                        "timestamp_after": now,
-                        "elapsed_ms": 0,
-                        "url_before": session.page.url,
-                        "url_after": session.page.url,
-                        "source": "operator_mode",
-                    },
-                    {"page": session.page},
-                    bypass_operator_suppression=True,
-                )
-            if any(
-                step.get("tipo") == "clicar" and step.get("seletor") == selector
-                for step in session.steps[step_count_before:]
-            ):
-                session.operator_click_recorded_count += 1
-        logger.info("Modo operador clicou em elemento: session=%s recorded=%s", session.id, record_action)
-        return {
+            if not recorded_event or recorded_event.get("session_id") != session.id:
+                raise DemoSessionError("Modo operador retornaria sucesso sem evento na sessão ativa.")
+            session.operator_click_recorded_count += 1
+        event_id = len(session.learning_events) - 1 if len(session.learning_events) > event_count_before else None
+        recorded = bool(recorded_event and effective_record_action and session.recording)
+        result = {
             "session_id": session.id,
+            "operator_request_session_id": session.id,
+            "active_recording_session_id": str(
+                getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
+            ),
             "operation": "click",
             "recording": session.recording,
-            "recorded": bool(record_action and session.recording),
+            "recording_active": session.recording,
+            "recorded": recorded,
+            "event_id": event_id,
+            "event_type": str(recorded_event.get("event_type") or "") if recorded_event else "",
+            "last_recorded_event_session_id": str(getattr(session, "last_recorded_event_session_id", "") or ""),
         }
+        session.last_operator_result = dict(result)
+        logger.info("Modo operador clicou em elemento: session=%s recorded=%s", session.id, record_action)
+        return result
 
     async def confirm_login(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
@@ -1798,6 +1879,10 @@ class DemoSessionManager:
         session.operator_fill_recorded_count = 0
         session.operator_click_attempt_count = 0
         session.operator_click_recorded_count = 0
+        session.active_recording_session_id = session.id
+        session.last_operator_result = {}
+        session.last_backend_recorded_event = {}
+        session.last_recorded_event_session_id = ""
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -1922,6 +2007,7 @@ class DemoSessionManager:
             "captured": bool(final_pages),
             "pages": final_pages,
         }
+        latest_diagnostics = await self.recording_diagnostics(session_id)
         session.recording = False
         session.status = "autenticada"
         if not session.steps:
@@ -1984,6 +2070,7 @@ class DemoSessionManager:
             "diagnostic_error": diagnostic_error,
             "raw_event_summary": [
                 {
+                    "session_id": str(event.get("session_id") or session.id),
                     "event_type": str(event.get("event_type") or ""),
                     "selector": str(event.get("selector") or ""),
                     "source": str(event.get("source") or ""),
@@ -1992,6 +2079,21 @@ class DemoSessionManager:
                 for event in session.learning_events
             ],
         }
+        review_summary.update(
+            {
+                "active_recording_session_id": str(getattr(session, "active_recording_session_id", "") or session.id),
+                "operator_request_session_id": str(
+                    (getattr(session, "last_operator_result", {}) or {}).get("operator_request_session_id")
+                    or (getattr(session, "last_operator_result", {}) or {}).get("session_id")
+                    or ""
+                ),
+                "reviewed_session_id": session.id,
+                "last_recorded_event_session_id": str(getattr(session, "last_recorded_event_session_id", "") or ""),
+                "last_operator_result": dict(getattr(session, "last_operator_result", {}) or {}),
+                "last_backend_recorded_event": dict(getattr(session, "last_backend_recorded_event", {}) or {}),
+                "diagnostics": latest_diagnostics,
+            }
+        )
         logger.info("Gravacao finalizada na sessao %s com %s passos", session_id, len(session.steps))
         return {
             "session": await self.status(session_id),
