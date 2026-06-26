@@ -23,7 +23,7 @@ class SaveDemoActionRequest(BaseModel):
     success_criteria: str = ""
     output_type: str = "apenas abrir tela"
     user_result_summary_template: str | None = None
-    ai_result_summary_enabled: bool = False
+    ai_result_summary_enabled: bool = True
     ai_recovery_enabled: bool = False
     variable_names: dict[str, str] = Field(default_factory=dict)
     extraction_targets: list[dict[str, str]] = Field(default_factory=list)
@@ -40,7 +40,7 @@ class GuidedLearningRequest(BaseModel):
     expected_result: str = ""
     success_criteria: str = ""
     output_type: str = "apenas abrir tela"
-    ai_result_summary_enabled: bool = False
+    ai_result_summary_enabled: bool = True
     ai_recovery_enabled: bool = False
 
 
@@ -90,6 +90,15 @@ async def get_operator_diagnostics(session_id: str) -> dict[str, Any]:
     return {"status": "ok", "operator": diagnostics}
 
 
+@router.get("/api/demo/sessions/{session_id}/recording/diagnostics")
+async def get_recording_diagnostics(session_id: str) -> dict[str, Any]:
+    try:
+        diagnostics = await demo_session_manager.recording_diagnostics(session_id)
+    except DemoSessionError as exc:
+        _raise_safe(exc, 404)
+    return {"status": "ok", "diagnostics": diagnostics}
+
+
 @router.post("/api/demo/sessions/{session_id}/operator/fill")
 async def operator_fill(session_id: str, payload: OperatorFillRequest) -> dict[str, Any]:
     try:
@@ -136,6 +145,15 @@ async def confirm_demo_login(session_id: str) -> dict[str, Any]:
     except DemoSessionError as exc:
         _raise_safe(exc)
     return {"status": "ok", "session": session}
+
+
+@router.delete("/api/demo/sessions/{session_id}/saved-session")
+async def clear_demo_saved_session(session_id: str) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.clear_saved_session(session_id)
+    except DemoSessionError as exc:
+        _raise_safe(exc, 404)
+    return {"status": "ok", **result}
 
 
 @router.post("/api/demo/sessions/{session_id}/recording/start")

@@ -175,13 +175,20 @@ def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
         "expected_system_host": str(data.get("expected_system_host") or "").strip(),
         "session_guardian_enabled": bool(data.get("session_guardian_enabled", True)),
         "legacy_unconfigured": not bool(
-            str(data.get("access_profile_name") or "").strip()
-            and str(data.get("microsoft_saved_account_text") or "").strip()
-            and (
-                str(data.get("microsoft_saved_account_identifier") or "").strip()
-                or str(data.get("access_profile_email_or_identifier") or "").strip()
+            (
+                str(data.get("access_profile_name") or "").strip()
+                and str(data.get("microsoft_saved_account_text") or "").strip()
+                and (
+                    str(data.get("microsoft_saved_account_identifier") or "").strip()
+                    or str(data.get("access_profile_email_or_identifier") or "").strip()
+                )
+                and str(data.get("expected_system_host") or "").strip()
             )
-            and str(data.get("expected_system_host") or "").strip()
+            or (
+                str(data.get("learning_mode") or "").strip()
+                in {"human_demo_mechanical_ai_reviewed", "desktop_browser_mechanical_ai_reviewed"}
+                and bool(steps)
+            )
         ),
         "requires_authenticated_session": bool(data.get("requires_authenticated_session", True)),
         "action_timeout_seconds": data.get("action_timeout_seconds"),

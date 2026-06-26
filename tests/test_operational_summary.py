@@ -165,7 +165,7 @@ class OperationalSummaryTests(unittest.TestCase):
             status="success",
             result_payload={"dados_extraidos": {"Qtd. Pcls. Pagas": "032"}},
         )
-        self.assertEqual(summary, "Consulta concluída. Encontrei: Quantidade de parcelas pagas: 032.")
+        self.assertEqual(summary, "Quantidade de parcelas pagas: 032")
 
         not_found = deterministic_operational_summary(
             _action(
@@ -407,9 +407,9 @@ class OperationalSummaryTests(unittest.TestCase):
 
     def test_frontend_objective_extraction_mentions_parcela_targets(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "frontend" / "app.py").read_text(encoding="utf-8")
-        self.assertIn('"valor da parcela"', source)
-        self.assertIn('"parcela atual"', source)
-        self.assertIn('"Extrair texto visível da tela final (menos preciso)"', source)
+        self.assertIn("Qtd. Pcls. Pagas", source)
+        self.assertIn("O que esta rotina deve retornar?", source)
+        self.assertIn("Digitar nome do campo desejado", source)
 
 
 if __name__ == "__main__":

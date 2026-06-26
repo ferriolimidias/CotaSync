@@ -530,6 +530,11 @@ def deterministic_operational_summary(
                 rendered = ""
             if rendered and _summary_is_safe(rendered, extracted):
                 return f"{rendered} Arquivo disponível." if has_files else rendered
+        if len(extracted) == 1:
+            only_key, only_value = next(iter(extracted.items()))
+            if _normalize_label_key(only_key) == "quantidade de parcelas pagas":
+                suffix = " Arquivo disponível." if has_files else ""
+                return f"{only_key}: {only_value}{suffix}"
         values = ". ".join(f"{key.capitalize()}: {value}" for key, value in extracted.items())
         suffix = " Arquivo disponível." if has_files else ""
         return f"Consulta concluída. Encontrei: {values}.{suffix}"

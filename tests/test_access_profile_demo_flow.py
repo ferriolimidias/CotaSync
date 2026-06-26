@@ -45,25 +45,28 @@ class DemoResetTests(unittest.TestCase):
 
 
 class DemoAccessProfileUiTests(unittest.TestCase):
-    def test_access_profile_summary_is_rendered_before_login_status_block(self) -> None:
+    def test_learning_flow_no_longer_requires_access_profile_or_login_button(self) -> None:
         source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
 
         self.assertIn("def render_access_profile_summary(", source)
-        self.assertIn("Perfil de acesso / operador", source)
-        self.assertIn("Conta Microsoft", source)
-        self.assertIn("Host esperado", source)
-
-        render_call = source.index("access_profile_ready = render_access_profile_summary(session, session_id)")
-        awaiting_login_block = source.index('if status == "aguardando_login":')
-        authenticated_only_block = source.index('if status == "autenticada" and not recorded_steps and not saved_action:')
-
-        self.assertLess(render_call, awaiting_login_block)
-        self.assertLess(render_call, authenticated_only_block)
+        self.assertIn("Nome da rotina", source)
+        self.assertIn("Configurações > Sistema externo", source)
+        self.assertNotIn("access_profile_ready = render_access_profile_summary(session, session_id)", source)
+        self.assertNotIn('"Login concluído"', source)
+        self.assertNotIn('"Uso de IA na execução"', source)
+        self.assertNotIn('"Timeout máximo da ação (segundos)"', source)
 
     def test_learning_review_warns_when_expected_inputs_have_no_fill_steps(self) -> None:
         source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
-        self.assertIn("Não identifiquei os campos digitados", source)
-        self.assertIn("_descricao_entrada_indica_variavel", source)
+        self.assertIn("Nenhum campo digitado foi capturado", source)
+        self.assertIn("Salvar mesmo sem variáveis capturadas", source)
+
+    def test_session_save_test_clear_controls_exist_in_settings(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("Abrir navegador para login", source)
+        self.assertIn("Salvar sessão do navegador", source)
+        self.assertIn("Testar sessão salva", source)
+        self.assertIn("Limpar sessão salva", source)
 
 
 if __name__ == "__main__":

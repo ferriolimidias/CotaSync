@@ -123,6 +123,30 @@ _RECORDER_SCRIPT = r"""
     return `${selectorFor(parent)} > ${tag}:nth-of-type(${Math.max(position, 1)})`;
   };
   window.__cotasyncSelectorFor = selectorFor;
+  const textOf = (el) => String(el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+  const labelFor = (el) => {
+    if (!el || !el.ownerDocument) return '';
+    const id = el.id ? String(el.id) : '';
+    if (id) {
+      const explicit = el.ownerDocument.querySelector(`label[for="${attrValue(id)}"]`);
+      if (explicit) return textOf(explicit).slice(0, 120);
+    }
+    const wrapping = el.closest('label');
+    if (wrapping) return textOf(wrapping).slice(0, 120);
+    const aria = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder');
+    if (aria) return String(aria).slice(0, 120);
+    const parentText = textOf(el.parentElement);
+    return parentText.replace(String(el.value || ''), '').slice(0, 120);
+  };
+  const fieldMetadata = (el) => ({
+    tag: String(el?.tagName || '').toLowerCase(),
+    type: String(el?.type || '').toLowerCase(),
+    id: String(el?.id || '').slice(0, 160),
+    name: String(el?.name || '').slice(0, 160),
+    label: labelFor(el),
+    placeholder: String(el?.getAttribute?.('placeholder') || '').slice(0, 160),
+    aria_label: String(el?.getAttribute?.('aria-label') || '').slice(0, 160)
+  });
   const domSummary = () => ({
     ready_state: document.readyState,
     element_count: document.body ? document.body.querySelectorAll('*').length : 0,
@@ -163,14 +187,35 @@ _RECORDER_SCRIPT = r"""
   }, true);
   document.addEventListener('input', (event) => {
     const el = event.target;
-    if (!el || !['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) || sensitive(el)) return;
+    if (!el || !['INPUT', 'TEXTAREA'].includes(el.tagName) || sensitive(el)) return;
     const previousTimer = inputTimers.get(el);
     if (previousTimer) clearTimeout(previousTimer);
     const before = inputBefore.get(el) || snapshot();
     inputTimers.set(el, setTimeout(() => {
-      send({tipo: 'preencher', event_type: 'fill', seletor: selectorFor(el), valor: '', value_template: '{{input_value}}'}, before);
+      send({
+        tipo: 'preencher',
+        event_type: 'fill',
+        seletor: selectorFor(el),
+        valor: '',
+        value_template: '{{input_value}}',
+        field_metadata: fieldMetadata(el)
+      }, before);
       inputBefore.delete(el);
     }, 250));
+  }, true);
+
+  document.addEventListener('change', (event) => {
+    const el = event.target;
+    if (!el || el.tagName !== 'SELECT' || sensitive(el)) return;
+    const before = snapshot();
+    send({
+      tipo: 'selecionar',
+      event_type: 'select',
+      seletor: selectorFor(el),
+      valor: '',
+      value_template: '{{input_value}}',
+      field_metadata: fieldMetadata(el)
+    }, before);
   }, true);
 
   document.addEventListener('click', (event) => {
@@ -181,7 +226,7 @@ _RECORDER_SCRIPT = r"""
     const type = String(el.type || '').toLowerCase();
     if (['text', 'email', 'password', 'search', 'number'].includes(type)) return;
     const before = snapshot();
-    send({tipo: 'clicar', event_type: 'click', seletor: selectorFor(el), valor: ''}, before, 500);
+    send({tipo: 'clicar', event_type: 'click', seletor: selectorFor(el), valor: '', field_metadata: fieldMetadata(el)}, before, 500);
     setTimeout(captureOutputs, 650);
     setTimeout(captureOutputs, 900);
   }, true);
@@ -288,8 +333,19 @@ def _title_label(value: str) -> str:
     return " ".join(part.capitalize() for part in text.split())
 
 
-def _suggest_variable_key(selector: str, index: int = 0) -> str:
-    raw = str(selector or "")
+def _suggest_variable_key(selector: str, index: int = 0, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    raw = " ".join(
+        str(part or "")
+        for part in (
+            metadata.get("label"),
+            metadata.get("placeholder"),
+            metadata.get("aria_label"),
+            metadata.get("name"),
+            metadata.get("id"),
+            selector,
+        )
+    )
     lowered = raw.casefold()
     direct = (
         ("edtgrupo", "grupo"),
@@ -304,7 +360,7 @@ def _suggest_variable_key(selector: str, index: int = 0) -> str:
     for needle, key in direct:
         if needle in lowered:
             return key
-    if "select" in lowered:
+    if str(metadata.get("tag") or "").casefold() == "select" or "select" in lowered:
         return "tipo_consulta" if index <= 1 else f"select_{index + 1}"
     tokens = [
         token.lower()
@@ -324,6 +380,17 @@ def _normalize_variable_key(value: Any, fallback_selector: str = "", index: int 
     if candidate in {"select", "select_1"}:
         return "tipo_consulta"
     return candidate or _suggest_variable_key(fallback_selector, index)
+
+
+def _normalize_label_key(value: Any) -> str:
+    normalized = str(value or "").casefold()
+    normalized = re.sub(r"[^a-z0-9à-ÿ]+", " ", normalized, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _suggest_variable_key_for_step(step: dict[str, Any], index: int) -> str:
+    metadata = step.get("field_metadata") if isinstance(step.get("field_metadata"), dict) else {}
+    return _suggest_variable_key(str(step.get("seletor") or ""), index, metadata)
 
 
 _INPUT_DESCRIPTION_VARIABLE_TERMS = (
@@ -398,7 +465,6 @@ def _external_storage_state_path(system_name: str, session_id: str) -> Path:
         / "external_systems"
         / "sessions"
         / _safe_file_name(system_name).lower()
-        / str(session_id)
         / "storage_state.json"
     )
 
@@ -472,6 +538,8 @@ class DemoBrowserSession:
     operator_recording_suppressed_until: float = 0.0
     recorder_watched_pages: set[int] = field(default_factory=set)
     recorder_context_watched: bool = False
+    recorder_errors: list[str] = field(default_factory=list)
+    final_page_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 class DemoSessionManager:
@@ -494,7 +562,7 @@ class DemoSessionManager:
             return None
         step_type = str(raw.get("tipo") or "").strip().lower()
         selector = str(raw.get("seletor") or "").strip()
-        if step_type not in {"clicar", "preencher", "teclar", "extrair_texto"}:
+        if step_type not in {"clicar", "preencher", "selecionar", "teclar", "extrair_texto"}:
             return None
         if step_type != "teclar" and (not selector or _is_sensitive_selector(selector)):
             return None
@@ -506,10 +574,20 @@ class DemoSessionManager:
         name = str(raw.get("nome") or "").strip()
         if name:
             step["nome"] = name
+        value_template = str(raw.get("value_template") or "").strip()
+        if value_template and step_type in {"preencher", "selecionar"}:
+            step["value_template"] = value_template
+        field_metadata = raw.get("field_metadata")
+        if isinstance(field_metadata, dict):
+            step["field_metadata"] = {
+                str(key): str(value or "")[:200]
+                for key, value in field_metadata.items()
+                if key in {"tag", "type", "id", "name", "label", "placeholder", "aria_label"}
+            }
 
-        if step_type == "preencher" and session.steps:
+        if step_type in {"preencher", "selecionar"} and session.steps:
             previous = session.steps[-1]
-            if previous.get("tipo") == "preencher" and previous.get("seletor") == selector:
+            if previous.get("tipo") == step_type and previous.get("seletor") == selector:
                 session.steps[-1] = step
                 return len(session.steps) - 1
         if session.steps and session.steps[-1] == step:
@@ -550,9 +628,10 @@ class DemoSessionManager:
 
         elapsed_ms = max(0, int(raw.get("elapsed_ms") or 0))
         event_type = str(raw.get("event_type") or "").strip().lower()
-        if event_type not in {"fill", "click", "extract", "download", "navigation", "popup", "new_tab", "modal", "wait"}:
+        if event_type not in {"fill", "select", "click", "extract", "download", "navigation", "popup", "new_tab", "modal", "wait"}:
             event_type = {
                 "preencher": "fill",
+                "selecionar": "select",
                 "clicar": "click",
                 "extrair_texto": "extract",
                 "teclar": "wait",
@@ -561,8 +640,9 @@ class DemoSessionManager:
             "step_index": step_index,
             "event_type": event_type,
             "selector": str(raw.get("seletor") or ""),
-            "value_template": str(raw.get("value_template") or "") if event_type == "fill" else "",
+            "value_template": str(raw.get("value_template") or "") if event_type in {"fill", "select"} else "",
             "variable_key": "",
+            "field_metadata": raw.get("field_metadata") if isinstance(raw.get("field_metadata"), dict) else {},
             "timestamp_before": str(raw.get("timestamp_before") or _utc_now()),
             "timestamp_after": str(raw.get("timestamp_after") or _utc_now()),
             "elapsed_ms": elapsed_ms,
@@ -579,27 +659,13 @@ class DemoSessionManager:
             "download_detected": session.download_detected,
         }
         event.update(_frame_metadata(source_frame))
-        from backend.services.ai_observer import deterministic_observe_learning_step, observe_learning_step_with_ai
+        from backend.services.ai_observer import deterministic_observe_learning_step
 
         event.update(deterministic_observe_learning_step(event))
         session.learning_events.append(event)
         session.last_screenshot_path = screenshot_after_path or session.last_screenshot_path
         session.last_page_count = len(live_pages)
         session.download_detected = False
-
-        async def apply_live_review() -> None:
-            review = await observe_learning_step_with_ai(
-                event,
-                {
-                    "previous_events": len(session.learning_events) - 1,
-                    "guided_instruction": session.guided_learning,
-                },
-            )
-            event.update(review)
-
-        task = asyncio.create_task(apply_live_review())
-        session.observer_tasks.add(task)
-        task.add_done_callback(session.observer_tasks.discard)
 
     async def _page_is_authenticated(self, session: DemoBrowserSession, page: Page) -> bool:
         """Valida os sinais publicos aceitos pela demo sem depender do status em memoria."""
@@ -767,7 +833,10 @@ class DemoSessionManager:
             return
         try:
             await frame.evaluate(_RECORDER_SCRIPT)
-        except Exception:
+        except Exception as exc:
+            message = f"frame_inaccessible:{type(exc).__name__}"
+            if message not in session.recorder_errors:
+                session.recorder_errors.append(message)
             logger.debug("Recorder nao pode ser instalado no frame da sessao %s", session.id, exc_info=True)
 
     def _watch_page_recording(self, session: DemoBrowserSession, page: Page) -> None:
@@ -1076,6 +1145,44 @@ class DemoSessionManager:
             "browserless_public_url_set": bool(os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()),
         }
 
+    async def recording_diagnostics(self, session_id: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        live_pages = [page for page in session.context.pages if not page.is_closed()]
+        active_title = ""
+        try:
+            active_title = await session.page.title()
+        except Exception:
+            pass
+        instrumented_frames = 0
+        frame_count = 0
+        for current_page in live_pages:
+            for frame in current_page.frames:
+                frame_count += 1
+                try:
+                    if bool(await frame.evaluate("() => window.__cotasyncRecorderInstalled === true")):
+                        instrumented_frames += 1
+                except Exception as exc:
+                    message = f"frame_diagnostic_inaccessible:{type(exc).__name__}"
+                    if message not in session.recorder_errors:
+                        session.recorder_errors.append(message)
+        last_event = session.learning_events[-1] if session.learning_events else {}
+        event_types = [str(event.get("event_type") or "") for event in session.learning_events]
+        return {
+            "recorder_installed": instrumented_frames > 0,
+            "active_page_url": _safe_page_url(session.page.url),
+            "active_page_title": active_title[:200],
+            "frame_count": frame_count,
+            "instrumented_frame_count": instrumented_frames,
+            "raw_event_count": len(session.learning_events),
+            "click_event_count": event_types.count("click"),
+            "fill_event_count": event_types.count("fill"),
+            "select_event_count": event_types.count("select"),
+            "last_event_type": str(last_event.get("event_type") or ""),
+            "last_event_selector": str(last_event.get("selector") or ""),
+            "last_event_frame_url": str(last_event.get("frame_url") or ""),
+            "recorder_errors": list(session.recorder_errors[-20:]),
+        }
+
     def _prepare_operator_utility(self, session: DemoBrowserSession, duration: float = 2.0) -> None:
         session.operator_recording_suppressed_until = max(
             session.operator_recording_suppressed_until,
@@ -1273,6 +1380,18 @@ class DemoSessionManager:
         logger.info("Login manual confirmado para a sessao %s", session_id)
         return await self.status(session_id)
 
+    async def clear_saved_session(self, session_id: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        existed = session.storage_state_path.is_file()
+        try:
+            session.storage_state_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise DemoSessionError("Nao foi possivel limpar a sessao salva.") from exc
+        return {
+            "cleared": existed,
+            "storage_state_saved": session.storage_state_path.is_file(),
+        }
+
     async def start_recording(
         self,
         session_id: str,
@@ -1281,13 +1400,6 @@ class DemoSessionManager:
         session = self._get(session_id)
         if session.status != "autenticada":
             raise DemoSessionError("Confirme o login manual antes de iniciar o aprendizado.")
-        if session.external_login_url and not (
-            session.access_profile_name
-            and session.microsoft_saved_account_text
-            and session.microsoft_saved_account_identifier
-            and session.expected_system_host
-        ):
-            raise DemoSessionError("Configure o perfil de acesso/operador antes de iniciar o aprendizado.")
         session.steps = []
         session.learning_events = []
         for task in list(session.observer_tasks):
@@ -1305,11 +1417,13 @@ class DemoSessionManager:
             "expected_result": str(raw_instruction.get("expected_result") or "").strip()[:1000],
             "success_criteria": str(raw_instruction.get("success_criteria") or "").strip()[:1000],
             "output_type": output_type,
-            "ai_result_summary_enabled": bool(raw_instruction.get("ai_result_summary_enabled", False)),
+            "ai_result_summary_enabled": bool(raw_instruction.get("ai_result_summary_enabled", True)),
             "ai_recovery_enabled": bool(raw_instruction.get("ai_recovery_enabled", False)),
         }
         session.output_candidates = []
         session.learning_synthesis = {}
+        session.final_page_snapshot = {}
+        session.recorder_errors = []
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -1404,6 +1518,36 @@ class DemoSessionManager:
             session.output_candidates = focused + [
                 item for item in session.output_candidates if item.get("selector") not in focused_selectors
             ]
+        final_snapshot_results = await self._evaluate_all_frames(
+            session,
+            r"""() => ({
+              url: String(location.href || '').split(/[?#]/, 1)[0],
+              title: String(document.title || '').slice(0, 200),
+              text: String(document.body ? document.body.innerText || '' : '').replace(/\s+/g, ' ').trim().slice(0, 20000),
+              html: String(document.documentElement ? document.documentElement.outerHTML || '' : '').slice(0, 50000),
+              element_count: document.body ? document.body.querySelectorAll('*').length : 0
+            })"""
+        )
+        final_pages: list[dict[str, Any]] = []
+        for snapshot_page, snapshot_frame, snapshot in final_snapshot_results:
+            if not isinstance(snapshot, dict):
+                continue
+            frame_info = _frame_metadata(snapshot_frame)
+            final_pages.append(
+                {
+                    "url": _safe_page_url(str(snapshot.get("url") or snapshot_page.url)),
+                    "title": str(snapshot.get("title") or "")[:200],
+                    "text": str(snapshot.get("text") or "")[:20000],
+                    "html": str(snapshot.get("html") or "")[:50000],
+                    "element_count": max(0, int(snapshot.get("element_count") or 0)),
+                    "frame_name": frame_info.get("frame_name", ""),
+                    "frame_url": frame_info.get("frame_url", ""),
+                }
+            )
+        session.final_page_snapshot = {
+            "captured": bool(final_pages),
+            "pages": final_pages,
+        }
         session.recording = False
         session.status = "autenticada"
         if not session.steps:
@@ -1420,13 +1564,48 @@ class DemoSessionManager:
             "output_candidates": session.output_candidates,
         }
         session.learning_synthesis = await analyze_recorded_action_with_ai(provisional_action)
+        event_types = [str(event.get("event_type") or "") for event in session.learning_events]
+        detected_variables = []
+        for index, step in enumerate(session.steps):
+            if not isinstance(step, dict) or str(step.get("tipo") or "") not in {"preencher", "selecionar"}:
+                continue
+            key = _suggest_variable_key_for_step(step, index)
+            detected_variables.append(
+                {
+                    "step_index": index,
+                    "selector": str(step.get("seletor") or ""),
+                    "event_type": "select" if str(step.get("tipo") or "") == "selecionar" else "fill",
+                    "suggested_key": key,
+                    "label": _title_label(key),
+                }
+            )
+        review_summary = {
+            "total_steps": len(session.steps),
+            "clicks_captured": event_types.count("click"),
+            "fills_captured": event_types.count("fill"),
+            "selects_captured": event_types.count("select"),
+            "downloads": bool(
+                session.download_detected
+                or any(event.get("download_detected") for event in session.learning_events)
+            ),
+            "new_tabs": sum(1 for event in session.learning_events if event.get("opened_new_page")),
+            "final_page_captured": bool(final_pages),
+            "detected_variables": detected_variables,
+            "hard_warning": (
+                "Nenhum campo digitado foi capturado. Esta ação não terá variáveis na execução rápida."
+                if event_types.count("fill") + event_types.count("select") == 0
+                else ""
+            ),
+        }
         logger.info("Gravacao finalizada na sessao %s com %s passos", session_id, len(session.steps))
         return {
             "session": await self.status(session_id),
             "steps": [dict(step, index=index) for index, step in enumerate(session.steps)],
             "learning_events": [dict(event) for event in session.learning_events],
             "guided_learning": dict(session.guided_learning),
+            "review_summary": review_summary,
             "output_candidates": list(session.output_candidates),
+            "final_page": dict(session.final_page_snapshot),
             "download_detected": bool(
                 session.download_detected
                 or any(event.get("download_detected") for event in session.learning_events)
@@ -1447,7 +1626,7 @@ class DemoSessionManager:
         success_criteria: str = "",
         output_type: str = "",
         user_result_summary_template: str | None = None,
-        ai_result_summary_enabled: bool = False,
+        ai_result_summary_enabled: bool = True,
         ai_recovery_enabled: bool = False,
         extraction_targets: list[dict[str, str]] | None = None,
         extract_visible_text: bool = False,
@@ -1466,20 +1645,28 @@ class DemoSessionManager:
         learning_events = [dict(event) for event in session.learning_events]
         variable_schema: list[dict[str, Any]] = []
         variables: list[dict[str, Any]] = []
-        for index_raw, variable_raw in variable_names.items():
+        explicit_variable_names = variable_names if isinstance(variable_names, dict) else {}
+        auto_variable_names: dict[str, str] = {}
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict) or str(step.get("tipo") or "") not in {"preencher", "selecionar"}:
+                continue
+            auto_variable_names[str(index)] = _suggest_variable_key_for_step(step, index)
+        variable_name_inputs = {**auto_variable_names, **explicit_variable_names}
+
+        for index_raw, variable_raw in variable_name_inputs.items():
             try:
                 index = int(index_raw)
             except (TypeError, ValueError):
                 continue
             selector = str(steps[index].get("seletor") or "") if 0 <= index < len(steps) else ""
             variable = _normalize_variable_key(variable_raw, selector, index)
-            if not variable or index < 0 or index >= len(steps) or steps[index].get("tipo") != "preencher":
+            if not variable or index < 0 or index >= len(steps) or steps[index].get("tipo") not in {"preencher", "selecionar"}:
                 continue
             steps[index]["variavel"] = variable
             steps[index]["valor"] = ""
             steps[index]["value_template"] = f"{{{{{variable}}}}}"
             for event in learning_events:
-                if event.get("step_index") == index and event.get("event_type") == "fill":
+                if event.get("step_index") == index and event.get("event_type") in {"fill", "select"}:
                     event["variable_key"] = variable
                     event["value_template"] = f"{{{{{variable}}}}}"
             if not any(item.get("key") == variable for item in variable_schema):
@@ -1500,13 +1687,18 @@ class DemoSessionManager:
                 if not isinstance(raw_target, dict):
                     continue
                 selector = str(raw_target.get("selector") or raw_target.get("seletor") or "").strip()
-                label = re.sub(
-                    r"[^a-zA-Z0-9_]+",
-                    "_",
-                    str(raw_target.get("label") or raw_target.get("name") or f"resultado_{index + 1}").strip(),
-                ).strip("_")
-                if selector and label and not _is_sensitive_selector(selector):
-                    extraction_step = {"tipo": "extrair_texto", "seletor": selector, "valor": "", "nome": label}
+                raw_label = str(raw_target.get("label") or raw_target.get("name") or f"resultado_{index + 1}").strip()
+                label = raw_label or f"resultado_{index + 1}"
+                if label and (selector or raw_label) and not _is_sensitive_selector(selector):
+                    extraction_step = {
+                        "tipo": "extrair_texto",
+                        "seletor": selector,
+                        "valor": "",
+                        "nome": label,
+                    }
+                    if not selector:
+                        extraction_step["extraction_strategy"] = "near_label"
+                        extraction_step["target_label"] = raw_label
                     frame_url = str(raw_target.get("frame_url") or "").strip()
                     frame_name = str(raw_target.get("frame_name") or "").strip()
                     if frame_url:
@@ -1614,6 +1806,7 @@ class DemoSessionManager:
             "output_type": output_type_text,
             "output_schema": output_schema,
             "extraction_targets": extraction_targets,
+            "extraction_target": extraction_targets[0] if extraction_targets else "",
             "user_result_summary_template": str(user_result_summary_template or "").strip() or None,
             "ai_result_summary_enabled": bool(ai_result_summary_enabled),
             "ai_recovery_enabled": bool(ai_recovery_enabled),
@@ -1630,11 +1823,12 @@ class DemoSessionManager:
             ),
             "download_expected": bool(return_downloaded_file),
             "download_detected_during_learning": download_detected,
-            "modo_aprendizado": "gravacao_manual_observada_por_ia_em_tempo_real",
+            "final_page_snapshot": dict(session.final_page_snapshot),
+            "modo_aprendizado": "gravacao_mecanica_revisada_por_ia_apos_captura",
             "learning_mode": (
-                "desktop_browser_live_ai_observed"
+                "desktop_browser_mechanical_ai_reviewed"
                 if session.browser_mode == "desktop_browser"
-                else "human_demo_live_ai_observed"
+                else "human_demo_mechanical_ai_reviewed"
             ),
             "browser_mode": session.browser_mode,
             "external_system_name": session.external_system_name,
@@ -1651,13 +1845,6 @@ class DemoSessionManager:
             "microsoft_hosts": microsoft_hosts,
             "session_guardian_enabled": bool(session.external_login_url or session.browser_mode == "desktop_browser"),
         }
-        if session.external_login_url and not (
-            learned_action["access_profile_name"]
-            and learned_action["microsoft_saved_account_text"]
-            and learned_action["microsoft_saved_account_identifier"]
-            and learned_action["expected_system_host"]
-        ):
-            raise DemoSessionError("A acao externa precisa de um perfil de acesso configurado para ser salva.")
         from backend.services.ai_observer import analyze_recorded_action_with_ai
 
         # A síntese final inclui nomes de variáveis e saídas editados após a
@@ -1933,6 +2120,21 @@ class DemoSessionManager:
                             result="success",
                         )
                     )
+                elif step_type == "selecionar":
+                    variable = str(step.get("variavel") or "").strip()
+                    value = variables.get(variable) if variable else step.get("valor", "")
+                    if variable and (value is None or str(value) == ""):
+                        raise DemoSessionError(f"Valor obrigatorio ausente: {variable}.")
+                    assert locator is not None
+                    await locator.select_option(str(value), timeout=_REPLAY_STEP_TIMEOUT_MS)
+                    step_diagnostics.append(
+                        await self._finish_step_diagnostic(
+                            session.page,
+                            step_diag,
+                            wait_strategy="actionable_select",
+                            result="success",
+                        )
+                    )
                 elif step_type == "clicar":
                     assert locator is not None and state is not None
                     page_task: asyncio.Task[Any] | None = asyncio.create_task(
@@ -2051,14 +2253,21 @@ class DemoSessionManager:
                     label = str(step.get("nome") or selector)
                     result = "success"
                     try:
-                        locator, _state = await self._wait_actionable_locator(
-                            page,
-                            selector,
-                            step,
-                            require_enabled=False,
-                        )
-                        await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
-                        text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        if selector:
+                            locator, _state = await self._wait_actionable_locator(
+                                page,
+                                selector,
+                                step,
+                                require_enabled=False,
+                            )
+                            await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                            text = await locator.inner_text(timeout=_REPLAY_STEP_TIMEOUT_MS)
+                        else:
+                            text = await self._extract_text_near_label(
+                                page,
+                                str(step.get("target_label") or label),
+                                step,
+                            )
                         extracted[label] = text.strip()
                         if not text.strip():
                             result = "target_empty"
@@ -2200,6 +2409,67 @@ class DemoSessionManager:
                     preferred.append(frame)
         preferred_ids = {id(frame) for frame in preferred}
         return preferred + [frame for frame in frames if id(frame) not in preferred_ids]
+
+    async def _extract_text_near_label(self, page: Page, label: str, step: dict[str, Any]) -> str:
+        label_text = str(label or "").strip()
+        if not label_text:
+            return ""
+        script = r"""(wanted) => {
+          const normalize = (value) => String(value || '')
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+          const visible = (el) => {
+            if (!el) return false;
+            const style = getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+          const target = normalize(wanted);
+          const directValue = (text) => {
+            const normalizedText = normalize(text);
+            const pos = normalizedText.indexOf(target);
+            if (pos < 0) return '';
+            const original = clean(text);
+            const escaped = String(wanted).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const match = original.match(new RegExp(escaped + '\\s*[:\\-]?\\s*([A-Za-z0-9.,/]+)', 'i'));
+            return match ? clean(match[1]) : '';
+          };
+          const elements = Array.from(document.body ? document.body.querySelectorAll('body *') : []);
+          for (const el of elements) {
+            if (!visible(el)) continue;
+            const own = clean(el.innerText || el.textContent || el.value || '');
+            if (!own || !normalize(own).includes(target)) continue;
+            const inline = directValue(own);
+            if (inline && normalize(inline) !== target) return inline;
+            const row = el.closest('tr');
+            if (row) {
+              const cells = Array.from(row.querySelectorAll('th,td')).map(clean).filter(Boolean);
+              const index = cells.findIndex((cell) => normalize(cell).includes(target));
+              if (index >= 0 && cells[index + 1]) return cells[index + 1];
+            }
+            const sibling = el.nextElementSibling;
+            if (sibling && visible(sibling)) {
+              const siblingText = clean(sibling.innerText || sibling.textContent || sibling.value || '');
+              if (siblingText && !normalize(siblingText).includes(target)) return siblingText;
+            }
+            const parent = el.parentElement;
+            if (parent) {
+              const parentText = clean(parent.innerText || parent.textContent || '');
+              const parentValue = directValue(parentText);
+              if (parentValue && normalize(parentValue) !== target) return parentValue;
+            }
+          }
+          const body = clean(document.body ? document.body.innerText || '' : '');
+          return directValue(body);
+        }"""
+        for owner in [page] + self._candidate_frames_for_step(page, step):
+            try:
+                value = await owner.evaluate(script, label_text)
+            except Exception:
+                continue
+            if str(value or "").strip():
+                return str(value).strip()
+        return ""
 
     async def _wait_actionable_locator(
         self,

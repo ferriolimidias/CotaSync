@@ -190,7 +190,7 @@ async def main() -> None:
             },
             timeout=60,
         )["action"]
-        assert saved["learning_mode"] == "desktop_browser_live_ai_observed"
+        assert saved["learning_mode"] == "desktop_browser_mechanical_ai_reviewed"
 
         replay = api(
             "POST",

@@ -206,6 +206,11 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
     execution_type_raw = data.get("tipo_execucao")
     execution_type = str(execution_type_raw).strip() if execution_type_raw is not None else None
     extraction_targets = _extraction_targets(data, raw_steps)
+    learning_mode = str(data.get("learning_mode") or "").strip()
+    mechanically_learned = learning_mode in {
+        "human_demo_mechanical_ai_reviewed",
+        "desktop_browser_mechanical_ai_reviewed",
+    }
 
     summary = ActionSummary(
         id=action_id,
@@ -217,7 +222,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
         test_mode=bool(data.get("modo_teste", False)),
         execution_type=execution_type or None,
-        learning_mode=str(data.get("learning_mode") or "").strip() or None,
+        learning_mode=learning_mode or None,
         ai_reviewed=bool(data.get("ai_reviewed", False)),
         ai_observer_summary=str(data.get("ai_observer_summary") or "").strip() or None,
         replay_hints=data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
@@ -263,7 +268,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         ),
         requires_authenticated_session=bool(normalized_profile.get("requires_authenticated_session", True)),
         session_guardian_enabled=bool(normalized_profile.get("session_guardian_enabled", True)),
-        legacy_unconfigured=not has_profile_metadata,
+        legacy_unconfigured=not (has_profile_metadata or (mechanically_learned and steps_count > 0)),
         action_timeout_seconds=(
             int(data["action_timeout_seconds"])
             if str(data.get("action_timeout_seconds") or "").strip().isdigit()

@@ -92,15 +92,7 @@ def _acoes_ui_por_chave(actions: list[dict]) -> dict[str, dict]:
 def _acao_configurada_para_execucao_rapida(action: dict) -> bool:
     if bool(action.get("legacy_unconfigured", False)):
         return False
-    return bool(
-        str(action.get("access_profile_name") or "").strip()
-        and str(action.get("microsoft_saved_account_text") or "").strip()
-        and (
-            str(action.get("microsoft_saved_account_identifier") or "").strip()
-            or str(action.get("access_profile_email_or_identifier") or "").strip()
-        )
-        and str(action.get("expected_system_host") or "").strip()
-    )
+    return int(action.get("steps_count") or 0) > 0
 
 
 def _excluir_acao_local(chave_acao: str) -> None:
@@ -269,9 +261,38 @@ def _rotulo_variavel(variable: object) -> tuple[str, str, bool]:
     return key, key, True
 
 
+def _render_recording_diagnostics(session_id: str, encoded_session: str) -> None:
+    with st.expander("Diagnóstico da gravação", expanded=False):
+        try:
+            diagnostics = demo_api_request(
+                "GET",
+                f"/api/demo/sessions/{encoded_session}/recording/diagnostics",
+                api_base_url=API_BASE_URL,
+            ).get("diagnostics", {})
+            st.write(
+                {
+                    "recorder_installed": bool(diagnostics.get("recorder_installed")),
+                    "active_page_url": diagnostics.get("active_page_url", ""),
+                    "active_page_title": diagnostics.get("active_page_title", ""),
+                    "frame_count": diagnostics.get("frame_count", 0),
+                    "instrumented_frame_count": diagnostics.get("instrumented_frame_count", 0),
+                    "raw_event_count": diagnostics.get("raw_event_count", 0),
+                    "click_event_count": diagnostics.get("click_event_count", 0),
+                    "fill_event_count": diagnostics.get("fill_event_count", 0),
+                    "select_event_count": diagnostics.get("select_event_count", 0),
+                    "last_event_type": diagnostics.get("last_event_type", ""),
+                    "last_event_selector": diagnostics.get("last_event_selector", ""),
+                    "last_event_frame_url": diagnostics.get("last_event_frame_url", ""),
+                    "recorder_errors": diagnostics.get("recorder_errors", []),
+                }
+            )
+        except DemoApiError as exc:
+            st.warning(str(exc))
+
+
 def _render_demo_v01() -> None:
     with st.expander("🎬 Demo v0.1 — Aprender e executar", expanded=True):
-        st.caption("Humano demonstra a rotina; a IA revisa esperas, variáveis e riscos antes do replay determinístico.")
+        st.caption("Eu ensino fazendo. O CotaSync grava mecanicamente. Depois a IA revisa, organiza e melhora o replay.")
         session_id = str(st.session_state.get("demo_session_id", "") or "")
 
         try:
@@ -328,10 +349,8 @@ def _render_demo_v01() -> None:
                 f"Sistema externo: {session.get('external_system_name', '')} · "
                 f"Validação: {session.get('auth_validation_mode', '')}"
             )
-            access_profile_ready = render_access_profile_summary(session, session_id)
         else:
             st.caption("Alvo local de demonstração (fallback).")
-            access_profile_ready = True
 
         live_url = str(session.get("live_url", "") or "")
         if session.get("browser_mode") == "desktop_browser":
@@ -350,26 +369,10 @@ def _render_demo_v01() -> None:
             st.caption("Se a janela remota não aceitar teclado, use Modo operador.")
 
         if status == "aguardando_login":
-            if session.get("using_external_system"):
-                if session.get("auth_validation_mode") == "manual_confirmation":
-                    st.info(
-                        "Validação manual: ao clicar em Login concluído, esta página será aceita "
-                        "como sessão autenticada."
-                    )
-                else:
-                    st.info("Faça o login manual no sistema externo e clique em Login concluído.")
-            else:
-                st.info("Faça o login na janela do navegador. No alvo local, use as credenciais fictícias `demo` / `demo`.")
-            if st.button("Login concluído", key="demo_confirm_login", use_container_width=True):
-                try:
-                    demo_api_request(
-                        "POST",
-                        f"/api/demo/sessions/{encoded_session}/confirm-login",
-                        api_base_url=API_BASE_URL,
-                    )
-                    st.rerun()
-                except DemoApiError as exc:
-                    st.warning(str(exc))
+            st.info(
+                "A sessão ainda não foi salva/autenticada. Use Configurações > Sistema externo para abrir o navegador, "
+                "fazer login manualmente e salvar a sessão antes de ensinar a rotina."
+            )
 
         if status in {"aguardando_login", "autenticada", "gravando"}:
             with st.expander("Modo operador", expanded=status == "aguardando_login"):
@@ -481,57 +484,23 @@ def _render_demo_v01() -> None:
         recorded_steps = st.session_state.get("demo_recorded_steps")
         saved_action = st.session_state.get("demo_saved_action")
         if status == "autenticada" and not recorded_steps and not saved_action:
-            if session.get("using_external_system") and not access_profile_ready:
-                return
-            st.markdown("**Aprendizado guiado**")
-            st.caption("Descreva o resultado de negócio antes de iniciar a demonstração.")
+            st.markdown("**Ensinar Nova Rotina**")
             action_name_key = f"demo_guided_name_{session_id}"
-            objective_key = f"demo_guided_objective_{session_id}"
-            input_key = f"demo_guided_input_{session_id}"
-            expected_key = f"demo_guided_expected_{session_id}"
-            success_key = f"demo_guided_success_{session_id}"
-            output_key = f"demo_guided_output_{session_id}"
-            ai_mode_key = f"demo_guided_ai_mode_{session_id}"
-            st.text_input("Nome da ação", key=action_name_key, placeholder="Ex.: Consultar resultado da assembleia")
-            st.text_area("Objetivo da ação", key=objective_key)
-            st.text_area(
-                "O que o usuário vai informar para executar essa ação",
-                key=input_key,
-                placeholder="Ex.: grupo e cota",
-            )
-            st.text_area("O que o CotaSync deve retornar no final", key=expected_key)
-            st.text_area("Como saber que deu certo", key=success_key)
-            st.selectbox(
-                "Tipo de retorno esperado",
-                ["texto/dados da tela", "arquivo/PDF", "ambos", "apenas abrir tela"],
-                index=0,
-                key=output_key,
-            )
-            st.selectbox(
-                "Uso de IA na execução",
-                [
-                    "não usar IA na execução",
-                    "usar IA só para resumir resultado",
-                    "usar IA para tentar recuperar falha",
-                ],
-                index=0,
-                key=ai_mode_key,
+            st.text_input(
+                "Nome da rotina",
+                key=action_name_key,
+                placeholder="Ex.: Consultar quantidade de parcelas pagas",
             )
             if st.button("Iniciar gravação", key="demo_start_recording", type="primary", use_container_width=True):
                 try:
-                    ai_mode = str(st.session_state.get(ai_mode_key) or "")
                     demo_api_request(
                         "POST",
                         f"/api/demo/sessions/{encoded_session}/recording/start",
                         {
                             "name": st.session_state.get(action_name_key, ""),
-                            "objective": st.session_state.get(objective_key, ""),
-                            "input_description": st.session_state.get(input_key, ""),
-                            "expected_result": st.session_state.get(expected_key, ""),
-                            "success_criteria": st.session_state.get(success_key, ""),
-                            "output_type": st.session_state.get(output_key, "texto/dados da tela"),
-                            "ai_result_summary_enabled": ai_mode == "usar IA só para resumir resultado",
-                            "ai_recovery_enabled": ai_mode == "usar IA para tentar recuperar falha",
+                            "output_type": "texto/dados da tela",
+                            "ai_result_summary_enabled": True,
+                            "ai_recovery_enabled": False,
                         },
                         api_base_url=API_BASE_URL,
                     )
@@ -541,6 +510,7 @@ def _render_demo_v01() -> None:
 
         if status == "gravando":
             st.warning("Gravação ativa. Execute agora a rotina na janela do navegador.")
+            _render_recording_diagnostics(session_id, encoded_session)
             if st.button("Parar gravação", key="demo_stop_recording", type="primary", use_container_width=True):
                 try:
                     result = demo_api_request(
@@ -563,24 +533,43 @@ def _render_demo_v01() -> None:
                 guided = {}
             synthesis = recording_result.get("ai_synthesis", {})
             if isinstance(synthesis, dict) and synthesis:
-                st.markdown("**Síntese do aprendizado**")
+                st.markdown("**Revisão de IA após a gravação**")
                 st.info(str(synthesis.get("ai_observer_summary") or "Análise local concluída."))
-            st.markdown("**Passos capturados**")
-            st.caption(f"{len(recorded_steps)} passos capturados.")
+            review = recording_result.get("review_summary", {})
+            review = review if isinstance(review, dict) else {}
+            st.markdown("**Revisar Aprendizado**")
+            metrics = st.columns(6)
+            metrics[0].metric("Passos", int(review.get("total_steps") or len(recorded_steps)))
+            metrics[1].metric("Cliques", int(review.get("clicks_captured") or 0))
+            metrics[2].metric("Campos", int(review.get("fills_captured") or 0))
+            metrics[3].metric("Selects", int(review.get("selects_captured") or 0))
+            metrics[4].metric("Abas", int(review.get("new_tabs") or 0))
+            metrics[5].metric("Downloads", "sim" if review.get("downloads") else "não")
+            if review.get("final_page_captured"):
+                st.caption("Página final capturada.")
+            hard_warning = str(review.get("hard_warning") or "")
+            if hard_warning:
+                st.error(hard_warning)
             variable_names: dict[str, str] = {}
             captured_variable_rows: list[tuple[int, str, str]] = []
             fragile_selectors = 0
-            for step in recorded_steps:
-                if not isinstance(step, dict):
-                    continue
-                index = int(step.get("index", 0))
-                step_type = str(step.get("tipo", "ação"))
-                selector = str(step.get("seletor", ""))
-                if ":nth-" in selector or " > " in selector:
-                    fragile_selectors += 1
-                st.code(f"{index + 1}. {step_type} → {selector}", language=None)
-                if step_type == "preencher":
-                    captured_variable_rows.append((index, selector, _nome_variavel_sugerida(selector, index)))
+            detected = review.get("detected_variables", [])
+            if isinstance(detected, list) and detected:
+                for item in detected:
+                    if not isinstance(item, dict):
+                        continue
+                    index = int(item.get("step_index") or 0)
+                    selector = str(item.get("selector") or "")
+                    suggested = str(item.get("suggested_key") or _nome_variavel_sugerida(selector, index))
+                    captured_variable_rows.append((index, selector, suggested))
+            else:
+                for step in recorded_steps:
+                    if not isinstance(step, dict):
+                        continue
+                    index = int(step.get("index", 0))
+                    selector = str(step.get("seletor", ""))
+                    if str(step.get("tipo", "")) in {"preencher", "selecionar"}:
+                        captured_variable_rows.append((index, selector, _nome_variavel_sugerida(selector, index)))
 
             if captured_variable_rows:
                 st.markdown("**Revisar variáveis**")
@@ -590,112 +579,42 @@ def _render_demo_v01() -> None:
                         value=suggested,
                         key=f"demo_variable_{session_id}_{index}",
                     )
-            elif _descricao_entrada_indica_variavel(str(guided.get("input_description") or "")):
-                st.warning(
-                    "Não identifiquei os campos digitados. Revise a gravação ou configure os campos manualmente."
-                )
+            else:
+                st.warning("Nenhum campo digitado foi capturado. Esta ação não terá variáveis na execução rápida.")
 
-            suggested_targets = [
-                str(step.get("nome") or "").replace("_", " ").strip()
-                for step in recorded_steps
-                if isinstance(step, dict) and str(step.get("tipo") or "").lower() == "extrair_texto"
-            ]
-            st.markdown("**Configuração final da ação**")
+            with st.expander("Passos mecânicos capturados", expanded=False):
+                for step in recorded_steps:
+                    if not isinstance(step, dict):
+                        continue
+                    index = int(step.get("index", 0))
+                    step_type = str(step.get("tipo", "ação"))
+                    selector = str(step.get("seletor", ""))
+                    if ":nth-" in selector or " > " in selector:
+                        fragile_selectors += 1
+                    st.code(f"{index + 1}. {step_type} -> {selector}", language=None)
+
+            st.markdown("**O que esta rotina deve retornar?**")
+            extraction_target = st.text_input(
+                "Digitar nome do campo desejado",
+                key=f"demo_extraction_target_{session_id}",
+                placeholder="Ex.: Qtd. Pcls. Pagas",
+            )
+            st.caption("Também é possível salvar sem alvo específico; nesse caso a execução apenas confirma a tela final.")
+
             action_name = st.text_input(
-                "Nome da ação",
+                "Nome da rotina",
                 value=str(guided.get("name") or ""),
-                placeholder="Ex.: Consultar resultado da assembleia",
+                placeholder="Ex.: Consultar quantidade de parcelas pagas",
                 key=f"demo_action_name_{session_id}",
-            )
-            action_objective = st.text_input(
-                "Objetivo da ação",
-                value=str(guided.get("objective") or synthesis.get("suggested_objective") or ""),
-                key=f"demo_action_objective_{session_id}",
-            )
-            input_description = st.text_input(
-                "Entradas informadas pelo usuário",
-                value=str(guided.get("input_description") or ""),
-                key=f"demo_action_input_{session_id}",
-            )
-            expected_result = st.text_input(
-                "Resultado esperado para retornar ao usuário",
-                value=str(guided.get("expected_result") or synthesis.get("suggested_expected_result") or ""),
-                key=f"demo_action_expected_result_{session_id}",
-            )
-            success_criteria = st.text_input(
-                "Como saber que deu certo",
-                value=str(guided.get("success_criteria") or ""),
-                key=f"demo_action_success_{session_id}",
-            )
-            output_options = ["texto/dados da tela", "arquivo/PDF", "ambos", "apenas abrir tela"]
-            guided_output = str(guided.get("output_type") or "texto/dados da tela")
-            output_type = st.selectbox(
-                "Tipo de retorno esperado",
-                output_options,
-                index=output_options.index(guided_output) if guided_output in output_options else 0,
-                key=f"demo_action_output_{session_id}",
-            )
-
-            st.markdown("**Resultado que a ação deve retornar**")
-            candidates = recording_result.get("output_candidates", [])
-            candidates = candidates if isinstance(candidates, list) else []
-            ai_candidates = synthesis.get("suggested_extraction_targets", []) if isinstance(synthesis, dict) else []
-            if isinstance(ai_candidates, list):
-                candidates = candidates + [item for item in ai_candidates if isinstance(item, dict)]
-            objective_terms = ("valor", "parcela", "valor da parcela", "parcela atual", "vencimento", "número de parcelas", "numero de parcelas", "status")
-            objective_text = f"{action_objective} {expected_result}".casefold()
-            if any(term in objective_text for term in ("valor", "parcela")):
-                focused = [
-                    item for item in candidates
-                    if isinstance(item, dict)
-                    and any(term in f"{item.get('label', '')} {item.get('preview', '')}".casefold() for term in objective_terms)
-                ]
-                candidates = focused + [item for item in candidates if item not in focused]
-            candidate_options = {
-                f"{item.get('label', 'resultado')}: {item.get('preview', '')}": item
-                for item in candidates
-                if isinstance(item, dict) and item.get("selector")
-            }
-            selected_candidates = st.multiselect(
-                "Textos detectados na tela final",
-                list(candidate_options),
-                key=f"demo_output_candidates_{session_id}",
-            )
-            manual_label = st.text_input(
-                "Nome do resultado manual",
-                key=f"demo_manual_output_label_{session_id}",
-                placeholder="Ex.: valor_contemplacao",
-            )
-            manual_selector = st.text_input(
-                "Seletor CSS do resultado manual",
-                key=f"demo_manual_output_selector_{session_id}",
-                placeholder="#resultado ou .valor-final",
-            )
-            extract_visible_text = st.checkbox(
-                "Extrair texto visível da tela final (menos preciso)",
-                key=f"demo_extract_visible_{session_id}",
             )
             download_detected = bool(recording_result.get("download_detected"))
             if download_detected:
                 st.success("Download detectado durante a demonstração.")
             return_downloaded_file = st.checkbox(
                 "Retornar arquivo baixado",
-                value=download_detected and output_type in {"arquivo/PDF", "ambos"},
+                value=download_detected,
                 disabled=not download_detected,
                 key=f"demo_return_download_{session_id}",
-            )
-            requires_authenticated_session = st.checkbox(
-                "Requer sessão autenticada",
-                value=bool(session.get("using_external_system", False)),
-                key=f"demo_requires_auth_{session_id}",
-            )
-            action_timeout_seconds = st.number_input(
-                "Timeout máximo da ação (segundos)",
-                min_value=30,
-                max_value=1800,
-                value=300 if session.get("browser_mode") == "desktop_browser" else 180,
-                step=30,
-                key=f"demo_action_timeout_{session_id}",
             )
             with st.expander("Revisão técnica", expanded=False):
                 st.write(
@@ -707,8 +626,7 @@ def _render_demo_v01() -> None:
                             {"step": index + 1, "suggested_name": suggested}
                             for index, _selector, suggested in captured_variable_rows
                         ],
-                        "extraction_targets": selected_candidates
-                        + ([manual_label] if manual_label.strip() and manual_selector.strip() else []),
+                        "extraction_target": extraction_target,
                         "may_open_new_tab_or_download": bool(download_detected),
                         "suggested_checkpoints": [
                             "before_action_auth_check",
@@ -721,41 +639,38 @@ def _render_demo_v01() -> None:
                         "wait_strategies": synthesis.get("waits", []) if isinstance(synthesis, dict) else [],
                     }
                 )
+            allow_no_fill_save = True
+            if hard_warning:
+                allow_no_fill_save = st.checkbox(
+                    "Salvar mesmo sem variáveis capturadas",
+                    key=f"demo_confirm_no_fill_{session_id}",
+                )
             if st.button("Salvar ação aprendida", key="demo_save_action", type="primary", use_container_width=True):
+                if hard_warning and not allow_no_fill_save:
+                    st.error("Confirme explicitamente que deseja salvar sem variáveis capturadas.")
+                    return
                 try:
-                    configured_targets = [
-                        {
-                            "label": str(candidate_options[item].get("label") or "resultado"),
-                            "selector": str(candidate_options[item].get("selector") or ""),
-                            "frame_url": str(candidate_options[item].get("frame_url") or ""),
-                            "frame_name": str(candidate_options[item].get("frame_name") or ""),
-                        }
-                        for item in selected_candidates
-                    ]
-                    if manual_label.strip() and manual_selector.strip():
-                        configured_targets.append({"label": manual_label, "selector": manual_selector})
-                    ai_result_enabled = bool(guided.get("ai_result_summary_enabled", False))
-                    ai_recovery_enabled = bool(guided.get("ai_recovery_enabled", False))
+                    target_text = extraction_target.strip()
+                    configured_targets = [{"label": target_text}] if target_text else []
                     with st.spinner("Revisando a demonstração e salvando a ação..."):
                         result = demo_api_request(
                             "POST",
                             f"/api/demo/sessions/{encoded_session}/actions",
                             {
                                 "name": action_name,
-                                "description": "Rotina demonstrada manualmente e revisada pelo observador de IA.",
-                                "objective": action_objective,
-                                "input_description": input_description,
-                                "expected_result": expected_result,
-                                "success_criteria": success_criteria,
-                                "output_type": output_type,
+                                "description": "Rotina gravada mecanicamente e revisada por IA após a captura.",
+                                "objective": action_name,
+                                "input_description": "",
+                                "expected_result": f"Retornar {target_text}" if target_text else "Abrir a tela final da rotina",
+                                "success_criteria": "",
+                                "output_type": "arquivo/PDF" if return_downloaded_file and not target_text else "texto/dados da tela",
                                 "variable_names": variable_names,
                                 "extraction_targets": configured_targets,
-                                "extract_visible_text": extract_visible_text,
+                                "extract_visible_text": False,
                                 "return_downloaded_file": return_downloaded_file,
-                                "requires_authenticated_session": requires_authenticated_session,
-                                "action_timeout_seconds": int(action_timeout_seconds),
-                                "ai_result_summary_enabled": ai_result_enabled,
-                                "ai_recovery_enabled": ai_recovery_enabled,
+                                "requires_authenticated_session": bool(session.get("using_external_system", False)),
+                                "ai_result_summary_enabled": True,
+                                "ai_recovery_enabled": False,
                             },
                             api_base_url=API_BASE_URL,
                             timeout=30,
@@ -930,7 +845,7 @@ def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
         return
     if operator_required:
         st.warning(
-            "A sessão precisa de login manual. Abra o Navegador Desktop, conclua o login e clique em Login concluído."
+            "A sessão precisa de login manual. Abra Configurações, conclua o login no navegador e salve a sessão."
         )
     with st.expander("Ver diagnóstico de sessão", expanded=False):
         st.write(
@@ -1608,6 +1523,8 @@ elif menu_selecionado == "Catálogo de Ações":
                 if dados_acao.get("learning_mode") in {
                     "human_demo_live_ai_observed",
                     "desktop_browser_live_ai_observed",
+                    "human_demo_mechanical_ai_reviewed",
+                    "desktop_browser_mechanical_ai_reviewed",
                 }:
                     if dados_acao.get("ai_reviewed"):
                         st.success("Observador IA ativo")
@@ -1734,12 +1651,12 @@ elif menu_selecionado == "Configurações":
         st.error(str(exc))
     with st.form("external_system_config_form"):
         external_system_name = st.text_input(
-            "external_system_name",
+            "Sistema externo",
             value=str(external_config.get("external_system_name") or ""),
             placeholder="Ex.: ERP do cliente",
         )
         external_login_url = st.text_input(
-            "external_login_url",
+            "URL inicial",
             value=str(external_config.get("external_login_url") or ""),
             placeholder="https://erp.cliente.com/login",
         )
@@ -1820,6 +1737,83 @@ elif menu_selecionado == "Configurações":
                 st.rerun()
             except DemoApiError as exc:
                 st.error(str(exc))
+    st.markdown("**Sessão do navegador**")
+    st.caption("Login manual: o CotaSync não armazena senha e não automatiza MFA ou consentimento Microsoft.")
+    settings_session_id = str(st.session_state.get("settings_demo_session_id", "") or "")
+    settings_session: dict = {}
+    if settings_session_id:
+        try:
+            settings_session = demo_api_request(
+                "GET",
+                f"/api/demo/sessions/{quote(settings_session_id, safe='')}",
+                api_base_url=API_BASE_URL,
+            ).get("session", {})
+        except DemoApiError as exc:
+            st.warning(str(exc))
+            st.session_state.pop("settings_demo_session_id", None)
+            settings_session_id = ""
+    session_cols = st.columns(4)
+    if session_cols[0].button("Abrir navegador para login", use_container_width=True):
+        try:
+            with st.spinner("Abrindo navegador..."):
+                response = demo_api_request("POST", "/api/demo/sessions", api_base_url=API_BASE_URL)
+            settings_session = response.get("session", {})
+            st.session_state.settings_demo_session_id = str(settings_session.get("id") or "")
+            st.rerun()
+        except DemoApiError as exc:
+            st.error(str(exc))
+    save_disabled = not bool(settings_session_id)
+    if session_cols[1].button("Salvar sessão do navegador", use_container_width=True, disabled=save_disabled):
+        try:
+            response = demo_api_request(
+                "POST",
+                f"/api/demo/sessions/{quote(settings_session_id, safe='')}/confirm-login",
+                api_base_url=API_BASE_URL,
+            )
+            settings_session = response.get("session", {})
+            st.success("Sessão salva.")
+            st.rerun()
+        except DemoApiError as exc:
+            st.warning(str(exc))
+    if session_cols[2].button("Testar sessão salva", use_container_width=True, disabled=save_disabled):
+        try:
+            response = demo_api_request(
+                "GET",
+                f"/api/demo/sessions/{quote(settings_session_id, safe='')}",
+                api_base_url=API_BASE_URL,
+            )
+            tested = response.get("session", {})
+            if tested.get("storage_state_saved") and tested.get("status") in {"autenticada", "aguardando_login"}:
+                st.success("Sessão salva encontrada para esta configuração.")
+            else:
+                st.warning("Sessão salva não encontrada ou ainda não validada.")
+        except DemoApiError as exc:
+            st.warning(str(exc))
+    if session_cols[3].button("Limpar sessão salva", use_container_width=True, disabled=save_disabled):
+        try:
+            demo_api_request(
+                "DELETE",
+                f"/api/demo/sessions/{quote(settings_session_id, safe='')}/saved-session",
+                api_base_url=API_BASE_URL,
+            )
+            st.success("Sessão salva removida.")
+            st.rerun()
+        except DemoApiError as exc:
+            st.warning(str(exc))
+    if settings_session:
+        st.write(
+            {
+                "status": settings_session.get("status", ""),
+                "storage_state_saved": bool(settings_session.get("storage_state_saved")),
+                "page_url": settings_session.get("page_url", ""),
+                "page_title": settings_session.get("page_title", ""),
+            }
+        )
+        live_url = str(settings_session.get("live_url") or "")
+        if live_url and settings_session.get("browser_mode") != "desktop_browser":
+            st.link_button("Abrir navegador da sessão", live_url, use_container_width=True)
+        elif settings_session.get("browser_mode") == "desktop_browser":
+            _render_desktop_view_access(f"settings_login_{settings_session_id}")
     public_base_url = os.getenv("COTASYNC_PUBLIC_BASE_URL", "").strip()
     browserless_public_url = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
     desktop_public_url = os.getenv("COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL", "").strip()

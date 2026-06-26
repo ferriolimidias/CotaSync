@@ -75,6 +75,7 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
             "output_type": "texto/dados da tela",
         },
         learning_synthesis={},
+        final_page_snapshot={},
         download_detected=download_detected,
         recording=True,
         status="gravando",
@@ -116,6 +117,27 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(config["microsoft_saved_account_identifier"], "D0004267@rdmz.com.br")
         self.assertEqual(config["expected_system_host"], "nwcweb.randonconsorcios.com.br")
         self.assertIn("m365.cloud.microsoft", config["microsoft_hosts"])
+
+    def test_learning_can_start_with_only_action_name(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.status = "autenticada"
+        session.recording = False
+        session.observer_tasks = set()
+        session.context = SimpleNamespace(pages=[])
+        session.storage_state_path = Path(tempfile.gettempdir()) / "cotasync-unit" / "storage_state.json"
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_install_recorder_for_session", new=AsyncMock()), patch.object(
+            manager,
+            "status",
+            new=AsyncMock(return_value={"id": "session", "recording": True}),
+        ):
+            result = asyncio.run(manager.start_recording("session", {"name": "Consultar parcelas"}))
+        self.assertTrue(session.recording)
+        self.assertEqual(session.guided_learning["name"], "Consultar parcelas")
+        self.assertEqual(session.guided_learning["objective"], "")
+        self.assertTrue(session.guided_learning["ai_result_summary_enabled"])
+        self.assertEqual(result["id"], "session")
 
     def test_guided_metadata_and_extraction_are_saved_and_sent_to_synthesis(self) -> None:
         manager = DemoSessionManager()
@@ -161,6 +183,20 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(synthesis_action["expected_result"], "Retornar o status")
         self.assertEqual(saved["extraction_targets"], ["status"])
 
+    def test_ai_summary_defaults_on_when_saving(self) -> None:
+        manager = DemoSessionManager()
+        manager._sessions["session"] = _session()  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Consultar default IA", "Consulta.", {}))
+        action = captured["acoes_conhecidas"]["Consultar default IA"]  # type: ignore[index]
+        self.assertTrue(action["ai_result_summary_enabled"])
+
     def test_download_detected_action_converts_click_to_file_output(self) -> None:
         manager = DemoSessionManager()
         manager._sessions["session"] = _session(download_detected=True)  # type: ignore[attr-defined]
@@ -186,18 +222,44 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["output_schema"]["main_file"]["type"], "file")
         self.assertTrue(action["download_expected"])
 
+    def test_typed_extraction_target_is_saved_as_near_label_strategy(self) -> None:
+        manager = DemoSessionManager()
+        manager._sessions["session"] = _session()  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(
+                manager.save_action(
+                    "session",
+                    "Consultar parcelas pagas",
+                    "Consulta.",
+                    {},
+                    extraction_targets=[{"label": "Qtd. Pcls. Pagas"}],
+                )
+            )
+        action = captured["acoes_conhecidas"]["Consultar parcelas pagas"]  # type: ignore[index]
+        extraction_step = action["passos_playwright"][-1]
+        self.assertEqual(extraction_step["tipo"], "extrair_texto")
+        self.assertEqual(extraction_step["nome"], "Qtd. Pcls. Pagas")
+        self.assertEqual(extraction_step["seletor"], "")
+        self.assertEqual(extraction_step["extraction_strategy"], "near_label")
+
     def test_variable_names_are_suggested_as_friendly_schema_and_renamable(self) -> None:
         manager = DemoSessionManager()
         session = _session()  # type: ignore[assignment]
         session.steps = [
             {"tipo": "preencher", "seletor": "#ctl00_Conteudo_edtGrupo", "valor": ""},
             {"tipo": "preencher", "seletor": "#ctl00_Conteudo_edtCota", "valor": ""},
-            {"tipo": "preencher", "seletor": "select:nth-of-type(1)", "valor": ""},
+            {"tipo": "selecionar", "seletor": "select:nth-of-type(1)", "valor": ""},
         ]
         session.learning_events = [
             {"step_index": 0, "event_type": "fill", "selector": "#ctl00_Conteudo_edtGrupo"},
             {"step_index": 1, "event_type": "fill", "selector": "#ctl00_Conteudo_edtCota"},
-            {"step_index": 2, "event_type": "fill", "selector": "select:nth-of-type(1)"},
+            {"step_index": 2, "event_type": "select", "selector": "select:nth-of-type(1)"},
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
@@ -221,7 +283,72 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["passos_playwright"][0]["value_template"], "{{grupo}}")
         self.assertEqual(action["learning_events"][0]["variable_key"], "grupo")
         self.assertEqual(action["learning_events"][0]["value_template"], "{{grupo}}")
+        self.assertEqual(action["passos_playwright"][2]["tipo"], "selecionar")
+        self.assertEqual(action["passos_playwright"][2]["value_template"], "{{tipo_consulta}}")
         self.assertEqual([item["key"] for item in saved["variables"]], ["grupo", "cota", "tipo_consulta"])
+
+    def test_fill_event_creates_variable_without_manual_mapping_and_never_fixed_value(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = [
+            {
+                "tipo": "preencher",
+                "seletor": "#ctl00_Conteudo_edtGrupo",
+                "valor": "935",
+                "field_metadata": {"id": "ctl00_Conteudo_edtGrupo", "label": "Grupo"},
+            }
+        ]
+        session.learning_events = [
+            {
+                "step_index": 0,
+                "event_type": "fill",
+                "selector": "#ctl00_Conteudo_edtGrupo",
+                "field_metadata": {"id": "ctl00_Conteudo_edtGrupo", "label": "Grupo"},
+            }
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Consultar grupo", "Consulta.", {}))
+        action = captured["acoes_conhecidas"]["Consultar grupo"]  # type: ignore[index]
+        step = action["passos_playwright"][0]
+        self.assertEqual(step["variavel"], "grupo")
+        self.assertEqual(step["valor"], "")
+        self.assertEqual(step["value_template"], "{{grupo}}")
+        self.assertNotIn("935", json.dumps(action, ensure_ascii=False))
+
+    def test_iframe_and_new_page_metadata_are_preserved(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = [{"tipo": "preencher", "seletor": "#edtCota", "valor": ""}]
+        session.learning_events = [
+            {
+                "step_index": 0,
+                "event_type": "fill",
+                "selector": "#edtCota",
+                "frame_url": "https://example.test/frame",
+                "frame_name": "consulta",
+                "opened_new_page": True,
+            }
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Consultar iframe", "Consulta.", {}))
+        action = captured["acoes_conhecidas"]["Consultar iframe"]  # type: ignore[index]
+        self.assertEqual(action["robust_steps"][0]["frame_url"], "https://example.test/frame")
+        self.assertEqual(action["robust_steps"][0]["frame_name"], "consulta")
+        self.assertTrue(action["robust_steps"][0]["opened_new_page"])
 
     def test_operator_fill_records_directly_when_listener_misses_event(self) -> None:
         manager = DemoSessionManager()
