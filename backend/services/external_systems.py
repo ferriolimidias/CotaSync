@@ -21,6 +21,13 @@ DEFAULT_ACCESS_PROFILE = {
     "expected_system_host": "nwcweb.randonconsorcios.com.br",
     "microsoft_hosts": ["login.microsoftonline.com", "m365.cloud.microsoft"],
 }
+MICROSOFT_HOST_SUFFIXES = (
+    "login.microsoftonline.com",
+    "login.live.com",
+    "login.microsoft.com",
+    "login.windows.net",
+    "m365.cloud.microsoft",
+)
 
 
 class ExternalSystemConfigError(RuntimeError):
@@ -63,12 +70,18 @@ def _string_keys() -> tuple[str, ...]:
 
 def _normalize_microsoft_hosts(raw: Any) -> list[str]:
     if isinstance(raw, list):
-        hosts = [str(item or "").strip().lower().rstrip(".") for item in raw]
+        hosts = []
+        for item in raw:
+            host = str(item or "").strip().lower().rstrip(".")
+            if _looks_like_url(host):
+                host = (urlsplit(host).hostname or "").lower().rstrip(".")
+            if host:
+                hosts.append(host)
     else:
         hosts = []
     result: list[str] = []
     seen: set[str] = set()
-    for host in hosts or DEFAULT_ACCESS_PROFILE["microsoft_hosts"]:
+    for host in [*(hosts or []), *DEFAULT_ACCESS_PROFILE["microsoft_hosts"]]:
         if host and host not in seen:
             seen.add(host)
             result.append(host)
@@ -89,7 +102,8 @@ def _normalize_access_profile_fields(result: dict[str, Any]) -> None:
     if _looks_like_url(host):
         host = urlsplit(host).netloc.lower().rstrip(".")
     microsoft_hosts = set(_normalize_microsoft_hosts(result.get("microsoft_hosts")))
-    if not host or "/" in host or "?" in host or host in microsoft_hosts:
+    is_microsoft_host = any(host == suffix or host.endswith(f".{suffix}") for suffix in MICROSOFT_HOST_SUFFIXES)
+    if not host or "/" in host or "?" in host or host in microsoft_hosts or is_microsoft_host:
         result["expected_system_host"] = ""
     else:
         result["expected_system_host"] = host

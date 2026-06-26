@@ -848,6 +848,56 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertTrue(action["session_guardian_enabled"])
         self.assertEqual(saved["access_profile_name"], "Priscila")
 
+    def test_microsoft_click_metadata_is_kept_in_robust_steps(self) -> None:
+        manager = DemoSessionManager()
+        session = _external_session()
+        session.steps = [
+            {
+                "tipo": "clicar",
+                "seletor": 'div[aria-label="Sign in with outra@rdmz.com.br work or school account."]',
+                "valor": "",
+            },
+            {"tipo": "clicar", "seletor": 'input[name="idSIButton9"]', "valor": ""},
+        ]
+        session.learning_events = [
+            {
+                "step_index": 0,
+                "event_type": "click",
+                "selector": 'div[aria-label="Sign in with outra@rdmz.com.br work or school account."]',
+                "url_before": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                "url_after": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                "title_before": "Sign in",
+                "target_text": "Outra Pessoa",
+                "target_label": "Sign in with outra@rdmz.com.br work or school account.",
+                "source": "browser_recorder",
+            },
+            {
+                "step_index": 1,
+                "event_type": "click",
+                "selector": 'input[name="idSIButton9"]',
+                "url_before": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                "url_after": "https://nwcweb.randonconsorcios.com.br/CONAT/frmConAtCnsAtendimento.aspx",
+                "title_before": "Permissions requested",
+                "target_text": "Accept",
+                "target_label": "Accept",
+                "source": "browser_recorder",
+            },
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Microsoft aprendido", "Consulta.", {}))
+        action = captured["acoes_conhecidas"]["Microsoft aprendido"]  # type: ignore[index]
+        self.assertEqual(action["passos_playwright"][0]["tipo"], "clicar")
+        self.assertIn("login.microsoftonline.com", action["robust_steps"][0]["expected_url_before"])
+        self.assertEqual(action["robust_steps"][0]["target_text"], "Outra Pessoa")
+        self.assertEqual(action["robust_steps"][1]["target_text"], "Accept")
+
 
 class OutputResultTests(unittest.TestCase):
     def test_run_keeps_deterministic_extraction(self) -> None:

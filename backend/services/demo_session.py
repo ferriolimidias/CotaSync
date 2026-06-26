@@ -227,7 +227,15 @@ _RECORDER_SCRIPT = r"""
     const type = String(el.type || '').toLowerCase();
     if (['text', 'email', 'password', 'search', 'number'].includes(type)) return;
     const before = snapshot();
-    send({tipo: 'clicar', event_type: 'click', seletor: selectorFor(el), valor: '', field_metadata: fieldMetadata(el)}, before, 500);
+    send({
+      tipo: 'clicar',
+      event_type: 'click',
+      seletor: selectorFor(el),
+      valor: '',
+      target_text: textOf(el).slice(0, 200),
+      target_label: labelFor(el),
+      field_metadata: fieldMetadata(el)
+    }, before, 500);
     setTimeout(captureOutputs, 650);
     setTimeout(captureOutputs, 900);
   }, true);
@@ -811,6 +819,8 @@ class DemoSessionManager:
             "step_index": step_index,
             "event_type": event_type,
             "selector": str(raw.get("seletor") or ""),
+            "target_text": str(raw.get("target_text") or "")[:200],
+            "target_label": str(raw.get("target_label") or "")[:200],
             "value_template": str(raw.get("value_template") or "") if event_type in {"fill", "select"} else "",
             "variable_key": str(raw.get("variable_key") or "") if event_type in {"fill", "select"} else "",
             "field_metadata": raw.get("field_metadata") if isinstance(raw.get("field_metadata"), dict) else {},
@@ -835,6 +845,14 @@ class DemoSessionManager:
             for key, value in source["frame_metadata"].items():
                 if key in {"frame_name", "frame_url"} and value:
                     event[key] = str(value)
+        field_metadata = event["field_metadata"] if isinstance(event.get("field_metadata"), dict) else {}
+        if not event["target_label"]:
+            event["target_label"] = str(
+                field_metadata.get("label")
+                or field_metadata.get("aria_label")
+                or field_metadata.get("placeholder")
+                or ""
+            )[:200]
         from backend.services.ai_observer import deterministic_observe_learning_step
 
         event.update(deterministic_observe_learning_step(event))
@@ -1690,6 +1708,31 @@ class DemoSessionManager:
             self._prepare_operator_utility(session, duration=2.5)
         event_count_before = len(session.learning_events)
         recorded_event: dict[str, Any] | None = None
+        target_metadata: dict[str, str] = {}
+        try:
+            target_metadata = await locator.evaluate(
+                r"""el => {
+                  const textOf = node => String(node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim();
+                  const id = el.id ? String(el.id) : '';
+                  let label = '';
+                  if (id) {
+                    const explicit = el.ownerDocument.querySelector(`label[for="${CSS.escape(id)}"]`);
+                    if (explicit) label = textOf(explicit).slice(0, 120);
+                  }
+                  if (!label) {
+                    const wrapping = el.closest('label');
+                    if (wrapping) label = textOf(wrapping).slice(0, 120);
+                  }
+                  if (!label) {
+                    label = String(el.getAttribute('aria-label') || el.getAttribute('title') || '').slice(0, 120);
+                  }
+                  return {target_text: textOf(el).slice(0, 200), target_label: label};
+                }"""
+            )
+            if not isinstance(target_metadata, dict):
+                target_metadata = {}
+        except Exception:
+            target_metadata = {}
         try:
             await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
             await asyncio.sleep(1.1)
@@ -1704,6 +1747,8 @@ class DemoSessionManager:
                     "event_type": "click",
                     "seletor": selector,
                     "valor": "",
+                    "target_text": str(target_metadata.get("target_text") or ""),
+                    "target_label": str(target_metadata.get("target_label") or ""),
                     "timestamp_before": now,
                     "timestamp_after": now,
                     "elapsed_ms": 0,
@@ -2258,6 +2303,8 @@ class DemoSessionManager:
                     "replay_hint": str(event.get("replay_hint") or "Revalidar página ativa."),
                     "expected_url_before": str(event.get("url_before") or ""),
                     "expected_url_after": str(event.get("url_after") or ""),
+                    "target_text": str(event.get("target_text") or step.get("target_text") or "")[:200],
+                    "target_label": str(event.get("target_label") or step.get("target_label") or "")[:200],
                     "opened_new_page": bool(event.get("opened_new_page")),
                     "download_detected": bool(event.get("download_detected")),
                     "expected_selector_after": str(
@@ -2498,7 +2545,7 @@ class DemoSessionManager:
                 action_timeout_ms = _LONG_ACTION_MAX_MS
         action_deadline = time.monotonic() + (action_timeout_ms / 1000)
 
-        async def run_session_checkpoint(checkpoint: str) -> None:
+        async def run_session_checkpoint(checkpoint: str, next_step: dict[str, Any] | None = None) -> None:
             nonlocal automatically_revalidated
             nonlocal recovery_attempted
             nonlocal total_recovery_attempts
@@ -2513,10 +2560,85 @@ class DemoSessionManager:
             ):
                 return
             started_at = time.monotonic()
+            authenticated = await self._page_is_authenticated(session, session.page)
+            state = await guardian.classify(
+                session.page,
+                action,
+                authenticated=authenticated,
+            )
+            if state.state == "authenticated_system":
+                last_session_state = state.state
+                last_page_title = state.title
+                current_host = state.current_host
+                checkpoint_diagnostics.append(
+                    {
+                        "checkpoint": checkpoint,
+                        "session_state": state.state,
+                        "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                        "recovery_attempted": False,
+                        "recovery_attempts": 0,
+                        "result": "success",
+                        "current_host": state.current_host,
+                        "last_page_title": state.title,
+                    }
+                )
+                return
+            learned_step_diagnostic = await guardian.learned_microsoft_step_diagnostic(
+                session.page,
+                action,
+                next_step,
+                state=state,
+                authenticated=authenticated,
+            )
+            if learned_step_diagnostic.get("learned_microsoft_step_compatible") is True:
+                last_session_state = state.state
+                last_page_title = state.title
+                current_host = state.current_host
+                checkpoint_diagnostics.append(
+                    {
+                        "checkpoint": checkpoint,
+                        "session_state": state.state,
+                        "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                        "recovery_attempted": False,
+                        "recovery_attempts": 0,
+                        "result": "learned_microsoft_step_allowed",
+                        "current_host": state.current_host,
+                        "last_page_title": state.title,
+                        "next_step_expected_selector": learned_step_diagnostic.get("next_step_expected_selector"),
+                        "next_step_expected_url_or_host": learned_step_diagnostic.get(
+                            "next_step_expected_url_or_host"
+                        ),
+                        "whether_next_step_was_microsoft_click": learned_step_diagnostic.get(
+                            "whether_next_step_was_microsoft_click"
+                        ),
+                    }
+                )
+                return
+            if state.state.startswith("microsoft_") or state.state == "unknown_microsoft_auth":
+                last_session_state = state.state
+                last_page_title = state.title
+                current_host = state.current_host
+                learned_step_diagnostic["checkpoint_diagnostics"] = checkpoint_diagnostics + [
+                    {
+                        "checkpoint": checkpoint,
+                        "session_state": state.state,
+                        "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                        "recovery_attempted": False,
+                        "recovery_attempts": 0,
+                        "result": "failed",
+                        "current_host": state.current_host,
+                        "last_page_title": state.title,
+                        "reason": learned_step_diagnostic.get("reason"),
+                    }
+                ]
+                raise SessionGuardianError(
+                    session_failure_message(state.state, str(learned_step_diagnostic.get("reason") or state.reason)),
+                    learned_step_diagnostic,
+                )
             result = await guardian.ensure_authenticated(
                 session.page,
                 action,
-                is_authenticated=lambda page: self._page_is_authenticated(session, page),
+                is_authenticated=lambda _page: asyncio.sleep(0, result=authenticated),
                 checkpoint=checkpoint,
             )
             last_session_state = result.state.state
@@ -2547,7 +2669,19 @@ class DemoSessionManager:
                 diagnostics,
             )
 
-        await run_session_checkpoint("before_action_auth_check")
+        async def validate_or_allow_learned_microsoft_step(
+            next_step: dict[str, Any] | None,
+            checkpoint: str,
+        ) -> None:
+            try:
+                validate_action_page_url(action, session.page.url)
+                await run_session_checkpoint(checkpoint, next_step)
+                return
+            except ActionPageError:
+                await run_session_checkpoint(checkpoint, next_step)
+
+        first_step = steps[0] if steps and isinstance(steps[0], dict) else None
+        await run_session_checkpoint("before_action_auth_check", first_step)
         for step_index, step in enumerate(steps):
             if time.monotonic() >= action_deadline:
                 diagnostic = {
@@ -2579,13 +2713,18 @@ class DemoSessionManager:
                 )
             if not isinstance(step, dict):
                 continue
+            next_step = (
+                steps[step_index + 1]
+                if step_index + 1 < len(steps) and isinstance(steps[step_index + 1], dict)
+                else None
+            )
             step_type = str(step.get("tipo") or "").strip().lower()
             selector = str(step.get("seletor") or "").strip()
             step_diag: dict[str, Any] | None = None
             try:
                 step_expected_url = _expected_replay_url(step.get("expected_url_before") or expected_url)
                 if action_browser_mode == "desktop_browser":
-                    await run_session_checkpoint("before_step_auth_check")
+                    await run_session_checkpoint("before_step_auth_check", step)
                 else:
                     authenticated, revalidated = await self._revalidate_for_replay(session, step_expected_url)
                     automatically_revalidated = automatically_revalidated or revalidated
@@ -2594,7 +2733,7 @@ class DemoSessionManager:
                 page = session.page
                 await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
                 if action_browser_mode == "desktop_browser":
-                    validate_action_page_url(action, page.url)
+                    await validate_or_allow_learned_microsoft_step(step, "before_step_page_check")
                 if (
                     action_browser_mode != "desktop_browser"
                     and (not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(session, page))
@@ -2702,7 +2841,7 @@ class DemoSessionManager:
                             wait_strategy = "new_page"
                             wait_result = "new_page"
                             if action_browser_mode == "desktop_browser":
-                                await run_session_checkpoint("after_new_page_check")
+                                await run_session_checkpoint("after_new_page_check", next_step)
                         if expected_selector:
                             await page.locator(expected_selector).first.wait_for(
                                 state="visible",
@@ -2813,8 +2952,7 @@ class DemoSessionManager:
                         )
                     )
                 if action_browser_mode == "desktop_browser":
-                    validate_action_page_url(action, session.page.url)
-                    await run_session_checkpoint("after_step_stability_check")
+                    await validate_or_allow_learned_microsoft_step(next_step, "after_step_stability_check")
             except ActionPageError as exc:
                 raise DemoSessionError(str(exc)) from exc
             except SessionGuardianError as exc:

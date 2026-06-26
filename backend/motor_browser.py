@@ -1057,7 +1057,11 @@ async def executar_acao_rapida(
                 except ActionPageError:
                     return False
 
-            async def run_session_checkpoint(page_to_check: Any, checkpoint: str) -> None:
+            async def run_session_checkpoint(
+                page_to_check: Any,
+                checkpoint: str,
+                next_step: dict[str, Any] | None = None,
+            ) -> None:
                 nonlocal recovery_attempted
                 nonlocal total_recovery_attempts
                 nonlocal recovery_steps
@@ -1071,10 +1075,85 @@ async def executar_acao_rapida(
                 ):
                     return
                 started_at = time.monotonic()
+                authenticated = await is_authenticated(page_to_check)
+                state = await guardian.classify(
+                    page_to_check,
+                    action_config,
+                    authenticated=authenticated,
+                )
+                if state.state == "authenticated_system":
+                    last_session_state = state.state
+                    last_page_title = state.title
+                    current_host = state.current_host
+                    checkpoint_diagnostics.append(
+                        {
+                            "checkpoint": checkpoint,
+                            "session_state": state.state,
+                            "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                            "recovery_attempted": False,
+                            "recovery_attempts": 0,
+                            "result": "success",
+                            "current_host": state.current_host,
+                            "last_page_title": state.title,
+                        }
+                    )
+                    return
+                learned_step_diagnostic = await guardian.learned_microsoft_step_diagnostic(
+                    page_to_check,
+                    action_config,
+                    next_step,
+                    state=state,
+                    authenticated=authenticated,
+                )
+                if learned_step_diagnostic.get("learned_microsoft_step_compatible") is True:
+                    last_session_state = state.state
+                    last_page_title = state.title
+                    current_host = state.current_host
+                    checkpoint_diagnostics.append(
+                        {
+                            "checkpoint": checkpoint,
+                            "session_state": state.state,
+                            "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                            "recovery_attempted": False,
+                            "recovery_attempts": 0,
+                            "result": "learned_microsoft_step_allowed",
+                            "current_host": state.current_host,
+                            "last_page_title": state.title,
+                            "next_step_expected_selector": learned_step_diagnostic.get("next_step_expected_selector"),
+                            "next_step_expected_url_or_host": learned_step_diagnostic.get(
+                                "next_step_expected_url_or_host"
+                            ),
+                            "whether_next_step_was_microsoft_click": learned_step_diagnostic.get(
+                                "whether_next_step_was_microsoft_click"
+                            ),
+                        }
+                    )
+                    return
+                if state.state.startswith("microsoft_") or state.state == "unknown_microsoft_auth":
+                    last_session_state = state.state
+                    last_page_title = state.title
+                    current_host = state.current_host
+                    learned_step_diagnostic["checkpoint_diagnostics"] = checkpoint_diagnostics + [
+                        {
+                            "checkpoint": checkpoint,
+                            "session_state": state.state,
+                            "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                            "recovery_attempted": False,
+                            "recovery_attempts": 0,
+                            "result": "failed",
+                            "current_host": state.current_host,
+                            "last_page_title": state.title,
+                            "reason": learned_step_diagnostic.get("reason"),
+                        }
+                    ]
+                    raise SessionGuardianError(
+                        session_failure_message(state.state, str(learned_step_diagnostic.get("reason") or state.reason)),
+                        learned_step_diagnostic,
+                    )
                 result = await guardian.ensure_authenticated(
                     page_to_check,
                     action_config,
-                    is_authenticated=is_authenticated,
+                    is_authenticated=lambda _page: asyncio.sleep(0, result=authenticated),
                     checkpoint=checkpoint,
                 )
                 last_session_state = result.state.state
@@ -1103,6 +1182,18 @@ async def executar_acao_rapida(
                         diagnostics,
                     )
 
+            async def validate_or_allow_learned_microsoft_step(
+                page_to_check: Any,
+                next_step: dict[str, Any] | None,
+                checkpoint: str,
+            ) -> None:
+                try:
+                    validate_action_page_url(action_config, page_to_check.url)
+                    await run_session_checkpoint(page_to_check, checkpoint, next_step)
+                    return
+                except ActionPageError:
+                    await run_session_checkpoint(page_to_check, checkpoint, next_step)
+
             if browser_mode == "desktop_browser":
                 connection = await provider.connect(p, f"action-{nome_arquivo}")
                 browser = connection.browser
@@ -1113,7 +1204,8 @@ async def executar_acao_rapida(
                     if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
                         raise
                     page = connection.page
-                await run_session_checkpoint(page, "before_action_auth_check")
+                first_step = passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None
+                await run_session_checkpoint(page, "before_action_auth_check", first_step)
                 _LOGGER.info("[FAST-TRACK] Pagina desktop do sistema alvo selecionada.")
             else:
                 # Mantem o fluxo historico do Browserless: sessao isolada, nova
@@ -1129,15 +1221,20 @@ async def executar_acao_rapida(
                     return {"status": "erro", "motivo": login_msg}
                 _LOGGER.info(f"[FAST-TRACK] {login_msg}")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
-            for passo in passos_playwright:
+            for step_index, passo in enumerate(passos_playwright):
                 if not isinstance(passo, dict):
                     continue
+                next_step = (
+                    passos_playwright[step_index + 1]
+                    if step_index + 1 < len(passos_playwright) and isinstance(passos_playwright[step_index + 1], dict)
+                    else None
+                )
                 seletor = str(passo.get("seletor", "")).strip()
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
 
                 logging.info(f"[FAST-TRACK] Executando passo: {tipo_acao} em {seletor}")
                 if browser_mode == "desktop_browser":
-                    await run_session_checkpoint(page, "before_step_auth_check")
+                    await run_session_checkpoint(page, "before_step_auth_check", passo)
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
                     try:
@@ -1167,10 +1264,12 @@ async def executar_acao_rapida(
                             except Exception:
                                 pass
                             if browser_mode == "desktop_browser":
-                                validate_action_page_url(action_config, nova_aba.url)
+                                await validate_or_allow_learned_microsoft_step(
+                                    nova_aba,
+                                    next_step,
+                                    "after_new_page_check",
+                                )
                             page = nova_aba
-                            if browser_mode == "desktop_browser":
-                                await run_session_checkpoint(page, "after_new_page_check")
                             logging.info(f"[NAVEGAÇÃO] Popup/Nova Aba detetada! Foco transferido para: {page.url}")
 
                         except ActionPageError:
@@ -1189,8 +1288,11 @@ async def executar_acao_rapida(
 
                         await asyncio.sleep(2)
                         if browser_mode == "desktop_browser":
-                            validate_action_page_url(action_config, page.url)
-                            await run_session_checkpoint(page, "after_step_stability_check")
+                            await validate_or_allow_learned_microsoft_step(
+                                page,
+                                next_step,
+                                "after_step_stability_check",
+                            )
 
                     elif tipo_acao == "preencher":
                         if "variavel" in passo and dados_variaveis and str(passo["variavel"]) in dados_variaveis:

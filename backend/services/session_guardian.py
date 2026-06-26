@@ -28,6 +28,17 @@ SESSION_STATES = {
     "unknown",
 }
 
+MICROSOFT_CREDENTIAL_STATES = {
+    "microsoft_password_required",
+    "microsoft_mfa_required",
+}
+MICROSOFT_LEARNED_STEP_STATES = {
+    "microsoft_pick_account",
+    "microsoft_consent_required",
+    "microsoft_signed_out",
+    "unknown_microsoft_auth",
+}
+
 _MICROSOFT_HOST_SUFFIXES = (
     "login.microsoftonline.com",
     "login.live.com",
@@ -145,6 +156,22 @@ def _is_microsoft_auth_url(url: str, host: str) -> bool:
     except Exception:
         path = ""
     return any(marker in path for marker in _MICROSOFT_AUTH_PATH_MARKERS)
+
+
+def _step_type(step: Any) -> str:
+    return str(step.get("tipo") or step.get("type") or "").strip().lower() if isinstance(step, dict) else ""
+
+
+def _step_selector(step: Any) -> str:
+    return str(step.get("seletor") or step.get("selector") or "").strip() if isinstance(step, dict) else ""
+
+
+def _step_expected_url_or_host(step: Any) -> str:
+    if not isinstance(step, dict):
+        return ""
+    raw = str(step.get("expected_url_before") or step.get("url_before") or step.get("expected_url_after") or "").strip()
+    host = url_host(raw)
+    return host or raw[:500]
 
 
 def configured_saved_account_texts(action: Any) -> list[str]:
@@ -531,6 +558,69 @@ class SessionGuardian:
             recovery_attempted=bool(recovery_steps),
         )
 
+    async def learned_microsoft_step_diagnostic(
+        self,
+        page: Any,
+        action: Any,
+        next_step: Any,
+        *,
+        state: PageSessionState | None = None,
+        authenticated: bool | None = None,
+    ) -> dict[str, Any]:
+        state = state or await self.classify(page, action, authenticated=authenticated)
+        step_type = _step_type(next_step)
+        selector = _step_selector(next_step)
+        expected_url_or_host = _step_expected_url_or_host(next_step)
+        diagnostic: dict[str, Any] = {
+            "session_state": state.state,
+            "current_host": state.current_host,
+            "current_url": state.current_url,
+            "last_page_title": state.title,
+            "next_step_expected_selector": selector,
+            "next_step_expected_url_or_host": expected_url_or_host,
+            "whether_next_step_was_microsoft_click": False,
+            "learned_microsoft_step_compatible": False,
+            "operator_action_required": bool(state.operator_action_required),
+            "retryable": bool(state.retryable),
+            "reason": state.reason,
+        }
+        if state.state in MICROSOFT_CREDENTIAL_STATES:
+            diagnostic["operator_action_required"] = True
+            diagnostic["reason"] = state.reason or "credential_screen_requires_manual_intervention"
+            return diagnostic
+        if state.state not in MICROSOFT_LEARNED_STEP_STATES:
+            diagnostic["reason"] = state.reason or "not_a_learned_microsoft_replay_state"
+            return diagnostic
+        diagnostic["whether_next_step_was_microsoft_click"] = step_type == "clicar"
+        if step_type != "clicar":
+            diagnostic["operator_action_required"] = True
+            diagnostic["reason"] = "next_step_is_not_click"
+            return diagnostic
+        if not selector:
+            diagnostic["operator_action_required"] = True
+            diagnostic["reason"] = "next_step_missing_selector"
+            return diagnostic
+        try:
+            locator = page.locator(selector).first
+            count = await locator.count()
+            visible = count > 0 and await locator.is_visible()
+        except Exception as exc:
+            diagnostic["operator_action_required"] = True
+            diagnostic["reason"] = "next_step_selector_not_actionable"
+            diagnostic["selector_error_type"] = type(exc).__name__
+            return diagnostic
+        diagnostic["next_step_selector_count"] = count
+        diagnostic["next_step_selector_visible"] = visible
+        if not visible:
+            diagnostic["operator_action_required"] = True
+            diagnostic["reason"] = "next_step_selector_not_visible_on_microsoft_page"
+            return diagnostic
+        diagnostic["learned_microsoft_step_compatible"] = True
+        diagnostic["operator_action_required"] = False
+        diagnostic["retryable"] = False
+        diagnostic["reason"] = "learned_microsoft_click_matches_current_page"
+        return diagnostic
+
     async def click_configured_saved_account(self, page: Any, action: Any) -> bool:
         texts = configured_saved_account_texts(action)
         if not texts:
@@ -566,14 +656,22 @@ class SessionGuardian:
 
 
 def session_failure_message(state: str, reason: str = "") -> str:
+    if reason in {
+        "next_step_is_not_click",
+        "next_step_missing_selector",
+        "next_step_selector_not_actionable",
+        "next_step_selector_not_visible_on_microsoft_page",
+        "learned_microsoft_step_not_compatible",
+    }:
+        return "Esta tela exige intervenção manual ou não corresponde ao passo ensinado."
     if state == "microsoft_consent_required":
-        return "A Microsoft solicitou aceite/consentimento. Abra o navegador desktop, clique em Accept e depois continue."
+        return "Esta tela exige intervenção manual ou não corresponde ao passo ensinado."
     if state in {"microsoft_password_required", "microsoft_mfa_required"}:
         return "Não consegui continuar porque a Microsoft solicitou senha ou MFA."
     if state in {"microsoft_signed_out", "unknown"} and "auth_marker_missing" in reason:
         return "Não consegui executar a ação porque o sistema pediu login manual novamente."
     if state == "microsoft_pick_account" and "configured_saved_account_not_found" in reason:
-        return "Não consegui continuar porque a conta salva configurada não apareceu na tela da Microsoft."
+        return "Esta tela exige intervenção manual ou não corresponde ao passo ensinado."
     if state in {"system_loading", "system_unresponsive"}:
         return "Não consegui concluir porque o sistema ficou sem resposta mesmo após atualizar a página."
     if state == "blocked_or_access_denied":

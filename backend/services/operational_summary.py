@@ -471,11 +471,11 @@ def deterministic_operational_summary(
         if "precisa ser autenticada novamente" in error or "reauthentication_required" in error:
             return "Não consegui executar a ação porque a sessão precisa ser autenticada novamente."
         if session_state == "microsoft_consent_required":
-            return "A Microsoft solicitou aceite/consentimento. Abra o navegador desktop, clique em Accept e depois continue."
+            return "Esta tela exige intervenção manual ou não corresponde ao passo ensinado."
         if session_state in {"microsoft_password_required", "microsoft_mfa_required"}:
             return "Não consegui continuar porque a Microsoft solicitou senha ou MFA."
-        if session_state == "microsoft_pick_account":
-            return "Não consegui continuar porque a conta salva configurada não apareceu na tela da Microsoft."
+        if session_state in {"microsoft_pick_account", "unknown_microsoft_auth", "microsoft_signed_out"}:
+            return "Esta tela exige intervenção manual ou não corresponde ao passo ensinado."
         if session_state in {"system_unresponsive", "system_loading"}:
             return "Não consegui concluir porque o sistema ficou sem resposta mesmo após atualizar a página."
         if operator_required and session_state in {"microsoft_signed_out", "unknown"}:

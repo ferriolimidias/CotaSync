@@ -94,6 +94,8 @@ class FakeGuardianLocator:
             return 1
         if self.selector == "input[type='password']:visible":
             return 1 if self.page.password_visible else 0
+        if self.selector in self.page.visible_selectors:
+            return 1
         if self.text:
             return 1 if self.page.has_visible_text(self.text) else 0
         return 0
@@ -119,6 +121,7 @@ class FakeGuardianPage:
         password_visible: bool = False,
         click_redirect_url: str = "",
         redirect_body_text: str = "",
+        visible_selectors: set[str] | None = None,
     ) -> None:
         self.url = url
         self.body_text = body_text
@@ -127,6 +130,7 @@ class FakeGuardianPage:
         self.password_visible = password_visible
         self.click_redirect_url = click_redirect_url
         self.redirect_body_text = redirect_body_text
+        self.visible_selectors = visible_selectors or set()
         self.clicked_texts: list[str] = []
         self.reload_calls = 0
 
@@ -372,6 +376,80 @@ class SessionGuardianTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertTrue(result.operator_action_required)
             self.assertEqual(result.recovery_attempts, 1)
+
+    def test_learned_pick_account_click_is_compatible_without_fixed_profile(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Pick an account\nOutra Pessoa",
+            visible_selectors={'div[aria-label="Sign in with outra@rdmz.com.br work or school account."]'},
+        )
+        diagnostic = asyncio.run(
+            self._guardian().learned_microsoft_step_diagnostic(
+                page,
+                desktop_action().model_dump(),
+                {
+                    "tipo": "clicar",
+                    "seletor": 'div[aria-label="Sign in with outra@rdmz.com.br work or school account."]',
+                    "expected_url_before": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                },
+            )
+        )
+        self.assertTrue(diagnostic["learned_microsoft_step_compatible"])
+        self.assertFalse(diagnostic["operator_action_required"])
+        self.assertTrue(diagnostic["whether_next_step_was_microsoft_click"])
+
+    def test_learned_accept_click_is_compatible_but_missing_accept_step_blocks(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Permissions requested by this app\nAccept",
+            visible_selectors={'input[name="idSIButton9"]'},
+        )
+        compatible = asyncio.run(
+            self._guardian().learned_microsoft_step_diagnostic(
+                page,
+                desktop_action().model_dump(),
+                {
+                    "tipo": "clicar",
+                    "seletor": 'input[name="idSIButton9"]',
+                    "target_text": "Accept",
+                    "expected_url_before": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                },
+            )
+        )
+        blocked = asyncio.run(
+            self._guardian().learned_microsoft_step_diagnostic(
+                page,
+                desktop_action().model_dump(),
+                {"tipo": "clicar", "seletor": "#ctl00_Conteudo_btnLocalizar"},
+            )
+        )
+        self.assertTrue(compatible["learned_microsoft_step_compatible"])
+        self.assertFalse(compatible["operator_action_required"])
+        self.assertFalse(blocked["learned_microsoft_step_compatible"])
+        self.assertTrue(blocked["operator_action_required"])
+        self.assertEqual(blocked["reason"], "next_step_selector_not_visible_on_microsoft_page")
+
+    def test_password_and_mfa_never_become_learned_microsoft_clicks(self) -> None:
+        for body, expected_state in (
+            ("Enter password", "microsoft_password_required"),
+            ("Verify your identity with Microsoft Authenticator", "microsoft_mfa_required"),
+        ):
+            page = FakeGuardianPage(
+                "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                body,
+                password_visible=expected_state == "microsoft_password_required",
+                visible_selectors={"#idSIButton9"},
+            )
+            diagnostic = asyncio.run(
+                self._guardian().learned_microsoft_step_diagnostic(
+                    page,
+                    desktop_action().model_dump(),
+                    {"tipo": "clicar", "seletor": "#idSIButton9"},
+                )
+            )
+            self.assertEqual(diagnostic["session_state"], expected_state)
+            self.assertFalse(diagnostic["learned_microsoft_step_compatible"])
+            self.assertTrue(diagnostic["operator_action_required"])
 
     def test_recovery_refreshes_and_continues_when_session_recovers(self) -> None:
         page = FakeGuardianPage(TARGET_URL, "Carregando", ready_state="interactive")
