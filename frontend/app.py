@@ -280,6 +280,12 @@ def _render_recording_diagnostics(session_id: str, encoded_session: str) -> None
                     "click_event_count": diagnostics.get("click_event_count", 0),
                     "fill_event_count": diagnostics.get("fill_event_count", 0),
                     "select_event_count": diagnostics.get("select_event_count", 0),
+                    "operator_fill_count": diagnostics.get("operator_fill_count", 0),
+                    "operator_fill_attempt_count": diagnostics.get("operator_fill_attempt_count", 0),
+                    "operator_fill_recorded_count": diagnostics.get("operator_fill_recorded_count", 0),
+                    "operator_click_attempt_count": diagnostics.get("operator_click_attempt_count", 0),
+                    "operator_click_recorded_count": diagnostics.get("operator_click_recorded_count", 0),
+                    "browser_recorder_event_count": diagnostics.get("browser_recorder_event_count", 0),
                     "last_event_type": diagnostics.get("last_event_type", ""),
                     "last_event_selector": diagnostics.get("last_event_selector", ""),
                     "last_event_frame_url": diagnostics.get("last_event_frame_url", ""),
@@ -583,6 +589,15 @@ def _render_demo_v01() -> None:
             hard_warning = str(review.get("hard_warning") or "")
             if hard_warning:
                 st.error(hard_warning)
+                st.caption(
+                    "Tentativas do operador: "
+                    f"{int(review.get('operator_fill_attempt_count') or 0)}; "
+                    "eventos de variável do operador: "
+                    f"{int(review.get('operator_fill_count') or 0)}."
+                )
+            diagnostic_error = str(review.get("diagnostic_error") or "")
+            if diagnostic_error:
+                st.error(diagnostic_error)
             variable_names: dict[str, str] = {}
             captured_variable_rows: list[tuple[int, str, str]] = []
             fragile_selectors = 0
@@ -625,6 +640,19 @@ def _render_demo_v01() -> None:
                     if ":nth-" in selector or " > " in selector:
                         fragile_selectors += 1
                     st.code(f"{index + 1}. {step_type} -> {selector}", language=None)
+
+            raw_event_summary = review.get("raw_event_summary", [])
+            with st.expander("Resumo bruto de eventos", expanded=False):
+                if isinstance(raw_event_summary, list) and raw_event_summary:
+                    st.json(raw_event_summary)
+                else:
+                    st.write(
+                        {
+                            "raw_event_count": 0,
+                            "operator_fill_attempt_count": int(review.get("operator_fill_attempt_count") or 0),
+                            "operator_fill_count": int(review.get("operator_fill_count") or 0),
+                        }
+                    )
 
             st.markdown("**O que esta rotina deve retornar?**")
             extraction_target = st.text_input(

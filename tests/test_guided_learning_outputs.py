@@ -41,6 +41,9 @@ class FakePage:
     def is_closed(self) -> bool:
         return False
 
+    async def title(self) -> str:
+        return "Consulta"
+
     async def screenshot(self, **_kwargs: object) -> None:
         return None
 
@@ -54,7 +57,21 @@ class FakeLocator:
     async def fill(self, _value: str, **_kwargs: object) -> None:
         return None
 
+    async def select_option(self, _value: str, **_kwargs: object) -> None:
+        return None
+
+    async def click(self, **_kwargs: object) -> None:
+        return None
+
     async def evaluate(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+class FakeSelectLocator(FakeLocator):
+    async def evaluate(self, *args: object, **_kwargs: object) -> object:
+        script = str(args[0] if args else "")
+        if "tag:" in script and "placeholder" in script:
+            return {"tag": "select", "id": "", "name": "", "label": "", "placeholder": "", "aria_label": ""}
         return None
 
 
@@ -88,6 +105,15 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         recording=True,
         status="gravando",
         operator_recording_suppressed_until=0.0,
+        operator_fill_attempt_count=0,
+        operator_fill_recorded_count=0,
+        operator_click_attempt_count=0,
+        operator_click_recorded_count=0,
+        context=SimpleNamespace(pages=[]),
+        storage_state_path=Path(tempfile.gettempdir()) / "cotasync-unit" / "storage_state.json",
+        last_screenshot_path="",
+        last_page_count=0,
+        recorder_errors=[],
         browser_mode="browserless",
         browser=FakeBrowser(),
         external_system_name="",
@@ -467,7 +493,135 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(raw_event["tipo"], "preencher")
         self.assertEqual(raw_event["event_type"], "fill")
         self.assertEqual(raw_event["seletor"], "#ctl00_Conteudo_edtGrupo")
-        self.assertEqual(raw_event["value_template"], "{{input_value}}")
+        self.assertEqual(raw_event["variable_key"], "grupo")
+        self.assertEqual(raw_event["value_template"], "{{grupo}}")
+        self.assertEqual(raw_event["source"], "operator_mode")
+
+    def test_operator_fill_during_recording_creates_variable_step_and_diagnostics(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeLocator())):
+            result = asyncio.run(manager.operator_fill("session", "#ctl00_Conteudo_edtGrupo", "123", record_action=True))
+        self.assertTrue(result["recorded"])
+        self.assertEqual(session.steps[0]["tipo"], "preencher")
+        self.assertEqual(session.steps[0]["variavel"], "grupo")
+        self.assertEqual(session.steps[0]["valor"], "")
+        self.assertEqual(session.steps[0]["value_template"], "{{grupo}}")
+        self.assertEqual(session.learning_events[0]["event_type"], "fill")
+        self.assertEqual(session.learning_events[0]["source"], "operator_mode")
+        self.assertEqual(session.learning_events[0]["variable_key"], "grupo")
+        diagnostics = asyncio.run(manager.recording_diagnostics("session"))
+        self.assertEqual(diagnostics["fill_event_count"], 1)
+        self.assertEqual(diagnostics["operator_fill_count"], 1)
+        self.assertEqual(diagnostics["operator_fill_attempt_count"], 1)
+
+    def test_operator_fill_outside_recording_does_not_create_learned_variable(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        session.recording = False
+        session.status = "autenticada"
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeLocator())):
+            result = asyncio.run(manager.operator_fill("session", "#ctl00_Conteudo_edtGrupo", "123", record_action=False))
+        self.assertFalse(result["recorded"])
+        self.assertEqual(session.steps, [])
+        self.assertEqual(session.learning_events, [])
+
+    def test_normal_input_textarea_and_select_events_create_variables(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        asyncio.run(
+            manager.record_field_variable_event(
+                "session",
+                "#ctl00_Conteudo_edtGrupo",
+                field_kind="input",
+                source="browser_recorder",
+                example_value="935",
+                field_metadata={"id": "ctl00_Conteudo_edtGrupo", "label": "Grupo"},
+            )
+        )
+        asyncio.run(
+            manager.record_field_variable_event(
+                "session",
+                "textarea[name=\"cliente\"]",
+                field_kind="textarea",
+                source="browser_recorder",
+                example_value="Maria",
+                field_metadata={"tag": "textarea", "name": "cliente", "label": "Cliente"},
+            )
+        )
+        asyncio.run(
+            manager.record_field_variable_event(
+                "session",
+                "select:nth-of-type(1)",
+                field_kind="select",
+                source="browser_recorder",
+                example_value="A",
+                field_metadata={"tag": "select"},
+            )
+        )
+        self.assertEqual([step["tipo"] for step in session.steps], ["preencher", "preencher", "selecionar"])
+        self.assertEqual([step["variavel"] for step in session.steps], ["grupo", "cliente", "tipo_consulta"])
+        self.assertEqual([step["valor"] for step in session.steps], ["", "", ""])
+        self.assertEqual([event["event_type"] for event in session.learning_events], ["fill", "fill", "select"])
+
+    def test_variable_key_suggestions_cover_cota_and_unknown_selector(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        asyncio.run(
+            manager.record_field_variable_event(
+                "session",
+                "#ctl00_Conteudo_edtCota",
+                field_kind="input",
+                source="browser_recorder",
+            )
+        )
+        asyncio.run(
+            manager.record_field_variable_event(
+                "session",
+                "div:nth-of-type(3) > input:nth-of-type(1)",
+                field_kind="input",
+                source="browser_recorder",
+            )
+        )
+        self.assertEqual(session.steps[0]["variavel"], "cota")
+
+        unknown_session = _session()  # type: ignore[assignment]
+        unknown_session.steps = []
+        unknown_session.learning_events = []
+        manager._sessions["unknown"] = unknown_session  # type: ignore[attr-defined]
+        asyncio.run(
+            manager.record_field_variable_event(
+                "unknown",
+                "div:nth-of-type(3) > input:nth-of-type(1)",
+                field_kind="input",
+                source="browser_recorder",
+            )
+        )
+        self.assertEqual(unknown_session.steps[0]["variavel"], "campo_1")
+
+    def test_operator_select_records_select_variable(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = []
+        session.learning_events = []
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeSelectLocator())):
+            asyncio.run(manager.operator_fill("session", "select:nth-of-type(1)", "tipo", record_action=True))
+        self.assertEqual(session.steps[0]["tipo"], "selecionar")
+        self.assertEqual(session.steps[0]["variavel"], "tipo_consulta")
+        self.assertEqual(session.learning_events[0]["event_type"], "select")
 
     def test_missing_expected_input_capture_is_persisted_as_warning(self) -> None:
         manager = DemoSessionManager()

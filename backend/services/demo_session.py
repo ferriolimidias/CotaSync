@@ -351,6 +351,10 @@ def _title_label(value: str) -> str:
 
 def _suggest_variable_key(selector: str, index: int = 0, metadata: dict[str, Any] | None = None) -> str:
     metadata = metadata if isinstance(metadata, dict) else {}
+    has_metadata_hint = any(
+        str(metadata.get(key) or "").strip()
+        for key in ("label", "placeholder", "aria_label", "name", "id")
+    )
     raw = " ".join(
         str(part or "")
         for part in (
@@ -370,7 +374,10 @@ def _suggest_variable_key(selector: str, index: int = 0, metadata: dict[str, Any
         ("cota", "cota"),
         ("cpf", "cpf"),
         ("cliente", "cliente"),
+        ("codigo", "codigo"),
+        ("código", "codigo"),
         ("nome", "nome"),
+        ("data", "data"),
         ("data_base", "data_base"),
         ("data base", "data_base"),
     )
@@ -378,7 +385,9 @@ def _suggest_variable_key(selector: str, index: int = 0, metadata: dict[str, Any
         if needle in lowered:
             return key
     if str(metadata.get("tag") or "").casefold() == "select" or "select" in lowered:
-        return "tipo_consulta" if index <= 1 else f"select_{index + 1}"
+        return "tipo_consulta"
+    if not has_metadata_hint:
+        return f"campo_{index + 1}"
     tokens = [
         token.lower()
         for token in re.findall(r"[A-Za-zÀ-ÿ0-9]+", raw)
@@ -557,6 +566,10 @@ class DemoBrowserSession:
     recorder_context_watched: bool = False
     recorder_errors: list[str] = field(default_factory=list)
     final_page_snapshot: dict[str, Any] = field(default_factory=dict)
+    operator_fill_attempt_count: int = 0
+    operator_fill_recorded_count: int = 0
+    operator_click_attempt_count: int = 0
+    operator_click_recorded_count: int = 0
 
 
 class DemoSessionManager:
@@ -569,10 +582,16 @@ class DemoSessionManager:
             raise DemoSessionError("Sessao de demonstracao nao encontrada ou encerrada.")
         return session
 
-    def _append_step(self, session: DemoBrowserSession, raw: Any) -> int | None:
+    def _append_step(
+        self,
+        session: DemoBrowserSession,
+        raw: Any,
+        *,
+        bypass_operator_suppression: bool = False,
+    ) -> int | None:
         if (
             not session.recording
-            or time.monotonic() < session.operator_recording_suppressed_until
+            or (not bypass_operator_suppression and time.monotonic() < session.operator_recording_suppressed_until)
             or not isinstance(raw, dict)
             or len(session.steps) >= _MAX_RECORDED_STEPS
         ):
@@ -594,6 +613,9 @@ class DemoSessionManager:
         value_template = str(raw.get("value_template") or "").strip()
         if value_template and step_type in {"preencher", "selecionar"}:
             step["value_template"] = value_template
+        variable_key = str(raw.get("variable_key") or "").strip()
+        if variable_key and step_type in {"preencher", "selecionar"}:
+            step["variavel"] = variable_key
         field_metadata = raw.get("field_metadata")
         if isinstance(field_metadata, dict):
             step["field_metadata"] = {
@@ -612,8 +634,135 @@ class DemoSessionManager:
         session.steps.append(step)
         return len(session.steps) - 1
 
-    async def _record_live_step(self, session: DemoBrowserSession, raw: Any, source: Any = None) -> None:
-        step_index = self._append_step(session, raw)
+    def _existing_field_variables(self, session: DemoBrowserSession) -> dict[str, str]:
+        variables: dict[str, str] = {}
+        for step in session.steps:
+            if not isinstance(step, dict):
+                continue
+            selector = str(step.get("seletor") or "").strip()
+            variable = str(step.get("variavel") or "").strip()
+            if selector and variable:
+                variables[selector] = variable
+        for event in session.learning_events:
+            if not isinstance(event, dict):
+                continue
+            selector = str(event.get("selector") or "").strip()
+            variable = str(event.get("variable_key") or "").strip()
+            if selector and variable:
+                variables[selector] = variable
+        return variables
+
+    def _unique_variable_key(
+        self,
+        session: DemoBrowserSession,
+        selector: str,
+        suggested: str,
+    ) -> str:
+        existing_by_selector = self._existing_field_variables(session)
+        if selector in existing_by_selector:
+            return existing_by_selector[selector]
+        used = {value for value in existing_by_selector.values() if value}
+        if suggested not in used:
+            return suggested
+        suffix = 2
+        while f"{suggested}_{suffix}" in used:
+            suffix += 1
+        return f"{suggested}_{suffix}"
+
+    def _normalize_field_variable_raw(
+        self,
+        session: DemoBrowserSession,
+        raw: dict[str, Any],
+        *,
+        field_kind: str = "",
+        source: str = "",
+    ) -> dict[str, Any]:
+        step_type = str(raw.get("tipo") or "").strip().lower()
+        event_type = str(raw.get("event_type") or "").strip().lower()
+        field_kind = str(field_kind or "").strip().lower()
+        if field_kind in {"select", "dropdown", "operator_select"}:
+            step_type = "selecionar"
+            event_type = "select"
+        elif field_kind in {"input", "textarea", "fill", "operator_fill"}:
+            step_type = "preencher"
+            event_type = "fill"
+        if step_type not in {"preencher", "selecionar"}:
+            return raw
+        selector = str(raw.get("seletor") or raw.get("selector") or "").strip()
+        metadata = raw.get("field_metadata") if isinstance(raw.get("field_metadata"), dict) else {}
+        next_index = len(session.steps)
+        suggested = _suggest_variable_key(selector, next_index, metadata)
+        variable_key = self._unique_variable_key(session, selector, suggested)
+        normalized = dict(raw)
+        normalized["tipo"] = "selecionar" if event_type == "select" or step_type == "selecionar" else "preencher"
+        normalized["event_type"] = "select" if normalized["tipo"] == "selecionar" else "fill"
+        normalized["seletor"] = selector
+        normalized["valor"] = ""
+        normalized["variable_key"] = variable_key
+        normalized["value_template"] = f"{{{{{variable_key}}}}}"
+        normalized["source"] = str(source or raw.get("source") or "browser_recorder")
+        return normalized
+
+    async def record_field_variable_event(
+        self,
+        session_id: str,
+        selector: str,
+        *,
+        field_kind: str = "input",
+        source: str = "browser_recorder",
+        example_value: str = "",
+        field_metadata: dict[str, Any] | None = None,
+        frame_metadata: dict[str, str] | None = None,
+        bypass_operator_suppression: bool = False,
+    ) -> None:
+        session = self._get(session_id)
+        now = _utc_now()
+        kind = str(field_kind or "").strip().lower()
+        is_select = kind in {"select", "dropdown", "operator_select"}
+        raw = self._normalize_field_variable_raw(
+            session,
+            {
+                "tipo": "selecionar" if is_select else "preencher",
+                "event_type": "select" if is_select else "fill",
+                "seletor": selector,
+                "valor": str(example_value or ""),
+                "timestamp_before": now,
+                "timestamp_after": now,
+                "elapsed_ms": 0,
+                "url_before": session.page.url,
+                "url_after": session.page.url,
+                "field_metadata": field_metadata or {},
+                "source": source,
+            },
+            field_kind=kind,
+            source=source,
+        )
+        await self._record_live_step(
+            session,
+            raw,
+            {"page": session.page, "frame_metadata": frame_metadata or {}},
+            bypass_operator_suppression=bypass_operator_suppression,
+        )
+
+    async def _record_live_step(
+        self,
+        session: DemoBrowserSession,
+        raw: Any,
+        source: Any = None,
+        *,
+        bypass_operator_suppression: bool = False,
+    ) -> None:
+        if isinstance(raw, dict) and str(raw.get("tipo") or "").strip().lower() in {"preencher", "selecionar"}:
+            raw = self._normalize_field_variable_raw(
+                session,
+                raw,
+                source=str(raw.get("source") or "browser_recorder"),
+            )
+        step_index = self._append_step(
+            session,
+            raw,
+            bypass_operator_suppression=bypass_operator_suppression,
+        )
         if step_index is None or not isinstance(raw, dict):
             return
 
@@ -658,7 +807,7 @@ class DemoSessionManager:
             "event_type": event_type,
             "selector": str(raw.get("seletor") or ""),
             "value_template": str(raw.get("value_template") or "") if event_type in {"fill", "select"} else "",
-            "variable_key": "",
+            "variable_key": str(raw.get("variable_key") or "") if event_type in {"fill", "select"} else "",
             "field_metadata": raw.get("field_metadata") if isinstance(raw.get("field_metadata"), dict) else {},
             "timestamp_before": str(raw.get("timestamp_before") or _utc_now()),
             "timestamp_after": str(raw.get("timestamp_after") or _utc_now()),
@@ -675,7 +824,12 @@ class DemoSessionManager:
             "active_page_changed": active_page_changed,
             "download_detected": session.download_detected,
         }
+        event["source"] = str(raw.get("source") or "browser_recorder")
         event.update(_frame_metadata(source_frame))
+        if isinstance(source, dict) and isinstance(source.get("frame_metadata"), dict):
+            for key, value in source["frame_metadata"].items():
+                if key in {"frame_name", "frame_url"} and value:
+                    event[key] = str(value)
         from backend.services.ai_observer import deterministic_observe_learning_step
 
         event.update(deterministic_observe_learning_step(event))
@@ -1223,6 +1377,7 @@ class DemoSessionManager:
                         session.recorder_errors.append(message)
         last_event = session.learning_events[-1] if session.learning_events else {}
         event_types = [str(event.get("event_type") or "") for event in session.learning_events]
+        source_types = [str(event.get("source") or "") for event in session.learning_events]
         return {
             "recorder_installed": instrumented_frames > 0,
             "active_page_url": _safe_page_url(session.page.url),
@@ -1233,6 +1388,17 @@ class DemoSessionManager:
             "click_event_count": event_types.count("click"),
             "fill_event_count": event_types.count("fill"),
             "select_event_count": event_types.count("select"),
+            "operator_fill_count": sum(
+                1
+                for event in session.learning_events
+                if event.get("event_type") in {"fill", "select"}
+                and str(event.get("source") or "") == "operator_mode"
+            ),
+            "operator_fill_attempt_count": int(getattr(session, "operator_fill_attempt_count", 0)),
+            "operator_fill_recorded_count": int(getattr(session, "operator_fill_recorded_count", 0)),
+            "operator_click_attempt_count": int(getattr(session, "operator_click_attempt_count", 0)),
+            "operator_click_recorded_count": int(getattr(session, "operator_click_recorded_count", 0)),
+            "browser_recorder_event_count": source_types.count("browser_recorder"),
             "last_event_type": str(last_event.get("event_type") or ""),
             "last_event_selector": str(last_event.get("selector") or ""),
             "last_event_frame_url": str(last_event.get("frame_url") or ""),
@@ -1342,44 +1508,86 @@ class DemoSessionManager:
         record_action: bool = True,
     ) -> dict[str, Any]:
         session = self._get(session_id)
+        if record_action and session.recording:
+            session.operator_fill_attempt_count += 1
         safe_value = str(value or "")
         if len(safe_value) > 20_000:
             raise DemoSessionError("O texto excede o limite do Modo operador.")
         locator = await self._operator_locator(session, selector, record_action=record_action)
+        field_metadata: dict[str, str] = {}
+        field_kind = "operator_fill"
+        try:
+            field_info = await locator.evaluate(
+                """element => {
+                    const textOf = (el) => String(el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const attr = (name) => String(element.getAttribute(name) || '').slice(0, 160);
+                    let label = '';
+                    if (element.id) {
+                        const explicit = element.ownerDocument.querySelector(`label[for="${CSS.escape(element.id)}"]`);
+                        if (explicit) label = textOf(explicit).slice(0, 120);
+                    }
+                    if (!label && element.closest) {
+                        const wrapping = element.closest('label');
+                        if (wrapping) label = textOf(wrapping).slice(0, 120);
+                    }
+                    if (!label) label = attr('aria-label') || attr('title') || attr('placeholder');
+                    return {
+                        tag: String(element.tagName || '').toLowerCase(),
+                        type: String(element.type || '').toLowerCase(),
+                        id: String(element.id || '').slice(0, 160),
+                        name: String(element.name || '').slice(0, 160),
+                        label,
+                        placeholder: attr('placeholder'),
+                        aria_label: attr('aria-label')
+                    };
+                }"""
+            )
+            if isinstance(field_info, dict):
+                field_metadata = {
+                    str(key): str(field_info.get(key) or "")[:200]
+                    for key in ("tag", "type", "id", "name", "label", "placeholder", "aria_label")
+                }
+                if str(field_metadata.get("tag") or "").casefold() == "select":
+                    field_kind = "operator_select"
+        except Exception:
+            field_metadata = {}
         if not record_action:
             self._prepare_operator_utility(session)
         step_count_before = len(session.steps)
         try:
-            await locator.fill(safe_value, timeout=_REPLAY_STEP_TIMEOUT_MS)
+            if field_kind == "operator_select":
+                await locator.select_option(safe_value, timeout=_REPLAY_STEP_TIMEOUT_MS)
+            else:
+                await locator.fill(safe_value, timeout=_REPLAY_STEP_TIMEOUT_MS)
             await locator.evaluate(
-                "element => element.dispatchEvent(new Event('change', {bubbles: true}))"
+                """element => {
+                    element.dispatchEvent(new Event('input', {bubbles: true}));
+                    element.dispatchEvent(new Event('change', {bubbles: true}));
+                }"""
             )
             await asyncio.sleep(0.4)
         except Exception as exc:
             raise DemoSessionError("Não foi possível preencher o campo na página ativa.") from exc
         if record_action and session.recording:
             captured_by_listener = any(
-                step.get("tipo") == "preencher" and step.get("seletor") == selector
+                step.get("tipo") in {"preencher", "selecionar"} and step.get("seletor") == selector
                 for step in session.steps[step_count_before:]
             )
             if not captured_by_listener:
-                now = _utc_now()
-                await self._record_live_step(
-                    session,
-                    {
-                        "tipo": "preencher",
-                        "event_type": "fill",
-                        "seletor": selector,
-                        "valor": "",
-                        "value_template": "{{input_value}}",
-                        "timestamp_before": now,
-                        "timestamp_after": now,
-                        "elapsed_ms": 0,
-                        "url_before": session.page.url,
-                        "url_after": session.page.url,
-                    },
-                    {"page": session.page},
+                await self.record_field_variable_event(
+                    session.id,
+                    selector,
+                    field_kind=field_kind,
+                    source="operator_mode",
+                    example_value=safe_value,
+                    field_metadata=field_metadata,
+                    bypass_operator_suppression=True,
                 )
+            if any(
+                step.get("tipo") in {"preencher", "selecionar"} and step.get("seletor") == selector
+                for step in session.steps[step_count_before:]
+            ):
+                session.operator_fill_recorded_count += 1
         logger.info(
             "Modo operador preencheu elemento: session=%s recorded=%s",
             session.id,
@@ -1400,14 +1608,46 @@ class DemoSessionManager:
         record_action: bool = True,
     ) -> dict[str, Any]:
         session = self._get(session_id)
+        if record_action and session.recording:
+            session.operator_click_attempt_count += 1
         locator = await self._operator_locator(session, selector, record_action=record_action)
         if not record_action:
             self._prepare_operator_utility(session, duration=2.5)
+        step_count_before = len(session.steps)
         try:
             await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
             await asyncio.sleep(1.1)
         except Exception as exc:
             raise DemoSessionError("Não foi possível clicar no elemento da página ativa.") from exc
+        if record_action and session.recording:
+            captured_by_listener = any(
+                step.get("tipo") == "clicar" and step.get("seletor") == selector
+                for step in session.steps[step_count_before:]
+            )
+            if not captured_by_listener:
+                now = _utc_now()
+                await self._record_live_step(
+                    session,
+                    {
+                        "tipo": "clicar",
+                        "event_type": "click",
+                        "seletor": selector,
+                        "valor": "",
+                        "timestamp_before": now,
+                        "timestamp_after": now,
+                        "elapsed_ms": 0,
+                        "url_before": session.page.url,
+                        "url_after": session.page.url,
+                        "source": "operator_mode",
+                    },
+                    {"page": session.page},
+                    bypass_operator_suppression=True,
+                )
+            if any(
+                step.get("tipo") == "clicar" and step.get("seletor") == selector
+                for step in session.steps[step_count_before:]
+            ):
+                session.operator_click_recorded_count += 1
         logger.info("Modo operador clicou em elemento: session=%s recorded=%s", session.id, record_action)
         return {
             "session_id": session.id,
@@ -1554,6 +1794,10 @@ class DemoSessionManager:
         session.learning_synthesis = {}
         session.final_page_snapshot = {}
         session.recorder_errors = []
+        session.operator_fill_attempt_count = 0
+        session.operator_fill_recorded_count = 0
+        session.operator_click_attempt_count = 0
+        session.operator_click_recorded_count = 0
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -1695,11 +1939,17 @@ class DemoSessionManager:
         }
         session.learning_synthesis = await analyze_recorded_action_with_ai(provisional_action)
         event_types = [str(event.get("event_type") or "") for event in session.learning_events]
+        operator_variable_events = [
+            event
+            for event in session.learning_events
+            if event.get("event_type") in {"fill", "select"}
+            and str(event.get("source") or "") == "operator_mode"
+        ]
         detected_variables = []
         for index, step in enumerate(session.steps):
             if not isinstance(step, dict) or str(step.get("tipo") or "") not in {"preencher", "selecionar"}:
                 continue
-            key = _suggest_variable_key_for_step(step, index)
+            key = str(step.get("variavel") or "").strip() or _suggest_variable_key_for_step(step, index)
             detected_variables.append(
                 {
                     "step_index": index,
@@ -1709,11 +1959,20 @@ class DemoSessionManager:
                     "label": _title_label(key),
                 }
             )
+        hard_warning = ""
+        diagnostic_error = ""
+        if event_types.count("fill") + event_types.count("select") == 0:
+            hard_warning = "Nenhum campo digitado foi capturado. Esta ação não terá variáveis na execução rápida."
+            if int(getattr(session, "operator_fill_attempt_count", 0)) > 0:
+                diagnostic_error = "Modo operador foi usado durante a gravação, mas não gerou evento de variável."
         review_summary = {
             "total_steps": len(session.steps),
             "clicks_captured": event_types.count("click"),
             "fills_captured": event_types.count("fill"),
             "selects_captured": event_types.count("select"),
+            "operator_fill_count": len(operator_variable_events),
+            "operator_fill_attempt_count": int(getattr(session, "operator_fill_attempt_count", 0)),
+            "operator_fill_recorded_count": int(getattr(session, "operator_fill_recorded_count", 0)),
             "downloads": bool(
                 session.download_detected
                 or any(event.get("download_detected") for event in session.learning_events)
@@ -1721,11 +1980,17 @@ class DemoSessionManager:
             "new_tabs": sum(1 for event in session.learning_events if event.get("opened_new_page")),
             "final_page_captured": bool(final_pages),
             "detected_variables": detected_variables,
-            "hard_warning": (
-                "Nenhum campo digitado foi capturado. Esta ação não terá variáveis na execução rápida."
-                if event_types.count("fill") + event_types.count("select") == 0
-                else ""
-            ),
+            "hard_warning": hard_warning,
+            "diagnostic_error": diagnostic_error,
+            "raw_event_summary": [
+                {
+                    "event_type": str(event.get("event_type") or ""),
+                    "selector": str(event.get("selector") or ""),
+                    "source": str(event.get("source") or ""),
+                    "variable_key": str(event.get("variable_key") or ""),
+                }
+                for event in session.learning_events
+            ],
         }
         logger.info("Gravacao finalizada na sessao %s com %s passos", session_id, len(session.steps))
         return {
@@ -1780,7 +2045,20 @@ class DemoSessionManager:
         for index, step in enumerate(steps):
             if not isinstance(step, dict) or str(step.get("tipo") or "") not in {"preencher", "selecionar"}:
                 continue
-            auto_variable_names[str(index)] = _suggest_variable_key_for_step(step, index)
+            event_variable = next(
+                (
+                    str(event.get("variable_key") or "").strip()
+                    for event in learning_events
+                    if event.get("step_index") == index and event.get("event_type") in {"fill", "select"}
+                    and str(event.get("variable_key") or "").strip()
+                ),
+                "",
+            )
+            auto_variable_names[str(index)] = (
+                str(step.get("variavel") or "").strip()
+                or event_variable
+                or _suggest_variable_key_for_step(step, index)
+            )
         variable_name_inputs = {**auto_variable_names, **explicit_variable_names}
 
         for index_raw, variable_raw in variable_name_inputs.items():
