@@ -10,6 +10,12 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
+from backend.services.extraction_targets import (
+    friendly_extraction_label,
+    normalize_label_key,
+    readable_extraction_target,
+)
+
 
 _SENSITIVE_PARTS = (
     "authorization", "bearer", "cookie", "credential", "password", "secret",
@@ -110,19 +116,11 @@ def _clean_scalar(value: Any) -> str:
 
 
 def _normalize_label_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+    return normalize_label_key(value)
 
 
 def _friendly_extraction_label(value: str) -> str:
-    normalized = _normalize_label_key(value)
-    if (
-        "qtd pcls pagas" in normalized
-        or "qtd parcelas pagas" in normalized
-        or "quantidade parcelas pagas" in normalized
-        or "quantidade de parcelas pagas" in normalized
-    ):
-        return "Quantidade de parcelas pagas"
-    return str(value or "").replace("_", " ").strip()
+    return friendly_extraction_label(value)
 
 
 def _clean_text(value: Any, *, limit: int = 1200) -> str:
@@ -532,28 +530,15 @@ def deterministic_operational_summary(
                 return f"{rendered} Arquivo disponível." if has_files else rendered
         if len(extracted) == 1:
             only_key, only_value = next(iter(extracted.items()))
-            if _normalize_label_key(only_key) == "quantidade de parcelas pagas":
-                suffix = " Arquivo disponível." if has_files else ""
-                return f"{only_key}: {only_value}{suffix}"
+            suffix = " Arquivo disponível." if has_files else ""
+            return f"{only_key}: {only_value}{suffix}"
         values = ". ".join(f"{key.capitalize()}: {value}" for key, value in extracted.items())
         suffix = " Arquivo disponível." if has_files else ""
         return f"Consulta concluída. Encontrei: {values}.{suffix}"
     if extraction_targets(action):
         targets = extraction_targets(action)
-        target_text = " ".join(targets).replace("_", " ").casefold()
-        objective_text = str(_metadata(action, "objective", "") or "").replace("_", " ").casefold()
-        normalized_target = _normalize_label_key(target_text)
-        if (
-            "qtd pcls pagas" in normalized_target
-            or "qtd parcelas pagas" in normalized_target
-            or "quantidade parcelas pagas" in normalized_target
-            or "quantidade de parcelas pagas" in normalized_target
-        ):
-            return "A ação foi executada, mas não encontrei o campo Qtd. Pcls. Pagas na tela final."
-        if "parcela" in target_text or "parcela" in objective_text:
-            return "A ação foi executada, mas não encontrei o valor da parcela atual na tela final."
-        readable = targets[0].replace("_", " ") if targets else "resultado configurado"
-        return f"A ação foi executada, mas não encontrei {readable} na tela final."
+        readable = readable_extraction_target(targets[0]) if targets else "resultado configurado"
+        return f"A ação foi executada, mas não encontrei o campo {readable} na tela final."
     if has_files:
         return "Arquivo gerado com sucesso. Arquivo disponível."
     output_type = str(_metadata(action, "output_type", "") or "").strip().casefold()

@@ -48,6 +48,7 @@ from backend.services.session_guardian import (
     session_failure_message,
 )
 from backend.services.actions_repository import enrich_action_access_profile
+from backend.services.extraction_targets import extract_value_near_label
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -354,6 +355,7 @@ def _suggest_variable_key(selector: str, index: int = 0, metadata: dict[str, Any
         ("cota", "cota"),
         ("cpf", "cpf"),
         ("cliente", "cliente"),
+        ("nome", "nome"),
         ("data_base", "data_base"),
         ("data base", "data_base"),
     )
@@ -2414,59 +2416,22 @@ class DemoSessionManager:
         label_text = str(label or "").strip()
         if not label_text:
             return ""
-        script = r"""(wanted) => {
-          const normalize = (value) => String(value || '')
-            .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-          const visible = (el) => {
-            if (!el) return false;
-            const style = getComputedStyle(el);
-            return style.display !== 'none' && style.visibility !== 'hidden';
-          };
-          const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
-          const target = normalize(wanted);
-          const directValue = (text) => {
-            const normalizedText = normalize(text);
-            const pos = normalizedText.indexOf(target);
-            if (pos < 0) return '';
-            const original = clean(text);
-            const escaped = String(wanted).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const match = original.match(new RegExp(escaped + '\\s*[:\\-]?\\s*([A-Za-z0-9.,/]+)', 'i'));
-            return match ? clean(match[1]) : '';
-          };
-          const elements = Array.from(document.body ? document.body.querySelectorAll('body *') : []);
-          for (const el of elements) {
-            if (!visible(el)) continue;
-            const own = clean(el.innerText || el.textContent || el.value || '');
-            if (!own || !normalize(own).includes(target)) continue;
-            const inline = directValue(own);
-            if (inline && normalize(inline) !== target) return inline;
-            const row = el.closest('tr');
-            if (row) {
-              const cells = Array.from(row.querySelectorAll('th,td')).map(clean).filter(Boolean);
-              const index = cells.findIndex((cell) => normalize(cell).includes(target));
-              if (index >= 0 && cells[index + 1]) return cells[index + 1];
-            }
-            const sibling = el.nextElementSibling;
-            if (sibling && visible(sibling)) {
-              const siblingText = clean(sibling.innerText || sibling.textContent || sibling.value || '');
-              if (siblingText && !normalize(siblingText).includes(target)) return siblingText;
-            }
-            const parent = el.parentElement;
-            if (parent) {
-              const parentText = clean(parent.innerText || parent.textContent || '');
-              const parentValue = directValue(parentText);
-              if (parentValue && normalize(parentValue) !== target) return parentValue;
-            }
-          }
-          const body = clean(document.body ? document.body.innerText || '' : '');
-          return directValue(body);
-        }"""
+        script = """() => ({
+          html: String(document.documentElement ? document.documentElement.outerHTML || '' : ''),
+          text: String(document.body ? document.body.innerText || '' : '')
+        })"""
         for owner in [page] + self._candidate_frames_for_step(page, step):
             try:
-                value = await owner.evaluate(script, label_text)
+                snapshot = await owner.evaluate(script)
             except Exception:
                 continue
+            if isinstance(snapshot, dict):
+                value = extract_value_near_label(
+                    f"{snapshot.get('html') or ''}\n{snapshot.get('text') or ''}",
+                    label_text,
+                )
+            else:
+                value = extract_value_near_label(snapshot, label_text)
             if str(value or "").strip():
                 return str(value).strip()
         return ""

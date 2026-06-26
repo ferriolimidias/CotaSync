@@ -15,6 +15,7 @@ from backend.services.operational_summary import (
     build_operational_summary_result,
     deterministic_operational_summary,
 )
+from backend.services.extraction_targets import extract_value_near_label
 
 
 def _action(**overrides: object) -> dict[str, object]:
@@ -153,7 +154,7 @@ class OperationalSummaryTests(unittest.TestCase):
         )
         self.assertEqual(
             summary,
-            "A ação foi executada, mas não encontrei o valor da parcela atual na tela final.",
+            "A ação foi executada, mas não encontrei o campo valor da parcela atual na tela final.",
         )
 
     def test_qtd_pcls_pagas_target_returns_precise_value_and_not_found_message(self) -> None:
@@ -179,6 +180,37 @@ class OperationalSummaryTests(unittest.TestCase):
             not_found,
             "A ação foi executada, mas não encontrei o campo Qtd. Pcls. Pagas na tela final.",
         )
+
+    def test_single_extracted_target_summary_is_generic(self) -> None:
+        status_summary = deterministic_operational_summary(
+            _action(extraction_targets=["Status"]),
+            status="success",
+            result_payload={"dados_extraidos": {"Status": "Ativo"}},
+        )
+        valor_summary = deterministic_operational_summary(
+            _action(extraction_targets=["Valor da parcela"]),
+            status="success",
+            result_payload={"dados_extraidos": {"Valor da parcela": "R$ 1.234,56"}},
+        )
+        self.assertEqual(status_summary, "Status: Ativo")
+        self.assertEqual(valor_summary, "Valor da parcela: R$ 1.234,56")
+
+    def test_extract_value_near_label_supports_generic_labels(self) -> None:
+        html = """
+        <table>
+          <tr><td>Qtd. Pcls. Pagas</td><td>032</td></tr>
+          <tr><th>Vencimento</th><td>10/07/2026</td></tr>
+        </table>
+        <div><span>Status</span><strong>Ativo</strong></div>
+        """
+        text = "Nome: Maria Silva\nGrupo\n935\nCota - 001"
+
+        self.assertEqual(extract_value_near_label(html, "Qtd. Pcls. Pagas"), "032")
+        self.assertEqual(extract_value_near_label(html, "Vencimento"), "10/07/2026")
+        self.assertEqual(extract_value_near_label(html, "Status"), "Ativo")
+        self.assertEqual(extract_value_near_label(text, "Nome"), "Maria Silva")
+        self.assertEqual(extract_value_near_label(text, "Grupo"), "935")
+        self.assertEqual(extract_value_near_label(text, "Cota"), "001")
 
     def test_timeout_with_step_diagnostics_has_actionable_summary(self) -> None:
         summary = deterministic_operational_summary(

@@ -322,6 +322,41 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(step["value_template"], "{{grupo}}")
         self.assertNotIn("935", json.dumps(action, ensure_ascii=False))
 
+    def test_textarea_field_also_creates_generic_variable_without_fixed_value(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = [
+            {
+                "tipo": "preencher",
+                "seletor": "textarea[name=\"nome\"]",
+                "valor": "Maria Silva",
+                "field_metadata": {"tag": "textarea", "name": "nome", "label": "Nome"},
+            }
+        ]
+        session.learning_events = [
+            {
+                "step_index": 0,
+                "event_type": "fill",
+                "selector": "textarea[name=\"nome\"]",
+                "field_metadata": {"tag": "textarea", "name": "nome", "label": "Nome"},
+            }
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Consultar nome", "Consulta.", {}))
+        action = captured["acoes_conhecidas"]["Consultar nome"]  # type: ignore[index]
+        step = action["passos_playwright"][0]
+        self.assertEqual(step["variavel"], "nome")
+        self.assertEqual(step["valor"], "")
+        self.assertEqual(step["value_template"], "{{nome}}")
+        self.assertNotIn("Maria Silva", json.dumps(action, ensure_ascii=False))
+
     def test_iframe_and_new_page_metadata_are_preserved(self) -> None:
         manager = DemoSessionManager()
         session = _session()  # type: ignore[assignment]
