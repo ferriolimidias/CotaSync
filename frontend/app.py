@@ -1104,9 +1104,13 @@ def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
     if not should_show:
         return
     if operator_required:
-        st.warning(
-            "A sessão precisa de login manual. Abra Configurações, conclua o login no navegador e salve a sessão."
-        )
+        reason = str(payload.get("reason") or "")
+        if session_state.startswith("microsoft_") or reason.startswith("next_step_"):
+            st.warning("Esta tela exige intervenção manual ou não corresponde ao passo ensinado.")
+        else:
+            st.warning(
+                "A sessão precisa de login manual. Abra Configurações, conclua o login no navegador e salve a sessão."
+            )
     with st.expander("Ver diagnóstico de sessão", expanded=False):
         st.write(
             {
@@ -1115,7 +1119,19 @@ def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
                 "retryable": bool(payload.get("retryable", False)),
                 "operator_action_required": operator_required,
                 "current_host": payload.get("current_host", ""),
+                "current_url": payload.get("current_url", ""),
                 "last_page_title": payload.get("last_page_title", ""),
+                "next_step_index": payload.get("next_step_index", ""),
+                "next_step_type": payload.get("next_step_type", ""),
+                "next_step_selector": payload.get("next_step_selector", ""),
+                "next_step_url_before": payload.get("next_step_url_before", ""),
+                "next_step_host_before": payload.get("next_step_host_before", ""),
+                "next_step_expected_selector": payload.get("next_step_expected_selector", ""),
+                "next_step_expected_url_or_host": payload.get("next_step_expected_url_or_host", ""),
+                "next_step_expected_text": payload.get("next_step_expected_text", ""),
+                "whether_next_step_was_microsoft_click": payload.get("whether_next_step_was_microsoft_click", ""),
+                "learned_microsoft_step_compatible": payload.get("learned_microsoft_step_compatible", ""),
+                "reason": payload.get("reason", ""),
             }
         )
         if isinstance(recovery_steps, list) and recovery_steps:

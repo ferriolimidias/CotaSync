@@ -174,6 +174,50 @@ def _step_expected_url_or_host(step: Any) -> str:
     return host or raw[:500]
 
 
+def _step_expected_url_before(step: Any) -> str:
+    if not isinstance(step, dict):
+        return ""
+    return str(step.get("expected_url_before") or step.get("url_before") or "").strip()[:500]
+
+
+def _step_index(step: Any) -> int | None:
+    if not isinstance(step, dict):
+        return None
+    for key in ("__cotasync_step_index", "step_index", "index"):
+        try:
+            value = step.get(key)
+            if value is not None and str(value).strip() != "":
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _step_text_candidates(step: Any) -> list[str]:
+    if not isinstance(step, dict):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for key in ("target_text", "target_label", "text", "label", "aria_label"):
+        value = str(step.get(key) or "").strip()
+        lowered = value.casefold()
+        if value and lowered not in seen:
+            seen.add(lowered)
+            result.append(value)
+    return result
+
+
+def _expected_host_matches_current(expected: str, current_host: str) -> bool:
+    if not expected:
+        return True
+    expected_host = url_host(expected) or expected.strip().lower().rstrip(".")
+    if not expected_host:
+        return True
+    if expected_host == current_host:
+        return True
+    return _is_microsoft_host(expected_host) and _is_microsoft_host(current_host)
+
+
 def configured_saved_account_texts(action: Any) -> list[str]:
     configured = [
         _metadata(action, "microsoft_saved_account_text", ""),
@@ -242,6 +286,7 @@ class SessionRecoveryResult:
             "recovery_steps": self.recovery_steps,
             "last_page_title": self.state.title,
             "current_host": self.state.current_host,
+            "current_url": self.state.current_url,
             "retryable": self.retryable,
             "operator_action_required": self.operator_action_required,
             "recovery_attempted": self.recovery_attempted,
@@ -487,21 +532,22 @@ class SessionGuardian:
                 "action": "none",
                 "result": "not_attempted",
             }
-            if state.state in {"microsoft_pick_account", "microsoft_signed_out", "unknown_microsoft_auth"}:
-                step["action"] = "select_saved_microsoft_account"
-                selected = await self.click_configured_saved_account(page, action)
-                step["result"] = "clicked" if selected else "configured_account_not_visible"
+            if state.state in {
+                "microsoft_pick_account",
+                "microsoft_signed_out",
+                "unknown_microsoft_auth",
+                "microsoft_consent_required",
+            }:
+                step["action"] = "monitor_microsoft_auth"
+                step["result"] = "manual_intervention_or_learned_step_required"
                 recovery_steps.append(step)
-                if not selected:
-                    state.operator_action_required = True
-                    state.retryable = True
-                    state.reason = "configured_saved_account_not_found"
-                    break
-                await self._wait_after_recovery(page)
+                state.operator_action_required = True
+                state.retryable = True
+                state.reason = "learned_step_required_or_manual_intervention"
+                break
             elif state.state in {
                 "microsoft_password_required",
                 "microsoft_mfa_required",
-                "microsoft_consent_required",
                 "blocked_or_access_denied",
             }:
                 step["result"] = "manual_intervention_required"
@@ -571,13 +617,22 @@ class SessionGuardian:
         step_type = _step_type(next_step)
         selector = _step_selector(next_step)
         expected_url_or_host = _step_expected_url_or_host(next_step)
+        expected_url_before = _step_expected_url_before(next_step)
+        text_candidates = _step_text_candidates(next_step)
+        next_step_index = _step_index(next_step)
         diagnostic: dict[str, Any] = {
             "session_state": state.state,
             "current_host": state.current_host,
             "current_url": state.current_url,
             "last_page_title": state.title,
+            "next_step_index": next_step_index,
+            "next_step_type": step_type,
+            "next_step_selector": selector,
+            "next_step_url_before": expected_url_before,
+            "next_step_host_before": url_host(expected_url_before),
             "next_step_expected_selector": selector,
             "next_step_expected_url_or_host": expected_url_or_host,
+            "next_step_expected_text": text_candidates[0] if text_candidates else "",
             "whether_next_step_was_microsoft_click": False,
             "learned_microsoft_step_compatible": False,
             "operator_action_required": bool(state.operator_action_required),
@@ -600,6 +655,10 @@ class SessionGuardian:
             diagnostic["operator_action_required"] = True
             diagnostic["reason"] = "next_step_missing_selector"
             return diagnostic
+        if not _expected_host_matches_current(expected_url_or_host, state.current_host):
+            diagnostic["operator_action_required"] = True
+            diagnostic["reason"] = "next_step_expected_host_mismatch"
+            return diagnostic
         try:
             locator = page.locator(selector).first
             count = await locator.count()
@@ -611,14 +670,40 @@ class SessionGuardian:
             return diagnostic
         diagnostic["next_step_selector_count"] = count
         diagnostic["next_step_selector_visible"] = visible
-        if not visible:
-            diagnostic["operator_action_required"] = True
-            diagnostic["reason"] = "next_step_selector_not_visible_on_microsoft_page"
+        if visible:
+            diagnostic["learned_microsoft_step_compatible"] = True
+            diagnostic["operator_action_required"] = False
+            diagnostic["retryable"] = False
+            diagnostic["reason"] = "learned_microsoft_click_matches_current_page"
+            diagnostic["matched_by"] = "selector"
             return diagnostic
-        diagnostic["learned_microsoft_step_compatible"] = True
-        diagnostic["operator_action_required"] = False
-        diagnostic["retryable"] = False
-        diagnostic["reason"] = "learned_microsoft_click_matches_current_page"
+        for text in text_candidates:
+            try:
+                text_locator = page.get_by_text(text, exact=False).first
+                text_count = await text_locator.count()
+                text_visible = text_count > 0 and await text_locator.is_visible()
+            except Exception:
+                text_count = 0
+                text_visible = False
+            if not text_visible:
+                try:
+                    label_locator = page.get_by_label(text, exact=False).first
+                    text_count = await label_locator.count()
+                    text_visible = text_count > 0 and await label_locator.is_visible()
+                except Exception:
+                    text_count = 0
+                    text_visible = False
+            if text_visible:
+                diagnostic["next_step_text_count"] = text_count
+                diagnostic["next_step_text_visible"] = True
+                diagnostic["learned_microsoft_step_compatible"] = True
+                diagnostic["operator_action_required"] = False
+                diagnostic["retryable"] = False
+                diagnostic["reason"] = "learned_microsoft_click_text_matches_current_page"
+                diagnostic["matched_by"] = "target_text"
+                return diagnostic
+        diagnostic["operator_action_required"] = True
+        diagnostic["reason"] = "next_step_selector_not_visible_on_microsoft_page"
         return diagnostic
 
     async def click_configured_saved_account(self, page: Any, action: Any) -> bool:
@@ -661,6 +746,8 @@ def session_failure_message(state: str, reason: str = "") -> str:
         "next_step_missing_selector",
         "next_step_selector_not_actionable",
         "next_step_selector_not_visible_on_microsoft_page",
+        "next_step_expected_host_mismatch",
+        "learned_step_required_or_manual_intervention",
         "learned_microsoft_step_not_compatible",
     }:
         return "Esta tela exige intervenção manual ou não corresponde ao passo ensinado."

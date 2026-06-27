@@ -1119,13 +1119,23 @@ async def executar_acao_rapida(
                             "result": "learned_microsoft_step_allowed",
                             "current_host": state.current_host,
                             "last_page_title": state.title,
+                            "next_step_index": learned_step_diagnostic.get("next_step_index"),
+                            "next_step_type": learned_step_diagnostic.get("next_step_type"),
+                            "next_step_selector": learned_step_diagnostic.get("next_step_selector"),
+                            "next_step_url_before": learned_step_diagnostic.get("next_step_url_before"),
+                            "next_step_host_before": learned_step_diagnostic.get("next_step_host_before"),
                             "next_step_expected_selector": learned_step_diagnostic.get("next_step_expected_selector"),
                             "next_step_expected_url_or_host": learned_step_diagnostic.get(
                                 "next_step_expected_url_or_host"
                             ),
+                            "next_step_expected_text": learned_step_diagnostic.get("next_step_expected_text"),
                             "whether_next_step_was_microsoft_click": learned_step_diagnostic.get(
                                 "whether_next_step_was_microsoft_click"
                             ),
+                            "learned_microsoft_step_compatible": learned_step_diagnostic.get(
+                                "learned_microsoft_step_compatible"
+                            ),
+                            "matched_by": learned_step_diagnostic.get("matched_by"),
                         }
                     )
                     return
@@ -1144,6 +1154,19 @@ async def executar_acao_rapida(
                             "current_host": state.current_host,
                             "last_page_title": state.title,
                             "reason": learned_step_diagnostic.get("reason"),
+                            "next_step_index": learned_step_diagnostic.get("next_step_index"),
+                            "next_step_type": learned_step_diagnostic.get("next_step_type"),
+                            "next_step_selector": learned_step_diagnostic.get("next_step_selector"),
+                            "next_step_url_before": learned_step_diagnostic.get("next_step_url_before"),
+                            "next_step_host_before": learned_step_diagnostic.get("next_step_host_before"),
+                            "next_step_expected_selector": learned_step_diagnostic.get("next_step_expected_selector"),
+                            "next_step_expected_url_or_host": learned_step_diagnostic.get(
+                                "next_step_expected_url_or_host"
+                            ),
+                            "next_step_expected_text": learned_step_diagnostic.get("next_step_expected_text"),
+                            "whether_next_step_was_microsoft_click": learned_step_diagnostic.get(
+                                "whether_next_step_was_microsoft_click"
+                            ),
                         }
                     ]
                     raise SessionGuardianError(
@@ -1194,6 +1217,39 @@ async def executar_acao_rapida(
                 except ActionPageError:
                     await run_session_checkpoint(page_to_check, checkpoint, next_step)
 
+            async def learned_click_locator(page_to_click: Any, step: dict[str, Any]) -> Any:
+                selector = str(step.get("seletor") or "").strip()
+                if selector:
+                    elementos = page_to_click.locator(selector)
+                    try:
+                        if await elementos.count() > 0:
+                            return elementos
+                    except Exception:
+                        pass
+                for key in ("target_text", "target_label"):
+                    text = str(step.get(key) or "").strip()
+                    if not text:
+                        continue
+                    for method_name in ("get_by_text", "get_by_label"):
+                        method = getattr(page_to_click, method_name, None)
+                        if method is None:
+                            continue
+                        try:
+                            elementos = method(text, exact=False)
+                            if await elementos.count() > 0:
+                                return elementos
+                        except Exception:
+                            continue
+                return page_to_click.locator(selector)
+
+            def step_for_diagnostic(step: dict[str, Any] | None, index: int | None) -> dict[str, Any] | None:
+                if not isinstance(step, dict):
+                    return None
+                enriched = dict(step)
+                if index is not None:
+                    enriched["__cotasync_step_index"] = index
+                return enriched
+
             if browser_mode == "desktop_browser":
                 connection = await provider.connect(p, f"action-{nome_arquivo}")
                 browser = connection.browser
@@ -1204,7 +1260,10 @@ async def executar_acao_rapida(
                     if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
                         raise
                     page = connection.page
-                first_step = passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None
+                first_step = step_for_diagnostic(
+                    passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None,
+                    0,
+                )
                 await run_session_checkpoint(page, "before_action_auth_check", first_step)
                 _LOGGER.info("[FAST-TRACK] Pagina desktop do sistema alvo selecionada.")
             else:
@@ -1229,12 +1288,14 @@ async def executar_acao_rapida(
                     if step_index + 1 < len(passos_playwright) and isinstance(passos_playwright[step_index + 1], dict)
                     else None
                 )
+                current_step_diagnostic = step_for_diagnostic(passo, step_index)
+                next_step_diagnostic = step_for_diagnostic(next_step, step_index + 1 if next_step is not None else None)
                 seletor = str(passo.get("seletor", "")).strip()
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
 
                 logging.info(f"[FAST-TRACK] Executando passo: {tipo_acao} em {seletor}")
                 if browser_mode == "desktop_browser":
-                    await run_session_checkpoint(page, "before_step_auth_check", passo)
+                    await run_session_checkpoint(page, "before_step_auth_check", current_step_diagnostic)
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
                     try:
@@ -1244,7 +1305,7 @@ async def executar_acao_rapida(
 
                 try:
                     if tipo_acao == "clicar":
-                        elementos = page.locator(passo["seletor"])
+                        elementos = await learned_click_locator(page, passo)
                         quantidade = await elementos.count()
                         sucesso_clique = False
 
@@ -1266,7 +1327,7 @@ async def executar_acao_rapida(
                             if browser_mode == "desktop_browser":
                                 await validate_or_allow_learned_microsoft_step(
                                     nova_aba,
-                                    next_step,
+                                    next_step_diagnostic,
                                     "after_new_page_check",
                                 )
                             page = nova_aba
@@ -1290,7 +1351,7 @@ async def executar_acao_rapida(
                         if browser_mode == "desktop_browser":
                             await validate_or_allow_learned_microsoft_step(
                                 page,
-                                next_step,
+                                next_step_diagnostic,
                                 "after_step_stability_check",
                             )
 

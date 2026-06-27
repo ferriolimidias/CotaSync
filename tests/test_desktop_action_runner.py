@@ -146,6 +146,9 @@ class FakeGuardianPage:
     def get_by_text(self, text: str, **_kwargs: object) -> FakeGuardianLocator:
         return FakeGuardianLocator(self, text=str(text))
 
+    def get_by_label(self, text: str, **_kwargs: object) -> FakeGuardianLocator:
+        return FakeGuardianLocator(self, text=str(text))
+
     async def reload(self, **_kwargs: object) -> None:
         self.reload_calls += 1
         self.ready_state = "complete"
@@ -169,6 +172,14 @@ class DesktopActionPageTests(unittest.TestCase):
                     "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
                     "?redirect_uri=https%3A%2F%2Fnwcweb.randonconsorcios.com.br%2Flogin-callback"
                 )
+            }
+        )
+        self.assertEqual(expected_action_hosts(action), {"nwcweb.randonconsorcios.com.br"})
+
+    def test_expected_hosts_ignore_microsoft_url_saved_as_expected_system_host(self) -> None:
+        action = desktop_action().model_copy(
+            update={
+                "expected_system_host": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=consent",
             }
         )
         self.assertEqual(expected_action_hosts(action), {"nwcweb.randonconsorcios.com.br"})
@@ -247,7 +258,7 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertTrue(clicked)
         self.assertIn("Priscila Susin", page.clicked_texts)
 
-    def test_recovery_clicks_matching_pick_account_and_increments_attempts(self) -> None:
+    def test_recovery_does_not_click_configured_pick_account_without_learned_step(self) -> None:
         action = desktop_action().model_dump()
         page = FakeGuardianPage(
             "https://m365.cloud.microsoft/",
@@ -267,10 +278,11 @@ class SessionGuardianTests(unittest.TestCase):
                 checkpoint="before_action_auth_check",
             )
         )
-        self.assertTrue(result.ok)
+        self.assertFalse(result.ok)
         self.assertEqual(result.recovery_attempts, 1)
-        self.assertEqual(result.recovery_steps[0]["result"], "clicked")
-        self.assertIn("Priscila Susin", page.clicked_texts)
+        self.assertEqual(result.recovery_steps[0]["action"], "monitor_microsoft_auth")
+        self.assertEqual(result.recovery_steps[0]["result"], "manual_intervention_or_learned_step_required")
+        self.assertEqual(page.clicked_texts, [])
 
     def test_pick_account_without_matching_profile_requires_operator_action(self) -> None:
         action = desktop_action().model_dump()
@@ -291,7 +303,7 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.recovery_attempts, 1)
         self.assertTrue(result.operator_action_required)
-        self.assertEqual(result.recovery_steps[0]["result"], "configured_account_not_visible")
+        self.assertEqual(result.recovery_steps[0]["result"], "manual_intervention_or_learned_step_required")
 
     def test_does_not_click_random_saved_account_without_match(self) -> None:
         action = desktop_action().model_dump()
@@ -397,6 +409,12 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertTrue(diagnostic["learned_microsoft_step_compatible"])
         self.assertFalse(diagnostic["operator_action_required"])
         self.assertTrue(diagnostic["whether_next_step_was_microsoft_click"])
+        self.assertEqual(diagnostic["next_step_type"], "clicar")
+        self.assertEqual(
+            diagnostic["next_step_selector"],
+            'div[aria-label="Sign in with outra@rdmz.com.br work or school account."]',
+        )
+        self.assertEqual(diagnostic["next_step_host_before"], "login.microsoftonline.com")
 
     def test_learned_accept_click_is_compatible_but_missing_accept_step_blocks(self) -> None:
         page = FakeGuardianPage(
@@ -425,9 +443,82 @@ class SessionGuardianTests(unittest.TestCase):
         )
         self.assertTrue(compatible["learned_microsoft_step_compatible"])
         self.assertFalse(compatible["operator_action_required"])
+        self.assertEqual(compatible["next_step_selector"], 'input[name="idSIButton9"]')
+        self.assertEqual(compatible["next_step_url_before"], "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
         self.assertFalse(blocked["learned_microsoft_step_compatible"])
         self.assertTrue(blocked["operator_action_required"])
         self.assertEqual(blocked["reason"], "next_step_selector_not_visible_on_microsoft_page")
+
+    def test_learned_accept_click_can_match_by_recorded_text_when_selector_changed(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Permissions requested by this app\nAccept",
+            visible_selectors=set(),
+        )
+        diagnostic = asyncio.run(
+            self._guardian().learned_microsoft_step_diagnostic(
+                page,
+                desktop_action().model_dump(),
+                {
+                    "tipo": "clicar",
+                    "seletor": 'input[name="idSIButton9"]',
+                    "target_text": "Accept",
+                    "expected_url_before": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                },
+            )
+        )
+        self.assertTrue(diagnostic["learned_microsoft_step_compatible"])
+        self.assertEqual(diagnostic["matched_by"], "target_text")
+        self.assertFalse(diagnostic["operator_action_required"])
+
+    def test_microsoft_page_with_non_matching_next_step_host_blocks_with_diagnostic(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Permissions requested by this app\nAccept",
+            visible_selectors={'input[name="idSIButton9"]'},
+        )
+        diagnostic = asyncio.run(
+            self._guardian().learned_microsoft_step_diagnostic(
+                page,
+                desktop_action().model_dump(),
+                {
+                    "tipo": "clicar",
+                    "seletor": 'input[name="idSIButton9"]',
+                    "target_text": "Accept",
+                    "expected_url_before": "https://nwcweb.randonconsorcios.com.br/frmMain.aspx",
+                },
+            )
+        )
+        self.assertFalse(diagnostic["learned_microsoft_step_compatible"])
+        self.assertTrue(diagnostic["operator_action_required"])
+        self.assertEqual(diagnostic["reason"], "next_step_expected_host_mismatch")
+        self.assertEqual(diagnostic["next_step_type"], "clicar")
+        self.assertEqual(diagnostic["next_step_selector"], 'input[name="idSIButton9"]')
+        self.assertEqual(diagnostic["next_step_host_before"], "nwcweb.randonconsorcios.com.br")
+
+    def test_blocking_diagnostic_includes_next_step_index_when_available(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "Permissions requested by this app\nAccept",
+        )
+        diagnostic = asyncio.run(
+            self._guardian().learned_microsoft_step_diagnostic(
+                page,
+                desktop_action().model_dump(),
+                {
+                    "__cotasync_step_index": 2,
+                    "tipo": "preencher",
+                    "seletor": "#ctl00_Conteudo_edtGrupo",
+                    "expected_url_before": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+                },
+            )
+        )
+        self.assertFalse(diagnostic["learned_microsoft_step_compatible"])
+        self.assertTrue(diagnostic["operator_action_required"])
+        self.assertEqual(diagnostic["reason"], "next_step_is_not_click")
+        self.assertEqual(diagnostic["next_step_index"], 2)
+        self.assertEqual(diagnostic["next_step_type"], "preencher")
+        self.assertEqual(diagnostic["next_step_selector"], "#ctl00_Conteudo_edtGrupo")
 
     def test_password_and_mfa_never_become_learned_microsoft_clicks(self) -> None:
         for body, expected_state in (
@@ -635,6 +726,35 @@ class DesktopActionRunTests(unittest.TestCase):
         self.assertTrue(run.result_payload["operator_action_required"])  # type: ignore[index]
         self.assertEqual(run.result_payload["checkpoint_diagnostics"][0]["result"], "failed")  # type: ignore[index]
         self.assertIn("Microsoft solicitou senha ou MFA", run.operational_summary or "")
+
+    def test_session_block_payload_keeps_next_step_diagnostic(self) -> None:
+        diagnostic = {
+            "session_state": "microsoft_consent_required",
+            "operator_action_required": True,
+            "current_host": "login.microsoftonline.com",
+            "current_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "next_step_index": 1,
+            "next_step_type": "preencher",
+            "next_step_selector": "#ctl00_Conteudo_edtGrupo",
+            "next_step_url_before": "https://nwcweb.randonconsorcios.com.br/frmMain.aspx",
+            "next_step_host_before": "nwcweb.randonconsorcios.com.br",
+            "reason": "next_step_is_not_click",
+            "retryable": True,
+        }
+        error = RuntimeError("Esta tela exige intervenção manual ou não corresponde ao passo ensinado.")
+        error.diagnostics = diagnostic  # type: ignore[attr-defined]
+        with patch("backend.services.action_runner.append_run"), patch(
+            "backend.services.action_runner.update_run"
+        ), patch(
+            "backend.services.action_runner.executar_acao_fast_track",
+            new=AsyncMock(side_effect=error),
+        ):
+            run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest()))
+        self.assertEqual(run.status, "error")
+        self.assertEqual(run.result_payload["next_step_index"], 1)  # type: ignore[index]
+        self.assertEqual(run.result_payload["next_step_type"], "preencher")  # type: ignore[index]
+        self.assertEqual(run.result_payload["next_step_selector"], "#ctl00_Conteudo_edtGrupo")  # type: ignore[index]
+        self.assertEqual(run.result_payload["next_step_host_before"], "nwcweb.randonconsorcios.com.br")  # type: ignore[index]
 
 
 if __name__ == "__main__":

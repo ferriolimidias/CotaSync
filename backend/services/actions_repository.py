@@ -9,11 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
+from backend.services.action_pages import url_host
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
 
 logger = logging.getLogger("cotasync.actions")
 
 SOURCE_LABEL = "data/ui_map.json"
+_MICROSOFT_HOST_SUFFIXES = (
+    "login.microsoftonline.com",
+    "login.live.com",
+    "login.microsoft.com",
+    "login.windows.net",
+    "m365.cloud.microsoft",
+)
 
 
 class ActionsRepositoryError(Exception):
@@ -155,8 +163,17 @@ def action_has_access_profile(data: dict[str, Any]) -> bool:
             or str(data.get("access_profile_email_or_identifier") or "").strip()
         )
         and str(data.get("microsoft_saved_account_text") or "").strip()
-        and str(data.get("expected_system_host") or "").strip()
+        and _clean_expected_system_host(data.get("expected_system_host"))
     )
+
+
+def _clean_expected_system_host(value: Any) -> str:
+    host = url_host(value) or str(value or "").strip().lower().rstrip(".")
+    if not host or "/" in host or "?" in host:
+        return ""
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in _MICROSOFT_HOST_SUFFIXES):
+        return ""
+    return host
 
 
 def enrich_action_access_profile(data: dict[str, Any]) -> dict[str, Any]:
@@ -178,7 +195,8 @@ def enrich_action_access_profile(data: dict[str, Any]) -> dict[str, Any]:
             profile.get("microsoft_saved_account_text")
             or DEFAULT_ACCESS_PROFILE["microsoft_saved_account_text"]
         ),
-        "expected_system_host": profile.get("expected_system_host") or DEFAULT_ACCESS_PROFILE["expected_system_host"],
+        "expected_system_host": _clean_expected_system_host(profile.get("expected_system_host"))
+        or DEFAULT_ACCESS_PROFILE["expected_system_host"],
         "microsoft_hosts": profile.get("microsoft_hosts") or DEFAULT_ACCESS_PROFILE["microsoft_hosts"],
         "requires_authenticated_session": True,
         "session_guardian_enabled": True,
@@ -189,6 +207,8 @@ def enrich_action_access_profile(data: dict[str, Any]) -> dict[str, Any]:
         elif key == "microsoft_hosts":
             raw_hosts = enriched.get(key)
             enriched[key] = raw_hosts if isinstance(raw_hosts, list) and raw_hosts else list(value)
+        elif key == "expected_system_host":
+            enriched[key] = _clean_expected_system_host(enriched.get(key)) or value
         elif not str(enriched.get(key) or "").strip():
             enriched[key] = value
     return enriched

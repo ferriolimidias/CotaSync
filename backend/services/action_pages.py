@@ -52,13 +52,26 @@ def _redirect_uri_host(login_url: Any) -> str:
         return ""
 
 
+def _normalized_business_host(value: Any) -> str:
+    raw = str(value or "").strip().lower().rstrip(".")
+    if not raw:
+        return ""
+    parsed_host = url_host(raw)
+    host = parsed_host or raw
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in _LOGIN_HOST_SUFFIXES):
+        return ""
+    if "/" in host or "?" in host:
+        return ""
+    return host
+
+
 def expected_action_hosts(action: Any) -> set[str]:
     """Retorna somente hosts de negocio aceitos para a acao."""
 
     hosts = {
         url_host(_metadata(action, "url_inicial", "")),
         _redirect_uri_host(_metadata(action, "external_login_url", "")),
-        str(_metadata(action, "expected_system_host", "") or "").strip().lower().rstrip("."),
+        _normalized_business_host(_metadata(action, "expected_system_host", "")),
     }
 
     # A configuracao corrente so complementa a acao quando representa o mesmo
@@ -72,7 +85,7 @@ def expected_action_hosts(action: Any) -> set[str]:
             current = load_current_external_system()
             if str(current.get("external_system_name") or "").strip() == action_system:
                 hosts.add(_redirect_uri_host(current.get("external_login_url")))
-                hosts.add(str(current.get("expected_system_host") or "").strip().lower().rstrip("."))
+                hosts.add(_normalized_business_host(current.get("expected_system_host")))
         except Exception:
             pass
     return {host for host in hosts if host}

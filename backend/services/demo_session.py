@@ -316,6 +316,23 @@ def _safe_url_host(url: str) -> str:
         return ""
 
 
+def _business_host(value: Any) -> str:
+    raw = str(value or "").strip().lower().rstrip(".")
+    host = _safe_url_host(raw) or raw
+    if not host or "/" in host or "?" in host:
+        return ""
+    microsoft_suffixes = (
+        "login.microsoftonline.com",
+        "login.live.com",
+        "login.microsoft.com",
+        "login.windows.net",
+        "m365.cloud.microsoft",
+    )
+    if any(host == suffix or host.endswith(f".{suffix}") for suffix in microsoft_suffixes):
+        return ""
+    return host
+
+
 def _host_matches(host: str, expected_host: str) -> bool:
     current = str(host or "").strip().lower().rstrip(".")
     expected = str(expected_host or "").strip().lower().rstrip(".")
@@ -2341,7 +2358,9 @@ class DemoSessionManager:
         saved_account_identifier = str(getattr(session, "microsoft_saved_account_identifier", "") or "").strip()
         saved_account_selector = str(getattr(session, "microsoft_saved_account_selector", "") or "").strip()
         saved_account_text = str(getattr(session, "microsoft_saved_account_text", "") or "").strip()
-        expected_system_host = str(getattr(session, "expected_system_host", "") or "").strip()
+        expected_system_host = _business_host(getattr(session, "expected_system_host", "")) or _business_host(
+            session.page.url
+        )
         microsoft_hosts = (
             list(getattr(session, "microsoft_hosts", []))
             if isinstance(getattr(session, "microsoft_hosts", []), list)
@@ -2604,13 +2623,23 @@ class DemoSessionManager:
                         "result": "learned_microsoft_step_allowed",
                         "current_host": state.current_host,
                         "last_page_title": state.title,
+                        "next_step_index": learned_step_diagnostic.get("next_step_index"),
+                        "next_step_type": learned_step_diagnostic.get("next_step_type"),
+                        "next_step_selector": learned_step_diagnostic.get("next_step_selector"),
+                        "next_step_url_before": learned_step_diagnostic.get("next_step_url_before"),
+                        "next_step_host_before": learned_step_diagnostic.get("next_step_host_before"),
                         "next_step_expected_selector": learned_step_diagnostic.get("next_step_expected_selector"),
                         "next_step_expected_url_or_host": learned_step_diagnostic.get(
                             "next_step_expected_url_or_host"
                         ),
+                        "next_step_expected_text": learned_step_diagnostic.get("next_step_expected_text"),
                         "whether_next_step_was_microsoft_click": learned_step_diagnostic.get(
                             "whether_next_step_was_microsoft_click"
                         ),
+                        "learned_microsoft_step_compatible": learned_step_diagnostic.get(
+                            "learned_microsoft_step_compatible"
+                        ),
+                        "matched_by": learned_step_diagnostic.get("matched_by"),
                     }
                 )
                 return
@@ -2629,6 +2658,19 @@ class DemoSessionManager:
                         "current_host": state.current_host,
                         "last_page_title": state.title,
                         "reason": learned_step_diagnostic.get("reason"),
+                        "next_step_index": learned_step_diagnostic.get("next_step_index"),
+                        "next_step_type": learned_step_diagnostic.get("next_step_type"),
+                        "next_step_selector": learned_step_diagnostic.get("next_step_selector"),
+                        "next_step_url_before": learned_step_diagnostic.get("next_step_url_before"),
+                        "next_step_host_before": learned_step_diagnostic.get("next_step_host_before"),
+                        "next_step_expected_selector": learned_step_diagnostic.get("next_step_expected_selector"),
+                        "next_step_expected_url_or_host": learned_step_diagnostic.get(
+                            "next_step_expected_url_or_host"
+                        ),
+                        "next_step_expected_text": learned_step_diagnostic.get("next_step_expected_text"),
+                        "whether_next_step_was_microsoft_click": learned_step_diagnostic.get(
+                            "whether_next_step_was_microsoft_click"
+                        ),
                     }
                 ]
                 raise SessionGuardianError(
@@ -2680,7 +2722,15 @@ class DemoSessionManager:
             except ActionPageError:
                 await run_session_checkpoint(checkpoint, next_step)
 
-        first_step = steps[0] if steps and isinstance(steps[0], dict) else None
+        def step_for_diagnostic(step: dict[str, Any] | None, index: int | None) -> dict[str, Any] | None:
+            if not isinstance(step, dict):
+                return None
+            enriched = dict(step)
+            if index is not None:
+                enriched["__cotasync_step_index"] = index
+            return enriched
+
+        first_step = step_for_diagnostic(steps[0] if steps and isinstance(steps[0], dict) else None, 0)
         await run_session_checkpoint("before_action_auth_check", first_step)
         for step_index, step in enumerate(steps):
             if time.monotonic() >= action_deadline:
@@ -2718,13 +2768,15 @@ class DemoSessionManager:
                 if step_index + 1 < len(steps) and isinstance(steps[step_index + 1], dict)
                 else None
             )
+            current_step_diagnostic = step_for_diagnostic(step, step_index)
+            next_step_diagnostic = step_for_diagnostic(next_step, step_index + 1 if next_step is not None else None)
             step_type = str(step.get("tipo") or "").strip().lower()
             selector = str(step.get("seletor") or "").strip()
             step_diag: dict[str, Any] | None = None
             try:
                 step_expected_url = _expected_replay_url(step.get("expected_url_before") or expected_url)
                 if action_browser_mode == "desktop_browser":
-                    await run_session_checkpoint("before_step_auth_check", step)
+                    await run_session_checkpoint("before_step_auth_check", current_step_diagnostic)
                 else:
                     authenticated, revalidated = await self._revalidate_for_replay(session, step_expected_url)
                     automatically_revalidated = automatically_revalidated or revalidated
@@ -2733,7 +2785,7 @@ class DemoSessionManager:
                 page = session.page
                 await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
                 if action_browser_mode == "desktop_browser":
-                    await validate_or_allow_learned_microsoft_step(step, "before_step_page_check")
+                    await validate_or_allow_learned_microsoft_step(current_step_diagnostic, "before_step_page_check")
                 if (
                     action_browser_mode != "desktop_browser"
                     and (not _page_matches_url(page, step_expected_url) or not await self._page_is_authenticated(session, page))
@@ -2749,7 +2801,14 @@ class DemoSessionManager:
                     _target_label(step, step_type, selector),
                     time.monotonic(),
                 )
-                if selector and step_type != "extrair_texto":
+                has_learned_click_text = bool(
+                    step_type == "clicar"
+                    and (
+                        str(step.get("target_text") or "").strip()
+                        or str(step.get("target_label") or "").strip()
+                    )
+                )
+                if step_type != "extrair_texto" and (selector or has_learned_click_text):
                     locator, state = await self._wait_actionable_locator(page, selector, step)
                     state.update({"step_index": step_index, "step_type": step_type})
                     selector_diagnostics.append(state)
@@ -2841,7 +2900,7 @@ class DemoSessionManager:
                             wait_strategy = "new_page"
                             wait_result = "new_page"
                             if action_browser_mode == "desktop_browser":
-                                await run_session_checkpoint("after_new_page_check", next_step)
+                                await run_session_checkpoint("after_new_page_check", next_step_diagnostic)
                         if expected_selector:
                             await page.locator(expected_selector).first.wait_for(
                                 state="visible",
@@ -2952,7 +3011,7 @@ class DemoSessionManager:
                         )
                     )
                 if action_browser_mode == "desktop_browser":
-                    await validate_or_allow_learned_microsoft_step(next_step, "after_step_stability_check")
+                    await validate_or_allow_learned_microsoft_step(next_step_diagnostic, "after_step_stability_check")
             except ActionPageError as exc:
                 raise DemoSessionError(str(exc)) from exc
             except SessionGuardianError as exc:
@@ -3092,6 +3151,15 @@ class DemoSessionManager:
     ) -> tuple[Locator, dict[str, Any]]:
         step_data = step if isinstance(step, dict) else {}
         owners: list[Page | Frame] = [page] + self._candidate_frames_for_step(page, step_data)
+        if not selector:
+            fallback = await self._wait_learned_text_locator(
+                owners,
+                step_data,
+                require_enabled=require_enabled,
+            )
+            if fallback is not None:
+                return fallback
+            raise PlaywrightTimeoutError("Passo de clique aprendido sem seletor e sem texto visivel.")
         selected_owner: Page | Frame | None = None
         for owner in owners:
             try:
@@ -3103,7 +3171,17 @@ class DemoSessionManager:
         if selected_owner is None:
             selected_owner = page
         locator = selected_owner.locator(selector).first
-        await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
+        try:
+            await locator.wait_for(state="visible", timeout=_REPLAY_STEP_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            fallback = await self._wait_learned_text_locator(
+                owners,
+                step_data,
+                require_enabled=require_enabled,
+            )
+            if fallback is not None:
+                return fallback
+            raise
         deadline = asyncio.get_running_loop().time() + (_REPLAY_STEP_TIMEOUT_MS / 1000)
         while require_enabled and not await locator.is_enabled():
             if asyncio.get_running_loop().time() >= deadline:
@@ -3113,6 +3191,62 @@ class DemoSessionManager:
         if isinstance(selected_owner, Frame):
             state.update(_frame_metadata(selected_owner))
         return locator, state
+
+    async def _wait_learned_text_locator(
+        self,
+        owners: list[Page | Frame],
+        step_data: dict[str, Any],
+        *,
+        require_enabled: bool = True,
+    ) -> tuple[Locator, dict[str, Any]] | None:
+        if str(step_data.get("tipo") or "").strip().lower() != "clicar":
+            return None
+        texts: list[str] = []
+        seen: set[str] = set()
+        for key in ("target_text", "target_label"):
+            text = str(step_data.get(key) or "").strip()
+            lowered = text.casefold()
+            if text and lowered not in seen:
+                seen.add(lowered)
+                texts.append(text)
+        if not texts:
+            return None
+        for owner in owners:
+            for text in texts:
+                for method_name in ("get_by_text", "get_by_label"):
+                    method = getattr(owner, method_name, None)
+                    if method is None:
+                        continue
+                    try:
+                        locator = method(text, exact=False).first
+                        count = await locator.count()
+                        if count <= 0:
+                            continue
+                        await locator.wait_for(state="visible", timeout=2500)
+                        deadline = asyncio.get_running_loop().time() + 2.5
+                        while require_enabled and not await locator.is_enabled():
+                            if asyncio.get_running_loop().time() >= deadline:
+                                break
+                            wait_page = owner.page if isinstance(owner, Frame) else owner
+                            await wait_page.wait_for_timeout(100)
+                        if require_enabled and not await locator.is_enabled():
+                            continue
+                        current_url = owner.page.url if isinstance(owner, Frame) else owner.url
+                        state: dict[str, Any] = {
+                            "current_url": _safe_page_url(current_url),
+                            "selector": str(step_data.get("seletor") or ""),
+                            "count": count,
+                            "visible": True,
+                            "enabled": not require_enabled or await locator.is_enabled(),
+                            "fallback": method_name,
+                            "target_text": text,
+                        }
+                        if isinstance(owner, Frame):
+                            state.update(_frame_metadata(owner))
+                        return locator, state
+                    except Exception:
+                        continue
+        return None
 
     async def _selector_state(self, page: Page | Frame, selector: str) -> dict[str, Any]:
         locator = page.locator(selector)
