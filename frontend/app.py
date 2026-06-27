@@ -1955,63 +1955,40 @@ elif menu_selecionado == "Configurações":
         st.error(str(exc))
     with st.form("external_system_config_form"):
         external_system_name = st.text_input(
-            "Sistema externo",
+            "Nome do sistema",
             value=str(external_config.get("external_system_name") or ""),
             placeholder="Ex.: ERP do cliente",
         )
         external_login_url = st.text_input(
-            "URL inicial",
+            "URL inicial completa do sistema",
             value=str(external_config.get("external_login_url") or ""),
-            placeholder="https://erp.cliente.com/login",
+            placeholder="https://login.microsoftonline.com/...&redirect_uri=...&state=...",
         )
-        auth_success_text = st.text_input(
-            "auth_success_text (opcional)",
-            value=str(external_config.get("auth_success_text") or ""),
-            help="Texto que só aparece após autenticação.",
-        )
-        auth_success_selector = st.text_input(
-            "auth_success_selector (opcional)",
-            value=str(external_config.get("auth_success_selector") or ""),
-            help="Tem prioridade sobre auth_success_text e deve estar visível após o login.",
-        )
-        st.markdown("**Perfil de acesso / operador**")
-        access_profile_name = st.text_input(
-            "access_profile_name",
-            value=str(external_config.get("access_profile_name") or "Priscila"),
-        )
+        st.markdown("**Conta Microsoft salva**")
         microsoft_saved_account_text = st.text_input(
-            "microsoft_saved_account_text",
+            "Nome da conta",
             value=str(external_config.get("microsoft_saved_account_text") or "Priscila Susin"),
         )
         microsoft_saved_account_identifier = st.text_input(
-            "microsoft_saved_account_identifier",
+            "Identificador/e-mail da conta",
             value=str(
                 external_config.get("microsoft_saved_account_identifier")
                 or external_config.get("access_profile_email_or_identifier")
                 or "D0004267@rdmz.com.br"
             ),
         )
-        expected_system_host = st.text_input(
-            "expected_system_host",
-            value=str(external_config.get("expected_system_host") or "nwcweb.randonconsorcios.com.br"),
-        )
-        microsoft_hosts = st.text_input(
-            "microsoft_hosts",
-            value=", ".join(external_config.get("microsoft_hosts") or ["login.microsoftonline.com", "m365.cloud.microsoft"]),
-            help="Hosts Microsoft separados por vírgula.",
-        )
-        microsoft_saved_account_selector = st.text_input(
-            "microsoft_saved_account_selector (opcional)",
-            value=str(external_config.get("microsoft_saved_account_selector") or ""),
-        )
-        validation_options = ["automática", "manual_confirmation"]
-        configured_validation = str(external_config.get("validation") or "")
-        validation = st.selectbox(
-            "validation",
-            validation_options,
-            index=1 if configured_validation == "manual_confirmation" else 0,
-            help="No modo manual, o clique do usuário confirma uma página web válida.",
-        )
+        with st.expander("Avançado / Diagnóstico", expanded=False):
+            st.write(
+                {
+                    "validation": external_config.get("validation", ""),
+                    "auth_success_text": external_config.get("auth_success_text", ""),
+                    "auth_success_selector": external_config.get("auth_success_selector", ""),
+                    "access_profile_name": external_config.get("access_profile_name", ""),
+                    "expected_system_host": external_config.get("expected_system_host", ""),
+                    "microsoft_hosts": external_config.get("microsoft_hosts", []),
+                    "microsoft_saved_account_selector": external_config.get("microsoft_saved_account_selector", ""),
+                }
+            )
         if st.form_submit_button("Salvar sistema externo", type="primary", use_container_width=True):
             try:
                 demo_api_request(
@@ -2020,20 +1997,18 @@ elif menu_selecionado == "Configurações":
                     {
                         "external_system_name": external_system_name,
                         "external_login_url": external_login_url,
-                        "validation": "manual_confirmation" if validation == "manual_confirmation" else "",
-                        "auth_success_text": auth_success_text,
-                        "auth_success_selector": auth_success_selector,
-                        "access_profile_name": access_profile_name,
+                        "validation": str(external_config.get("validation") or ""),
+                        "auth_success_text": str(external_config.get("auth_success_text") or ""),
+                        "auth_success_selector": str(external_config.get("auth_success_selector") or ""),
+                        "access_profile_name": str(external_config.get("access_profile_name") or ""),
                         "access_profile_email_or_identifier": microsoft_saved_account_identifier,
                         "microsoft_saved_account_identifier": microsoft_saved_account_identifier,
-                        "microsoft_saved_account_selector": microsoft_saved_account_selector,
+                        "microsoft_saved_account_selector": str(
+                            external_config.get("microsoft_saved_account_selector") or ""
+                        ),
                         "microsoft_saved_account_text": microsoft_saved_account_text,
-                        "expected_system_host": expected_system_host,
-                        "microsoft_hosts": [
-                            item.strip()
-                            for item in microsoft_hosts.split(",")
-                            if item.strip()
-                        ],
+                        "expected_system_host": str(external_config.get("expected_system_host") or ""),
+                        "microsoft_hosts": external_config.get("microsoft_hosts", []),
                     },
                     api_base_url=API_BASE_URL,
                 )

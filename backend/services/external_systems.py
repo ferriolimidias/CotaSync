@@ -120,7 +120,10 @@ def load_current_external_system() -> dict[str, Any]:
         raise ExternalSystemConfigError("Configuracao do sistema externo em formato invalido.")
     result = empty_external_system()
     for key in _string_keys():
-        result[key] = str(payload.get(key) or "").strip()
+        if key == "external_login_url":
+            result[key] = str(payload.get(key) or "")
+        else:
+            result[key] = str(payload.get(key) or "").strip()
     result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
     _normalize_access_profile_fields(result)
     if not result["microsoft_saved_account_identifier"]:
@@ -141,7 +144,10 @@ def load_current_external_system() -> dict[str, Any]:
 def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
     result = empty_external_system()
     for key in _string_keys():
-        result[key] = str(payload.get(key) or "").strip()
+        if key == "external_login_url":
+            result[key] = str(payload.get(key) or "")
+        else:
+            result[key] = str(payload.get(key) or "").strip()
     result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
     _normalize_access_profile_fields(result)
     if not result["microsoft_saved_account_identifier"]:
@@ -155,9 +161,10 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
             result[key] = str(value)
 
     login_url = result["external_login_url"]
+    login_url_for_validation = login_url.strip()
     system_name = result["external_system_name"]
     if login_url:
-        parsed = urlsplit(login_url)
+        parsed = urlsplit(login_url_for_validation)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ExternalSystemConfigError("A URL de login deve ser uma URL HTTP ou HTTPS valida.")
         if not system_name:

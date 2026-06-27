@@ -193,6 +193,25 @@ class DesktopActionPageTests(unittest.TestCase):
         self.assertEqual(google.goto_calls, [TARGET_URL])
         self.assertEqual(google.url, TARGET_URL)
 
+    def test_desktop_replay_navigates_to_complete_initial_url_before_step_zero(self) -> None:
+        full_url = (
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+            "client_id=abc&response_type=code&response_mode=query&scope=openid&"
+            "redirect_uri=https%3A%2F%2Fnwcweb.randonconsorcios.com.br%2FfrmCorCCCnsLogin.aspx&"
+            "state=XYZ&prompt=consent"
+        )
+        page = FakePage("https://www.google.com/")
+        action = desktop_action().model_copy(
+            update={
+                "url_inicial": full_url,
+                "external_login_url": full_url,
+            }
+        )
+        with self.assertRaises(ActionPageError):
+            asyncio.run(select_desktop_page_for_action(action, FakeContext([page]), page))
+        self.assertEqual(page.goto_calls, [full_url])
+        self.assertNotEqual(page.goto_calls[0], "https://m365.cloud.microsoft/search")
+
     def test_microsoft_redirect_requires_manual_reauthentication(self) -> None:
         google = FakePage(
             "https://www.google.com/",

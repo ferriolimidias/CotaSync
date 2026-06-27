@@ -97,6 +97,18 @@ class DemoAccessProfileUiTests(unittest.TestCase):
         self.assertIn("Testar sessão salva", source)
         self.assertIn("Limpar sessão salva", source)
 
+    def test_external_system_settings_are_simplified_and_technical_fields_are_read_only(self) -> None:
+        source = (ROOT / "frontend" / "app.py").read_text(encoding="utf-8")
+
+        self.assertIn("URL inicial completa do sistema", source)
+        self.assertIn("Nome da conta", source)
+        self.assertIn("Identificador/e-mail da conta", source)
+        self.assertIn("Avançado / Diagnóstico", source)
+        self.assertNotIn('st.text_input(\n            "expected_system_host"', source)
+        self.assertNotIn('st.text_input(\n            "microsoft_hosts"', source)
+        self.assertNotIn('st.text_input(\n            "microsoft_saved_account_selector', source)
+        self.assertNotIn('st.selectbox(\n            "validation"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

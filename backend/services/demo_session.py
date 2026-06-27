@@ -309,6 +309,10 @@ def _safe_page_url(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def _full_page_url(url: Any) -> str:
+    return str(url or "")
+
+
 def _safe_url_host(url: str) -> str:
     try:
         return urlsplit(str(url or "")).hostname or ""
@@ -351,8 +355,41 @@ def _storage_state_last_saved_at(path: Path) -> str | None:
 def _expected_replay_url(saved_url: Any) -> str:
     candidate = str(saved_url or "").strip()
     if urlsplit(candidate).scheme in {"http", "https"}:
-        return _safe_page_url(candidate)
-    return _safe_page_url(_demo_target_url())
+        return candidate
+    return _demo_target_url()
+
+
+def _initial_url_for_learned_action(
+    session: "DemoBrowserSession",
+    learning_events: list[dict[str, Any]],
+    robust_steps: list[dict[str, Any]],
+) -> str:
+    configured_url = str(session.external_login_url or "")
+    first_event_url = next(
+        (
+            str(event.get("url_before") or "")
+            for event in learning_events
+            if str(event.get("url_before") or "").strip()
+        ),
+        "",
+    )
+    first_step_url = next(
+        (
+            str(step.get("expected_url_before") or "")
+            for step in robust_steps
+            if str(step.get("expected_url_before") or "").strip()
+        ),
+        "",
+    )
+    if configured_url:
+        first_reference = first_event_url or first_step_url
+        if not first_reference or _safe_page_url(first_reference) == _safe_page_url(configured_url):
+            return configured_url
+    if first_event_url:
+        return first_event_url
+    if first_step_url:
+        return first_step_url
+    return _full_page_url(session.page.url)
 
 
 def _page_matches_url(page: Page, expected_url: str) -> bool:
@@ -844,8 +881,8 @@ class DemoSessionManager:
             "timestamp_before": str(raw.get("timestamp_before") or _utc_now()),
             "timestamp_after": str(raw.get("timestamp_after") or _utc_now()),
             "elapsed_ms": elapsed_ms,
-            "url_before": _safe_page_url(str(raw.get("url_before") or page.url)),
-            "url_after": _safe_page_url(str(raw.get("url_after") or page.url)),
+            "url_before": _full_page_url(raw.get("url_before") or page.url),
+            "url_after": _full_page_url(raw.get("url_after") or page.url),
             "title_before": str(raw.get("title_before") or "")[:200],
             "title_after": str(raw.get("title_after") or "")[:200],
             "dom_summary_before": raw.get("dom_summary_before") if isinstance(raw.get("dom_summary_before"), dict) else {},
@@ -1045,7 +1082,7 @@ class DemoSessionManager:
 
     def _target_url_for_saved_session(self, session: DemoBrowserSession) -> str:
         if session.external_login_url:
-            return _safe_page_url(session.external_login_url)
+            return session.external_login_url
         if session.expected_system_host:
             return f"https://{session.expected_system_host.strip().strip('/')}/"
         return _demo_target_url()
@@ -1239,7 +1276,7 @@ class DemoSessionManager:
             external_config = load_current_external_system()
         except ExternalSystemConfigError as exc:
             raise DemoSessionError(str(exc)) from exc
-        external_login_url = str(external_config.get("external_login_url") or "").strip()
+        external_login_url = str(external_config.get("external_login_url") or "")
         external_system_name = str(external_config.get("external_system_name") or "").strip()
         target_url = external_login_url or _demo_target_url()
         storage_state_path = (
@@ -2370,7 +2407,7 @@ class DemoSessionManager:
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
             "descricao": str(description or "Rotina aprendida por demonstracao manual.").strip(),
-            "url_inicial": _safe_page_url(session.page.url),
+            "url_inicial": _initial_url_for_learned_action(session, learning_events, robust_steps),
             "passos_playwright": steps,
             "robust_steps": robust_steps,
             "learning_events": learning_events,
@@ -2529,7 +2566,7 @@ class DemoSessionManager:
         if action_browser_mode != session.browser_mode:
             raise DemoSessionError("A acao deve ser executada no modo de navegador em que foi gravada.")
 
-        action_external_url = str(action.get("external_login_url") or "").strip()
+        action_external_url = str(action.get("external_login_url") or "")
         if action_external_url != session.external_login_url:
             raise DemoSessionError("Selecione a sessao do sistema externo usada por esta acao.")
 

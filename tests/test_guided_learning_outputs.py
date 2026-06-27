@@ -14,7 +14,7 @@ from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import run_action_sync
 from backend.services.actions_repository import load_actions_catalog
 from backend.services.demo_session import DemoSessionManager
-from backend.services.external_systems import load_current_external_system
+from backend.services.external_systems import load_current_external_system, save_current_external_system
 from backend.services.operational_summary import build_operational_summary
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 
@@ -150,6 +150,95 @@ def _external_session() -> SimpleNamespace:
 
 
 class GuidedLearningSaveTests(unittest.TestCase):
+    FULL_MICROSOFT_URL = (
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+        "client_id=abc&response_type=code&response_mode=query&scope=openid&"
+        "redirect_uri=https%3A%2F%2Fnwcweb.randonconsorcios.com.br%2FfrmCorCCCnsLogin.aspx&"
+        "state=XYZ&prompt=consent"
+    )
+
+    def test_external_system_url_round_trip_preserves_complete_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "current.json"
+            with patch("backend.services.external_systems.CURRENT_EXTERNAL_SYSTEM_PATH", config_path):
+                saved = save_current_external_system(
+                    {
+                        "external_system_name": "Sistema externo",
+                        "external_login_url": self.FULL_MICROSOFT_URL,
+                        "expected_system_host": "nwcweb.randonconsorcios.com.br",
+                    }
+                )
+                loaded = load_current_external_system()
+
+        self.assertEqual(saved["external_login_url"], self.FULL_MICROSOFT_URL)
+        self.assertEqual(loaded["external_login_url"], self.FULL_MICROSOFT_URL)
+        self.assertEqual(saved["expected_system_host"], "nwcweb.randonconsorcios.com.br")
+
+    def test_saved_session_target_uses_complete_external_url_not_expected_host(self) -> None:
+        manager = DemoSessionManager()
+        session = _external_session()
+        session.external_login_url = self.FULL_MICROSOFT_URL
+        session.expected_system_host = "nwcweb.randonconsorcios.com.br"
+
+        self.assertEqual(manager._target_url_for_saved_session(session), self.FULL_MICROSOFT_URL)
+        self.assertNotEqual(manager._target_url_for_saved_session(session), "https://nwcweb.randonconsorcios.com.br")
+
+    def test_action_initial_url_preserves_configured_url_when_learning_starts_there(self) -> None:
+        manager = DemoSessionManager()
+        session = _external_session()
+        session.external_login_url = self.FULL_MICROSOFT_URL
+        session.steps = [{"tipo": "clicar", "seletor": "#accept", "valor": ""}]
+        session.learning_events = [
+            {
+                "step_index": 0,
+                "event_type": "click",
+                "selector": "#accept",
+                "url_before": self.FULL_MICROSOFT_URL,
+                "url_after": "https://nwcweb.randonconsorcios.com.br/frmMain.aspx?x=1",
+            }
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Login completo", "Consulta.", {}))
+
+        action = captured["acoes_conhecidas"]["Login completo"]  # type: ignore[index]
+        self.assertEqual(action["url_inicial"], self.FULL_MICROSOFT_URL)
+        self.assertNotEqual(action["url_inicial"], "https://m365.cloud.microsoft/search")
+
+    def test_action_initial_url_uses_current_learning_url_when_recording_from_current_screen(self) -> None:
+        manager = DemoSessionManager()
+        session = _external_session()
+        session.external_login_url = self.FULL_MICROSOFT_URL
+        current_url = "https://nwcweb.randonconsorcios.com.br/frmMain.aspx?filtro=abc&state=keep"
+        session.steps = [{"tipo": "preencher", "seletor": "#grupo", "valor": "", "variavel": "grupo"}]
+        session.learning_events = [
+            {
+                "step_index": 0,
+                "event_type": "fill",
+                "selector": "#grupo",
+                "url_before": current_url,
+                "url_after": current_url,
+            }
+        ]
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
+            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Tela atual", "Consulta.", {"0": "grupo"}))
+
+        action = captured["acoes_conhecidas"]["Tela atual"]  # type: ignore[index]
+        self.assertEqual(action["url_inicial"], current_url)
+
     def test_default_access_profile_exists_for_demo_external_system(self) -> None:
         config = load_current_external_system()
         self.assertEqual(config["access_profile_name"], "Priscila")
