@@ -1111,16 +1111,41 @@ def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
             st.warning(
                 "A sessão precisa de login manual. Abra Configurações, conclua o login no navegador e salve a sessão."
             )
-    with st.expander("Ver diagnóstico de sessão", expanded=False):
+    step_index = payload.get("step_index", payload.get("next_step_index", ""))
+    step_type = str(payload.get("step_type") or payload.get("next_step_type") or "")
+    step_selector = str(payload.get("step_selector") or payload.get("next_step_selector") or "")
+    reason = str(payload.get("reason") or payload.get("exception_message") or "")
+    if str(status).lower() == "error" and (step_index != "" or step_type or step_selector):
+        st.warning(
+            f"Não consegui concluir a ação. Parei no passo {step_index or 'desconhecido'} "
+            f"ao tentar {step_type or 'executar'} {step_selector or ''}. "
+            "Abra o diagnóstico para ver a tela e o erro."
+        )
+    with st.expander("Diagnóstico resumido", expanded=False):
         st.write(
             {
+                "run_id": payload.get("run_id", ""),
+                "action_id": payload.get("action_id", ""),
+                "action_key": payload.get("action_key", ""),
+                "browser_mode": payload.get("browser_mode", ""),
+                "runner": payload.get("runner", ""),
+                "whether_fast_track_used": payload.get("whether_fast_track_used", ""),
+                "whether_desktop_browser_used": payload.get("whether_desktop_browser_used", ""),
                 "session_state": session_state,
                 "recovery_attempts": recovery_attempts,
                 "retryable": bool(payload.get("retryable", False)),
                 "operator_action_required": operator_required,
                 "current_host": payload.get("current_host", ""),
                 "current_url": payload.get("current_url", ""),
-                "last_page_title": payload.get("last_page_title", ""),
+                "page_title": payload.get("page_title", payload.get("last_page_title", "")),
+                "step_index": step_index,
+                "step_type": step_type,
+                "step_selector": step_selector,
+                "screenshot_path": payload.get("screenshot_path", ""),
+                "reason": reason,
+                "exception_type": payload.get("exception_type", ""),
+                "exception_message": payload.get("exception_message", ""),
+                "last_successful_step_index": payload.get("last_successful_step_index", ""),
                 "next_step_index": payload.get("next_step_index", ""),
                 "next_step_type": payload.get("next_step_type", ""),
                 "next_step_selector": payload.get("next_step_selector", ""),
@@ -1131,13 +1156,22 @@ def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
                 "next_step_expected_text": payload.get("next_step_expected_text", ""),
                 "whether_next_step_was_microsoft_click": payload.get("whether_next_step_was_microsoft_click", ""),
                 "learned_microsoft_step_compatible": payload.get("learned_microsoft_step_compatible", ""),
-                "reason": payload.get("reason", ""),
             }
         )
         if isinstance(recovery_steps, list) and recovery_steps:
             st.json(recovery_steps)
         if isinstance(checkpoint_diagnostics, list) and checkpoint_diagnostics:
             st.json(checkpoint_diagnostics)
+    step_trace = payload.get("step_trace")
+    if isinstance(step_trace, list) and step_trace:
+        with st.expander("Passos executados", expanded=False):
+            st.json(step_trace)
+    screenshot_path = str(payload.get("screenshot_path") or "")
+    screenshot_file = (_ROOT / screenshot_path).resolve()
+    runs_root = (_ROOT / "data" / "runs").resolve()
+    if screenshot_path and screenshot_file.is_file() and screenshot_file.is_relative_to(runs_root):
+        with st.expander("Screenshot do erro", expanded=True):
+            st.image(str(screenshot_file), caption=screenshot_path, use_container_width=True)
 
 
 def carregar_historico_disco() -> list[dict]:

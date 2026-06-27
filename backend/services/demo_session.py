@@ -2546,6 +2546,7 @@ class DemoSessionManager:
         downloaded_files: list[dict[str, object]] = []
         selector_diagnostics: list[dict[str, Any]] = []
         step_diagnostics: list[dict[str, Any]] = []
+        step_trace: list[dict[str, Any]] = []
         checkpoint_diagnostics: list[dict[str, Any]] = []
         automatically_revalidated = False
         recovery_attempted = False
@@ -2554,6 +2555,7 @@ class DemoSessionManager:
         last_session_state = ""
         last_page_title = ""
         current_host = ""
+        last_successful_step_index: int | str = ""
         guardian = SessionGuardian() if action_browser_mode == "desktop_browser" else None
         action_timeout_ms = _REPLAY_ACTION_TIMEOUT_MS
         if action_browser_mode == "desktop_browser":
@@ -2758,6 +2760,8 @@ class DemoSessionManager:
                         "last_page_title": last_page_title,
                         "current_host": current_host,
                         "recovery_attempted": recovery_attempted,
+                        "step_trace": step_trace,
+                        "last_successful_step_index": last_successful_step_index,
                         "retryable": True,
                     },
                 )
@@ -2773,6 +2777,8 @@ class DemoSessionManager:
             step_type = str(step.get("tipo") or "").strip().lower()
             selector = str(step.get("seletor") or "").strip()
             step_diag: dict[str, Any] | None = None
+            trace_item: dict[str, Any] = {}
+            step_started_at = time.monotonic()
             try:
                 step_expected_url = _expected_replay_url(step.get("expected_url_before") or expected_url)
                 if action_browser_mode == "desktop_browser":
@@ -2784,6 +2790,19 @@ class DemoSessionManager:
                         raise DemoSessionError("A sessao nao esta autenticada para executar a rotina.")
                 page = session.page
                 await page.wait_for_load_state("domcontentloaded", timeout=_REPLAY_STEP_TIMEOUT_MS)
+                trace_item = {
+                    "step_index": step_index,
+                    "step_type": step_type,
+                    "selector": selector,
+                    "variable_key": str(step.get("variavel") or ""),
+                    "value_template": str(step.get("valor") or ""),
+                    "current_url": _safe_page_url(page.url),
+                    "current_host": _safe_url_host(page.url),
+                    "title": await self._current_title(page),
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "status": "running",
+                }
+                step_trace.append(trace_item)
                 if action_browser_mode == "desktop_browser":
                     await validate_or_allow_learned_microsoft_step(current_step_diagnostic, "before_step_page_check")
                 if (
@@ -3012,9 +3031,42 @@ class DemoSessionManager:
                     )
                 if action_browser_mode == "desktop_browser":
                     await validate_or_allow_learned_microsoft_step(next_step_diagnostic, "after_step_stability_check")
+                if trace_item:
+                    trace_item.update(
+                        {
+                            "status": "success",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": _safe_page_url(session.page.url),
+                            "current_host": _safe_url_host(session.page.url),
+                            "title": await self._current_title(session.page),
+                        }
+                    )
+                    last_successful_step_index = step_index
             except ActionPageError as exc:
+                if trace_item:
+                    trace_item.update(
+                        {
+                            "status": "error",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": _safe_page_url(session.page.url),
+                            "current_host": _safe_url_host(session.page.url),
+                            "title": await self._current_title(session.page),
+                            "error_message": str(exc)[:500],
+                        }
+                    )
                 raise DemoSessionError(str(exc)) from exc
             except SessionGuardianError as exc:
+                if trace_item:
+                    trace_item.update(
+                        {
+                            "status": "error",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": _safe_page_url(session.page.url),
+                            "current_host": _safe_url_host(session.page.url),
+                            "title": await self._current_title(session.page),
+                            "error_message": str(exc)[:500],
+                        }
+                    )
                 if step_diag is not None:
                     step_diagnostics.append(
                         await self._finish_step_diagnostic(
@@ -3028,8 +3080,20 @@ class DemoSessionManager:
                 diagnostics = dict(exc.diagnostics)
                 diagnostics["step_diagnostics"] = step_diagnostics
                 diagnostics["selector_diagnostics"] = selector_diagnostics
+                diagnostics["step_trace"] = step_trace
+                diagnostics["last_successful_step_index"] = last_successful_step_index
                 raise DemoReplayStepError(str(exc), diagnostics) from exc
             except DemoSessionError:
+                if trace_item:
+                    trace_item.update(
+                        {
+                            "status": "error",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": _safe_page_url(session.page.url),
+                            "current_host": _safe_url_host(session.page.url),
+                            "title": await self._current_title(session.page),
+                        }
+                    )
                 raise
             except Exception as exc:
                 if step_diag is not None:
@@ -3050,11 +3114,24 @@ class DemoSessionManager:
                     selector,
                     exc,
                 )
+                if trace_item:
+                    trace_item.update(
+                        {
+                            "status": "error",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": _safe_page_url(session.page.url),
+                            "current_host": _safe_url_host(session.page.url),
+                            "title": await self._current_title(session.page),
+                            "screenshot_path": diagnostics.get("screenshot_path", ""),
+                            "error_message": str(exc)[:500],
+                        }
+                    )
                 raise DemoReplayStepError(
                     f"Falha ao executar o passo '{step_type}'. Consulte o diagnostico da run.",
                     {
                         "selector_diagnostics": [diagnostics],
                         "step_diagnostics": step_diagnostics,
+                        "step_trace": step_trace,
                         "checkpoint_diagnostics": checkpoint_diagnostics,
                         "session_state": last_session_state,
                         "recovery_attempts": total_recovery_attempts,
@@ -3062,6 +3139,7 @@ class DemoSessionManager:
                         "last_page_title": last_page_title,
                         "current_host": current_host,
                         "recovery_attempted": recovery_attempted,
+                        "last_successful_step_index": last_successful_step_index,
                         "retryable": isinstance(exc, PlaywrightTimeoutError),
                     },
                 ) from exc
@@ -3095,8 +3173,14 @@ class DemoSessionManager:
             "variables_used": sorted(str(key) for key in variables.keys()),
             "selector_diagnostics": selector_diagnostics,
             "step_diagnostics": step_diagnostics,
+            "step_trace": step_trace,
             "checkpoint_diagnostics": checkpoint_diagnostics,
             "input_variables": {str(key): "[informado]" for key in variables.keys()},
+            "last_successful_step_index": last_successful_step_index,
+            "browser_mode": action_browser_mode,
+            "runner": "demo_session_replay",
+            "whether_fast_track_used": False,
+            "whether_desktop_browser_used": action_browser_mode == "desktop_browser",
             "retryable": False,
             "evidence": str(evidence_path.relative_to(_ROOT)),
             "final_page": {"title": final_title, "url": _safe_page_url(session.page.url)},

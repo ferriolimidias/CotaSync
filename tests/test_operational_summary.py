@@ -228,6 +228,24 @@ class OperationalSummaryTests(unittest.TestCase):
             "Tente novamente ou reautentique a sessão se necessário.",
         )
 
+    def test_step_error_summary_points_to_failed_step(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(),
+            status="error",
+            error_message="Erro real do Playwright",
+            result_payload={
+                "step_index": 4,
+                "step_type": "clicar",
+                "step_selector": "button:has-text('Accept')",
+                "reason": "Elemento nao ficou visivel",
+            },
+        )
+        self.assertEqual(
+            summary,
+            "Não consegui concluir a ação. Parei no passo 4 ao tentar clicar "
+            "button:has-text('Accept'). Motivo: Elemento nao ficou visivel.",
+        )
+
     def test_fallback_works_without_openai_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             summary = asyncio.run(

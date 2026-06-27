@@ -468,6 +468,15 @@ def deterministic_operational_summary(
             for item in step_diagnostics
             if isinstance(item, dict)
         )
+        step_index = payload.get("step_index")
+        step_type = _clean_scalar(payload.get("step_type") or payload.get("next_step_type"))
+        step_selector = _clean_scalar(payload.get("step_selector") or payload.get("next_step_selector"))
+        reason = _clean_scalar(payload.get("reason") or payload.get("exception_message") or error_message)
+        if step_index not in (None, "") or step_type or step_selector:
+            target = " ".join(part for part in (step_type, step_selector) if part).strip() or "o passo esperado"
+            suffix = f" Motivo: {reason}." if reason else ""
+            shown_index = step_index if step_index not in (None, "") else "desconhecido"
+            return f"Não consegui concluir a ação. Parei no passo {shown_index} ao tentar {target}.{suffix}"
         if "precisa ser autenticada novamente" in error or "reauthentication_required" in error:
             return "Não consegui executar a ação porque a sessão precisa ser autenticada novamente."
         if session_state == "microsoft_consent_required":
@@ -493,7 +502,9 @@ def deterministic_operational_summary(
             )
         if "não possui passos" in error or "nao possui passos" in error:
             return "Não foi possível executar a ação porque ela ainda não possui uma rotina configurada."
-        return "Não foi possível concluir a ação no sistema. Tente novamente ou verifique se o serviço está disponível."
+        if reason:
+            return f"Não consegui concluir a ação. Motivo: {reason}."
+        return "Não consegui concluir a ação. O diagnóstico técnico não informou o passo da falha."
 
     extracted = _safe_extracted_values(action, result_payload)
     has_files = _has_files(result_payload)

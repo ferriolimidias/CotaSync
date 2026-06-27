@@ -587,14 +587,45 @@ class DesktopActionRunTests(unittest.TestCase):
             "texto": "concluida",
             "passos_executados": 1,
             "final_page": {"title": "Pagina", "url": final_url},
+            "browser_mode": "desktop_browser",
+            "runner": "desktop_browser_replay",
+            "whether_fast_track_used": False,
+            "whether_desktop_browser_used": True,
+        }
+        with patch("backend.services.action_runner.append_run"), patch(
+            "backend.services.action_runner.update_run"
+        ), patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
+            new=AsyncMock(return_value=execution),
+        ):
+            return asyncio.run(run_action_sync(desktop_action(), ActionRunRequest()))
+
+    def test_desktop_browser_action_uses_desktop_replay_not_legacy_fast_track(self) -> None:
+        execution = {
+            "status": "success",
+            "texto": "concluida",
+            "passos_executados": 1,
+            "final_page": {"title": "Pagina", "url": TARGET_URL},
+            "browser_mode": "desktop_browser",
+            "runner": "desktop_browser_replay",
+            "whether_fast_track_used": False,
+            "whether_desktop_browser_used": True,
         }
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
             "backend.services.action_runner.executar_acao_fast_track",
+            new=AsyncMock(),
+        ) as legacy_fast_track, patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
-        ):
-            return asyncio.run(run_action_sync(desktop_action(), ActionRunRequest()))
+        ) as desktop_replay:
+            run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest(variables={"grupo": "935"})))
+        desktop_replay.assert_awaited_once()
+        legacy_fast_track.assert_not_awaited()
+        self.assertEqual(run.status, "success")
+        self.assertFalse(run.result_payload["whether_fast_track_used"])  # type: ignore[index]
+        self.assertTrue(run.result_payload["whether_desktop_browser_used"])  # type: ignore[index]
 
     def test_desktop_action_never_succeeds_with_google_final_page(self) -> None:
         run = self._run_with_final_url("https://www.google.com/")
@@ -688,7 +719,7 @@ class DesktopActionRunTests(unittest.TestCase):
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(side_effect=error),
         ):
             run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest(variables={"grupo": "123"})))
@@ -696,6 +727,86 @@ class DesktopActionRunTests(unittest.TestCase):
         self.assertEqual(run.result_payload["step_diagnostics"][0]["result"], "timeout")  # type: ignore[index]
         self.assertTrue(run.result_payload["retryable"])  # type: ignore[index]
         self.assertIn("demorou para abrir a próxima tela", run.operational_summary or "")
+
+    def test_step_failure_keeps_required_diagnostic_payload(self) -> None:
+        diagnostic = {
+            "step_index": 3,
+            "step_type": "preencher",
+            "step_selector": "#ctl00_Conteudo_edtGrupo",
+            "step_value_template": "",
+            "step_variable_key": "grupo",
+            "current_url": TARGET_URL,
+            "current_host": "nwcweb.randonconsorcios.com.br",
+            "page_title": "Consulta",
+            "screenshot_path": "data/runs/run_step_3_error.png",
+            "reason": "Seletor nao ficou visivel",
+            "browser_mode": "desktop_browser",
+            "runner": "desktop_browser_replay",
+            "whether_fast_track_used": False,
+            "whether_desktop_browser_used": True,
+            "last_successful_step_index": 2,
+            "next_step_expected_selector": "#resultado",
+            "next_step_expected_text": "Resultado",
+            "step_trace": [
+                {"step_index": 2, "status": "success"},
+                {
+                    "step_index": 3,
+                    "step_type": "preencher",
+                    "selector": "#ctl00_Conteudo_edtGrupo",
+                    "status": "error",
+                    "current_url": TARGET_URL,
+                    "current_host": "nwcweb.randonconsorcios.com.br",
+                    "screenshot_path": "data/runs/run_step_3_error.png",
+                },
+            ],
+            "retryable": True,
+        }
+        error = RuntimeError("Erro real do Playwright")
+        error.diagnostics = diagnostic  # type: ignore[attr-defined]
+        with patch("backend.services.action_runner.append_run"), patch(
+            "backend.services.action_runner.update_run"
+        ), patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
+            new=AsyncMock(side_effect=error),
+        ):
+            run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest(variables={"grupo": "935"})))
+
+        payload = run.result_payload or {}
+        for key in (
+            "run_id",
+            "action_id",
+            "action_key",
+            "step_index",
+            "step_type",
+            "step_selector",
+            "step_value_template",
+            "step_variable_key",
+            "current_url",
+            "current_host",
+            "page_title",
+            "screenshot_path",
+            "reason",
+            "exception_type",
+            "exception_message",
+            "browser_mode",
+            "runner",
+            "whether_fast_track_used",
+            "whether_desktop_browser_used",
+            "last_successful_step_index",
+            "next_step_expected_selector",
+            "next_step_expected_text",
+            "input_variables",
+            "diagnostics",
+        ):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["current_url"], TARGET_URL)
+        self.assertEqual(payload["current_host"], "nwcweb.randonconsorcios.com.br")
+        self.assertEqual(payload["exception_message"], "Erro real do Playwright")
+        self.assertEqual(payload["input_variables"]["grupo"], "935")
+        self.assertEqual(payload["screenshot_path"], "data/runs/run_step_3_error.png")
+        self.assertFalse(payload["whether_fast_track_used"])
+        self.assertTrue(payload["whether_desktop_browser_used"])
+        self.assertIn("Parei no passo 3", run.operational_summary or "")
 
     def test_session_checkpoint_diagnostics_persist_in_error_payload(self) -> None:
         diagnostic = {
@@ -717,7 +828,7 @@ class DesktopActionRunTests(unittest.TestCase):
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(side_effect=error),
         ):
             run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest()))
@@ -746,7 +857,7 @@ class DesktopActionRunTests(unittest.TestCase):
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(side_effect=error),
         ):
             run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest()))

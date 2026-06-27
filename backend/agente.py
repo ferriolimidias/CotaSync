@@ -504,12 +504,37 @@ async def executar_acao_fast_track(
         if str(resultado.get("status", "")).lower() != "sucesso":
             motivo = str(resultado.get("motivo", "Falha não identificada."))
             if browser_mode == "desktop_browser" or not ai_recovery_enabled:
-                summary = await build_operational_summary(acao, status="error", error_message=motivo)
+                diagnostics = resultado.get("page_diagnostics") if isinstance(resultado.get("page_diagnostics"), dict) else {}
+                result_payload = {
+                    **diagnostics,
+                    "reason": str(diagnostics.get("reason") or motivo),
+                    "exception_message": str(diagnostics.get("exception_message") or motivo),
+                    "browser_mode": str(diagnostics.get("browser_mode") or browser_mode),
+                    "runner": str(
+                        diagnostics.get("runner")
+                        or ("desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track")
+                    ),
+                    "whether_fast_track_used": bool(
+                        diagnostics.get("whether_fast_track_used", browser_mode != "desktop_browser")
+                    ),
+                    "whether_desktop_browser_used": bool(
+                        diagnostics.get("whether_desktop_browser_used", browser_mode == "desktop_browser")
+                    ),
+                    "input_variables": dados_variaveis if isinstance(dados_variaveis, dict) else {},
+                    "diagnostics": diagnostics,
+                }
+                summary = await build_operational_summary(
+                    acao,
+                    status="error",
+                    result_payload=result_payload,
+                    error_message=motivo,
+                )
                 return {
                     "texto": summary,
                     "operational_summary": summary,
                     "error_message": motivo,
                     "page_diagnostics": resultado.get("page_diagnostics"),
+                    "result_payload": result_payload,
                     "status": "error",
                     "estado": "NORMAL",
                 }

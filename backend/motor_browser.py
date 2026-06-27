@@ -28,6 +28,7 @@ import requests
 from backend.services.action_pages import (
     ActionPageError,
     select_desktop_page_for_action,
+    url_host,
     validate_action_page_url,
 )
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
@@ -1033,6 +1034,24 @@ async def executar_acao_rapida(
     arquivos_baixados: list[str] = []
     downloaded_files: list[dict[str, object]] = []
     dados_extraidos: dict[str, str] = {}
+    step_trace: list[dict[str, Any]] = []
+    last_successful_step_index: int | str = ""
+    page: Any | None = None
+
+    async def current_browser_state(page_to_check: Any | None) -> dict[str, str]:
+        if page_to_check is None:
+            return {"current_url": "", "current_host": "", "page_title": ""}
+        current_url = _safe_result_url(str(getattr(page_to_check, "url", "") or ""))
+        page_title = ""
+        try:
+            page_title = (await page_to_check.title()).strip()[:200]
+        except Exception:
+            page_title = ""
+        return {
+            "current_url": current_url,
+            "current_host": url_host(current_url),
+            "page_title": page_title,
+        }
 
     action_config = action_config if isinstance(action_config, dict) else {}
     browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "browserless")
@@ -1050,11 +1069,72 @@ async def executar_acao_rapida(
             last_page_title = ""
             current_host = ""
 
+            async def capture_error_screenshot(page_to_capture: Any | None, step_index: int, step_type: str) -> str:
+                if page_to_capture is None:
+                    return ""
+                evidence_path = _DATA_DIR / "runs" / f"{run_id}_step_{step_index}_{_safe_file_name(step_type)}_error.png"
+                try:
+                    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                    await page_to_capture.screenshot(path=str(evidence_path), full_page=False, timeout=15000)
+                    return str(evidence_path.relative_to(_raiz_projeto()))
+                except Exception:
+                    return ""
+
+            async def build_step_failure_diagnostics(
+                page_to_check: Any | None,
+                step_index: int,
+                passo: dict[str, Any],
+                exc: Exception,
+                *,
+                screenshot_path: str = "",
+            ) -> dict[str, Any]:
+                state = await current_browser_state(page_to_check)
+                selector = str(passo.get("seletor") or "").strip()
+                diagnostics: dict[str, Any] = {
+                    "step_index": step_index,
+                    "step_type": str(passo.get("tipo") or "").strip().lower(),
+                    "step_selector": selector,
+                    "selector": selector,
+                    "step_value_template": str(passo.get("valor") or ""),
+                    "step_variable_key": str(passo.get("variavel") or ""),
+                    "current_url": state["current_url"],
+                    "current_host": state["current_host"],
+                    "page_title": state["page_title"],
+                    "last_page_title": state["page_title"],
+                    "screenshot_path": screenshot_path,
+                    "reason": str(exc)[:1000] or type(exc).__name__,
+                    "exception_type": type(exc).__name__,
+                    "exception_message": str(exc)[:1000] or type(exc).__name__,
+                    "browser_mode": browser_mode,
+                    "runner": "desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track",
+                    "whether_fast_track_used": browser_mode != "desktop_browser",
+                    "whether_desktop_browser_used": browser_mode == "desktop_browser",
+                    "last_successful_step_index": last_successful_step_index,
+                    "next_step_expected_selector": str(passo.get("expected_selector_after") or ""),
+                    "next_step_expected_text": str(passo.get("target_text") or passo.get("target_label") or ""),
+                    "input_variables": dados_variaveis if isinstance(dados_variaveis, dict) else {},
+                    "step_trace": step_trace,
+                    "session_state": last_session_state,
+                    "current_host_from_guardian": current_host,
+                    "checkpoint_diagnostics": checkpoint_diagnostics,
+                    "retryable": True,
+                }
+                try:
+                    if selector and page_to_check is not None:
+                        locator = page_to_check.locator(selector)
+                        count = await locator.count()
+                        diagnostics["count"] = count
+                        diagnostics["visible"] = await locator.first.is_visible() if count else False
+                        diagnostics["enabled"] = await locator.first.is_enabled() if count else False
+                except Exception:
+                    pass
+                return diagnostics
+
             async def is_authenticated(page_to_check: Any) -> bool:
                 try:
                     validate_action_page_url(action_config, getattr(page_to_check, "url", ""))
                     return True
-                except ActionPageError:
+                except ActionPageError as e:
                     return False
 
             async def run_session_checkpoint(
@@ -1214,7 +1294,7 @@ async def executar_acao_rapida(
                     validate_action_page_url(action_config, page_to_check.url)
                     await run_session_checkpoint(page_to_check, checkpoint, next_step)
                     return
-                except ActionPageError:
+                except ActionPageError as e:
                     await run_session_checkpoint(page_to_check, checkpoint, next_step)
 
             async def learned_click_locator(page_to_click: Any, step: dict[str, Any]) -> Any:
@@ -1292,6 +1372,21 @@ async def executar_acao_rapida(
                 next_step_diagnostic = step_for_diagnostic(next_step, step_index + 1 if next_step is not None else None)
                 seletor = str(passo.get("seletor", "")).strip()
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
+                step_started_at = time.monotonic()
+                before_state = await current_browser_state(page)
+                trace_item: dict[str, Any] = {
+                    "step_index": step_index,
+                    "step_type": tipo_acao,
+                    "selector": seletor,
+                    "variable_key": str(passo.get("variavel") or ""),
+                    "value_template": str(passo.get("valor") or ""),
+                    "current_url": before_state["current_url"],
+                    "current_host": before_state["current_host"],
+                    "title": before_state["page_title"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "status": "running",
+                }
+                step_trace.append(trace_item)
 
                 logging.info(f"[FAST-TRACK] Executando passo: {tipo_acao} em {seletor}")
                 if browser_mode == "desktop_browser":
@@ -1400,13 +1495,69 @@ async def executar_acao_rapida(
                         metadata = runtime_file_metadata(caminho_arquivo)
                         downloaded_files.append(metadata)
                         arquivos_baixados.append(str(metadata["path"]))
+                    after_state = await current_browser_state(page)
+                    trace_item.update(
+                        {
+                            "status": "success",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": after_state["current_url"],
+                            "current_host": after_state["current_host"],
+                            "title": after_state["page_title"],
+                        }
+                    )
+                    last_successful_step_index = step_index
 
                 except ActionPageError:
+                    screenshot_path = await capture_error_screenshot(page, step_index, tipo_acao)
+                    after_state = await current_browser_state(page)
+                    trace_item.update(
+                        {
+                            "status": "error",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": after_state["current_url"],
+                            "current_host": after_state["current_host"],
+                            "title": after_state["page_title"],
+                            "screenshot_path": screenshot_path,
+                            "error_message": "Falha de pagina operacional.",
+                        }
+                    )
+                    try:
+                        page_error = await build_step_failure_diagnostics(
+                            page,
+                            step_index,
+                            passo,
+                            e,
+                            screenshot_path=screenshot_path,
+                        )
+                        e.diagnostics.update(page_error)
+                    except Exception:
+                        pass
                     raise
                 except Exception as e:
-                    raise Exception(
-                        f"Falha técnica no Fast-Track ao executar {tipo_acao} em {seletor}: {str(e)}"
-                    ) from e
+                    screenshot_path = await capture_error_screenshot(page, step_index, tipo_acao)
+                    after_state = await current_browser_state(page)
+                    trace_item.update(
+                        {
+                            "status": "error",
+                            "elapsed_ms": max(0, int((time.monotonic() - step_started_at) * 1000)),
+                            "current_url": after_state["current_url"],
+                            "current_host": after_state["current_host"],
+                            "title": after_state["page_title"],
+                            "screenshot_path": screenshot_path,
+                            "error_message": str(e)[:1000] or type(e).__name__,
+                        }
+                    )
+                    wrapped = Exception(
+                        f"Falha técnica no replay ao executar {tipo_acao} em {seletor}: {str(e)}"
+                    )
+                    wrapped.diagnostics = await build_step_failure_diagnostics(
+                        page,
+                        step_index,
+                        passo,
+                        e,
+                        screenshot_path=screenshot_path,
+                    )
+                    raise wrapped from e
 
             await asyncio.sleep(1)
             if browser_mode == "desktop_browser":
@@ -1433,16 +1584,52 @@ async def executar_acao_rapida(
                 "last_page_title": last_page_title,
                 "current_host": current_host,
                 "checkpoint_diagnostics": checkpoint_diagnostics,
+                "step_trace": step_trace,
+                "last_successful_step_index": last_successful_step_index,
+                "browser_mode": browser_mode,
+                "runner": "desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track",
+                "whether_fast_track_used": browser_mode != "desktop_browser",
+                "whether_desktop_browser_used": browser_mode == "desktop_browser",
             }
     except SessionGuardianError as exc:
         _LOGGER.info(f"[ERRO] Sessao invalida na execução rápida '{nome_acao}': {exc}")
+        exc.diagnostics.setdefault("step_trace", step_trace)
+        exc.diagnostics.setdefault("last_successful_step_index", last_successful_step_index)
         return {"status": "erro", "motivo": str(exc), "page_diagnostics": exc.diagnostics}
     except ActionPageError as exc:
         _LOGGER.info(f"[ERRO] Falha operacional na execução rápida '{nome_acao}': {exc}")
+        exc.diagnostics.setdefault("step_trace", step_trace)
+        exc.diagnostics.setdefault("last_successful_step_index", last_successful_step_index)
         return {"status": "erro", "motivo": str(exc), "page_diagnostics": exc.diagnostics}
     except Exception as exc:
         _LOGGER.info(f"[ERRO] Falha na execução rápida '{nome_acao}': {exc}")
-        return {"status": "erro", "motivo": f"Falha na execução rápida: {exc}"}
+        diagnostics = getattr(exc, "diagnostics", None)
+        if isinstance(diagnostics, dict):
+            diagnostics.setdefault("step_trace", step_trace)
+            diagnostics.setdefault("last_successful_step_index", last_successful_step_index)
+            return {"status": "erro", "motivo": str(exc), "page_diagnostics": diagnostics}
+        state = {"current_url": "", "current_host": "", "page_title": ""}
+        try:
+            state = await current_browser_state(page)
+        except Exception:
+            pass
+        return {
+            "status": "erro",
+            "motivo": f"Falha na execução rápida: {exc}",
+            "page_diagnostics": {
+                **state,
+                "reason": str(exc)[:1000] or type(exc).__name__,
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc)[:1000] or type(exc).__name__,
+                "step_trace": step_trace,
+                "last_successful_step_index": last_successful_step_index,
+                "browser_mode": browser_mode,
+                "runner": "desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track",
+                "whether_fast_track_used": browser_mode != "desktop_browser",
+                "whether_desktop_browser_used": browser_mode == "desktop_browser",
+                "retryable": False,
+            },
+        }
     finally:
         if browser is not None and provider.close_browser_on_session_end:
             await browser.close()

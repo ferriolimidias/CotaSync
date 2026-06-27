@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from backend.agente import executar_acao_fast_track
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.services.action_pages import validate_action_page_url
+from backend.services.actions_repository import default_ui_map_path, enrich_action_access_profile
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
 from backend.services.runs_repository import append_run, update_run
 
@@ -109,6 +112,9 @@ def _safe_legacy_file_paths(value: Any) -> list[str]:
 def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
     for key in (
+        "run_id",
+        "action_id",
+        "action_key",
         "evidencia",
         "arquivos",
         "downloaded_files",
@@ -118,6 +124,12 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "session_revalidated",
         "selector_diagnostics",
         "step_diagnostics",
+        "step_trace",
+        "step_index",
+        "step_type",
+        "step_selector",
+        "step_value_template",
+        "step_variable_key",
         "final_page",
         "input_variables",
         "variables_used",
@@ -127,8 +139,10 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "recovery_attempted",
         "operator_action_required",
         "last_page_title",
+        "page_title",
         "current_host",
         "current_url",
+        "screenshot_path",
         "checkpoint_diagnostics",
         "next_step_index",
         "next_step_type",
@@ -147,6 +161,15 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "matched_by",
         "evidence",
         "retryable",
+        "reason",
+        "exception_type",
+        "exception_message",
+        "browser_mode",
+        "runner",
+        "whether_fast_track_used",
+        "whether_desktop_browser_used",
+        "last_successful_step_index",
+        "diagnostics",
     ):
         value = result.get(key)
         if value is not None and value != [] and value != {}:
@@ -203,6 +226,206 @@ def _validate_desktop_result(action: ActionDetail, result: dict[str, Any]) -> No
     validate_action_page_url(action, final_url)
 
 
+def _is_desktop_learned_action(action: ActionDetail) -> bool:
+    learning_mode = str(action.learning_mode or "").strip().casefold()
+    return bool(
+        str(action.browser_mode or "").strip() == "desktop_browser"
+        or "desktop_browser" in learning_mode
+    )
+
+
+def _load_action_config(action: ActionDetail) -> dict[str, Any]:
+    try:
+        payload = json.loads(default_ui_map_path().read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    actions = payload.get("acoes_conhecidas") if isinstance(payload, dict) else {}
+    raw = actions.get(action.key) if isinstance(actions, dict) else None
+    return enrich_action_access_profile(raw) if isinstance(raw, dict) else {}
+
+
+def _action_steps(action_config: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
+    return [step for step in raw_steps if isinstance(step, dict)] if isinstance(raw_steps, list) else []
+
+
+async def _run_desktop_browser_replay(
+    action: ActionDetail,
+    variables: dict[str, Any],
+    run_id: str,
+) -> dict[str, Any]:
+    from backend.motor_browser import executar_acao_rapida
+
+    action_config = _load_action_config(action)
+    if not action_config:
+        raise RuntimeError("Acao aprendida desktop_browser nao encontrada em data/ui_map.json.")
+    action_config["browser_mode"] = "desktop_browser"
+    steps = _action_steps(action_config)
+    if not steps:
+        raise RuntimeError("Acao aprendida desktop_browser nao possui passos executaveis.")
+    result = await executar_acao_rapida(
+        action.key,
+        steps,
+        variables,
+        action_config=action_config,
+        run_id=run_id,
+    )
+    result["runner"] = "desktop_browser_replay"
+    result["browser_mode"] = "desktop_browser"
+    result["whether_desktop_browser_used"] = True
+    result["whether_fast_track_used"] = False
+    return result
+
+
+def _host_from_url(url: Any) -> str:
+    try:
+        return (urlsplit(str(url or "").strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
+def _first_dict(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _last_error_trace(step_trace: Any) -> dict[str, Any]:
+    if not isinstance(step_trace, list):
+        return {}
+    for item in reversed(step_trace):
+        if isinstance(item, dict) and str(item.get("status") or "").lower() == "error":
+            return item
+    for item in reversed(step_trace):
+        if isinstance(item, dict):
+            return item
+    return {}
+
+
+def _last_successful_step_index(step_trace: Any) -> int | str:
+    if not isinstance(step_trace, list):
+        return ""
+    successful = [
+        item.get("step_index")
+        for item in step_trace
+        if isinstance(item, dict) and str(item.get("status") or "").lower() == "success"
+    ]
+    return successful[-1] if successful else ""
+
+
+def _diagnostic_step_source(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    trace_item = _last_error_trace(diagnostics.get("step_trace"))
+    selector_items = diagnostics.get("selector_diagnostics")
+    selector_item = selector_items[0] if isinstance(selector_items, list) and selector_items else {}
+    step_items = diagnostics.get("step_diagnostics")
+    step_item = step_items[-1] if isinstance(step_items, list) and step_items else {}
+    return _first_dict(trace_item, selector_item, step_item, diagnostics)
+
+
+def _build_error_payload(
+    action: ActionDetail,
+    request: ActionRunRequest,
+    run: RunRecord,
+    exc: Exception,
+    diagnostics: dict[str, Any] | None,
+    *,
+    runner: str,
+    browser_mode: str,
+    whether_fast_track_used: bool,
+    whether_desktop_browser_used: bool,
+) -> dict[str, Any]:
+    raw_diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    step_source = _diagnostic_step_source(raw_diagnostics)
+    current_url = str(
+        raw_diagnostics.get("current_url")
+        or step_source.get("current_url")
+        or step_source.get("next_step_url_before")
+        or ""
+    )
+    current_host = str(
+        raw_diagnostics.get("current_host")
+        or step_source.get("current_host")
+        or step_source.get("current_url_host")
+        or _host_from_url(current_url)
+        or ""
+    )
+    page_title = str(
+        raw_diagnostics.get("page_title")
+        or raw_diagnostics.get("last_page_title")
+        or step_source.get("page_title")
+        or step_source.get("current_title")
+        or ""
+    )
+    safe_error = _safe_error_message(exc)
+    reason = str(raw_diagnostics.get("reason") or step_source.get("reason") or safe_error)
+    payload: dict[str, Any] = {
+        "run_id": run.id,
+        "action_id": action.id,
+        "action_key": action.key,
+        "step_index": step_source.get("step_index", raw_diagnostics.get("next_step_index", "")),
+        "step_type": step_source.get("step_type", step_source.get("action_type", raw_diagnostics.get("next_step_type", ""))),
+        "step_selector": step_source.get("selector", step_source.get("step_selector", raw_diagnostics.get("next_step_selector", ""))),
+        "step_value_template": step_source.get("value_template", step_source.get("step_value_template", step_source.get("valor", ""))),
+        "step_variable_key": step_source.get("variable_key", step_source.get("step_variable_key", step_source.get("variavel", ""))),
+        "current_url": current_url,
+        "current_host": current_host,
+        "page_title": page_title,
+        "last_page_title": page_title,
+        "screenshot_path": str(raw_diagnostics.get("screenshot_path") or step_source.get("screenshot_path") or ""),
+        "reason": reason,
+        "exception_type": type(exc).__name__,
+        "exception_message": safe_error,
+        "browser_mode": browser_mode,
+        "runner": runner,
+        "whether_fast_track_used": whether_fast_track_used,
+        "whether_desktop_browser_used": whether_desktop_browser_used,
+        "last_successful_step_index": raw_diagnostics.get(
+            "last_successful_step_index",
+            _last_successful_step_index(raw_diagnostics.get("step_trace")),
+        ),
+        "next_step_expected_selector": raw_diagnostics.get("next_step_expected_selector", ""),
+        "next_step_expected_text": raw_diagnostics.get("next_step_expected_text", ""),
+        "input_variables": mask_variables(request.variables),
+        "diagnostics": raw_diagnostics,
+        "retryable": bool(raw_diagnostics.get("retryable", False)),
+    }
+    for key in (
+        "operator_action_required",
+        "session_state",
+        "recovery_attempts",
+        "recovery_steps",
+        "recovery_attempted",
+        "checkpoint_diagnostics",
+        "next_step_index",
+        "next_step_type",
+        "next_step_selector",
+        "next_step_url_before",
+        "next_step_host_before",
+        "next_step_expected_url_or_host",
+        "whether_next_step_was_microsoft_click",
+        "learned_microsoft_step_compatible",
+        "next_step_selector_count",
+        "next_step_selector_visible",
+        "next_step_text_count",
+        "next_step_text_visible",
+        "matched_by",
+        "variables_used",
+        "downloaded_files",
+        "dados_extraidos",
+        "evidence",
+        "step_trace",
+        "step_diagnostics",
+        "selector_diagnostics",
+    ):
+        value = raw_diagnostics.get(key)
+        if value is not None and value != [] and value != {}:
+            payload[key] = value
+    if "selector_diagnostics" not in payload:
+        payload["selector_diagnostics"] = [step_source or {"reason": reason, "current_url": current_url, "current_host": current_host}]
+    return payload
+
+
 def start_action_run(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
     created_at = utc_now_iso()
     run = RunRecord(
@@ -225,6 +448,10 @@ def start_action_run(action: ActionDetail, request: ActionRunRequest) -> RunReco
 
 
 async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run: RunRecord) -> RunRecord:
+    runner_used = "local_fixture" if _is_local_fixture(action) else "action_runner"
+    browser_mode_used = str(action.browser_mode or "browserless").strip() or "browserless"
+    whether_fast_track_used = False
+    whether_desktop_browser_used = browser_mode_used == "desktop_browser"
     try:
         if _is_local_fixture(action):
             run.status = "success"
@@ -232,6 +459,7 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
         elif action.steps_count <= 0:
             raise RuntimeError("Acao aprendida nao possui passos para execucao.")
         elif request.session_id:
+            runner_used = "demo_session_replay"
             from backend.services.demo_session import demo_session_manager
 
             result = await demo_session_manager.execute_action(
@@ -245,7 +473,52 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             run.result_payload = _safe_result_payload(result)
             if run.result_payload is not None:
                 run.result_payload.setdefault("input_variables", mask_variables(request.variables))
+                run.result_payload.setdefault("run_id", run.id)
+                run.result_payload.setdefault("action_id", action.id)
+                run.result_payload.setdefault("action_key", action.key)
+                run.result_payload.setdefault("browser_mode", browser_mode_used)
+                run.result_payload.setdefault("runner", runner_used)
+                run.result_payload.setdefault("whether_fast_track_used", False)
+                run.result_payload.setdefault("whether_desktop_browser_used", browser_mode_used == "desktop_browser")
+        elif _is_desktop_learned_action(action):
+            runner_used = "desktop_browser_replay"
+            browser_mode_used = "desktop_browser"
+            whether_fast_track_used = False
+            whether_desktop_browser_used = True
+            result = await _run_desktop_browser_replay(action, request.variables, run.id)
+            text = str(result.get("texto") or result.get("motivo") or "").strip()
+            execution_status = str(result.get("status") or "").strip().lower()
+            if execution_status in {"erro", "error"} or text.startswith("❌") or "Falha" in text or "falha" in text:
+                execution_error = RuntimeError(
+                    str(result.get("error_message") or result.get("motivo") or text or "Falha na execucao da acao.")
+                )
+                page_diagnostics = result.get("page_diagnostics")
+                if isinstance(page_diagnostics, dict):
+                    page_diagnostics.setdefault("runner", runner_used)
+                    page_diagnostics.setdefault("browser_mode", browser_mode_used)
+                    page_diagnostics.setdefault("whether_fast_track_used", False)
+                    page_diagnostics.setdefault("whether_desktop_browser_used", True)
+                    execution_error.diagnostics = page_diagnostics  # type: ignore[attr-defined]
+                elif isinstance(result, dict):
+                    execution_error.diagnostics = result  # type: ignore[attr-defined]
+                raise execution_error
+
+            _validate_desktop_result(action, result)
+            run.status = "success"
+            run.result_payload = _safe_result_payload(result)
+            if run.result_payload is not None:
+                run.result_payload.setdefault("input_variables", mask_variables(request.variables))
+                run.result_payload.setdefault("run_id", run.id)
+                run.result_payload.setdefault("action_id", action.id)
+                run.result_payload.setdefault("action_key", action.key)
+                run.result_payload.setdefault("browser_mode", browser_mode_used)
+                run.result_payload.setdefault("runner", runner_used)
+                run.result_payload.setdefault("whether_fast_track_used", False)
+                run.result_payload.setdefault("whether_desktop_browser_used", True)
         else:
+            runner_used = "legacy_fast_track"
+            whether_fast_track_used = True
+            whether_desktop_browser_used = False
             result = await executar_acao_fast_track(action.key, request.variables, run.id)
             text = str(result.get("texto") or "").strip()
             execution_status = str(result.get("status") or "").strip().lower()
@@ -263,6 +536,13 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             run.result_payload = _safe_result_payload(result)
             if run.result_payload is not None:
                 run.result_payload.setdefault("input_variables", mask_variables(request.variables))
+                run.result_payload.setdefault("run_id", run.id)
+                run.result_payload.setdefault("action_id", action.id)
+                run.result_payload.setdefault("action_key", action.key)
+                run.result_payload.setdefault("browser_mode", browser_mode_used)
+                run.result_payload.setdefault("runner", runner_used)
+                run.result_payload.setdefault("whether_fast_track_used", True)
+                run.result_payload.setdefault("whether_desktop_browser_used", False)
     except Exception as exc:
         safe_error = _safe_error_message(exc)
         logger.info("Run %s finalizada com erro do tipo %s", run.id, type(exc).__name__)
@@ -270,55 +550,29 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
         run.error_message = safe_error
         diagnostics = getattr(exc, "diagnostics", None)
         if isinstance(diagnostics, dict):
-            payload: dict[str, Any] = {"retryable": bool(diagnostics.get("retryable", False))}
-            for key in (
-                "operator_action_required",
-                "session_state",
-                "recovery_attempts",
-                "recovery_steps",
-                "recovery_attempted",
-                "last_page_title",
-                "current_host",
-                "current_url",
-                "checkpoint_diagnostics",
-                "next_step_index",
-                "next_step_type",
-                "next_step_selector",
-                "next_step_url_before",
-                "next_step_host_before",
-                "next_step_expected_selector",
-                "next_step_expected_url_or_host",
-                "next_step_expected_text",
-                "whether_next_step_was_microsoft_click",
-                "learned_microsoft_step_compatible",
-                "next_step_selector_count",
-                "next_step_selector_visible",
-                "next_step_text_count",
-                "next_step_text_visible",
-                "matched_by",
-                "reason",
-                "variables_used",
-                "downloaded_files",
-                "dados_extraidos",
-                "evidence",
-            ):
-                value = diagnostics.get(key)
-                if value is not None and value != [] and value != {}:
-                    payload[key] = value
-            if isinstance(diagnostics.get("selector_diagnostics"), list):
-                payload["selector_diagnostics"] = diagnostics["selector_diagnostics"]
-            elif any(key in diagnostics for key in ("selector", "current_url", "page_title")):
-                payload["selector_diagnostics"] = [diagnostics]
-            elif diagnostics:
-                payload["selector_diagnostics"] = [diagnostics]
-            if isinstance(diagnostics.get("step_diagnostics"), list):
-                payload["step_diagnostics"] = diagnostics["step_diagnostics"]
-            elif isinstance(diagnostics.get("step_diagnostic"), dict):
-                payload["step_diagnostics"] = [diagnostics["step_diagnostic"]]
-            payload["input_variables"] = mask_variables(request.variables)
-            run.result_payload = payload
+            run.result_payload = _build_error_payload(
+                action,
+                request,
+                run,
+                exc,
+                diagnostics,
+                runner=runner_used,
+                browser_mode=browser_mode_used,
+                whether_fast_track_used=whether_fast_track_used,
+                whether_desktop_browser_used=whether_desktop_browser_used,
+            )
         else:
-            run.result_payload = {"input_variables": mask_variables(request.variables), "retryable": False}
+            run.result_payload = _build_error_payload(
+                action,
+                request,
+                run,
+                exc,
+                {},
+                runner=runner_used,
+                browser_mode=browser_mode_used,
+                whether_fast_track_used=whether_fast_track_used,
+                whether_desktop_browser_used=whether_desktop_browser_used,
+            )
     finally:
         summary_result = await build_operational_summary_result(
             action,
