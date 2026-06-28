@@ -184,6 +184,31 @@ class OperationalSummaryTests(unittest.TestCase):
             "A ação foi executada, mas não encontrei o campo Qtd. Pcls. Pagas na tela final.",
         )
 
+    def test_reviewed_overlay_summary_instruction_returns_only_target_value(self) -> None:
+        summary = deterministic_operational_summary(
+            _action(
+                extraction_targets=[],
+                reviewed_overlay={
+                    "review_status": "approved",
+                    "summary_instruction": (
+                        "Retorne somente a quantidade de parcelas pagas encontrada no campo "
+                        "Qtd. Pcls. Pagas. Não traga outros dados da tela."
+                    ),
+                    "extraction": {
+                        "target_label_user": "número de parcelas pagas",
+                        "screen_label": "Qtd. Pcls. Pagas",
+                        "return_format": "somente o número",
+                    },
+                },
+            ),
+            status="success",
+            result_payload={
+                "final_page_dom": "<table><tr><td>Qtd. Pcls. Pagas</td><td>032</td></tr></table>",
+                "final_page_text": "Cliente: Maria\nQtd. Pcls. Pagas\n032\nSaldo: 1000",
+            },
+        )
+        self.assertEqual(summary, "032")
+
     def test_single_extracted_target_summary_is_generic(self) -> None:
         status_summary = deterministic_operational_summary(
             _action(extraction_targets=["Status"]),

@@ -131,6 +131,8 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "step_value_template",
         "step_variable_key",
         "final_page",
+        "final_page_text",
+        "final_page_dom",
         "input_variables",
         "variables_used",
         "session_state",
@@ -170,6 +172,9 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "whether_desktop_browser_used",
         "last_successful_step_index",
         "diagnostics",
+        "validation_review",
+        "extraction_candidates",
+        "reviewed_overlay",
     ):
         value = result.get(key)
         if value is not None and value != [] and value != {}:
@@ -426,7 +431,12 @@ def _build_error_payload(
     return payload
 
 
-def start_action_run(action: ActionDetail, request: ActionRunRequest) -> RunRecord:
+def start_action_run(
+    action: ActionDetail,
+    request: ActionRunRequest,
+    *,
+    run_type: str = "action_run",
+) -> RunRecord:
     created_at = utc_now_iso()
     run = RunRecord(
         id=str(uuid4()),
@@ -434,6 +444,7 @@ def start_action_run(action: ActionDetail, request: ActionRunRequest) -> RunReco
         action_key=action.key,
         status="pending",
         mode=request.mode,
+        run_type=str(run_type or "action_run"),
         requested_by=request.requested_by.strip() or "api",
         session_id=request.session_id,
         created_at=created_at,

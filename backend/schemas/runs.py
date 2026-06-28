@@ -22,6 +22,7 @@ class RunRecord(BaseModel):
     action_key: str
     status: RunStatus
     mode: RunMode = "sync"
+    run_type: str = "action_run"
     requested_by: str = "api"
     session_id: str | None = None
     created_at: str

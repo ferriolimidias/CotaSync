@@ -32,6 +32,7 @@ from backend.services.action_pages import (
     validate_action_page_url,
 )
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
+from backend.services.extraction_targets import extract_value_near_label
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
 
@@ -1322,6 +1323,65 @@ async def executar_acao_rapida(
                             continue
                 return page_to_click.locator(selector)
 
+            async def apply_reviewed_overlay_waits(page_to_wait: Any, step_index: int) -> list[dict[str, Any]]:
+                overlay = action_config.get("reviewed_overlay") if isinstance(action_config, dict) else {}
+                if not isinstance(overlay, dict):
+                    return []
+                raw_waits = overlay.get("waits") or overlay.get("wait_suggestions") or []
+                if not isinstance(raw_waits, list):
+                    return []
+                applied: list[dict[str, Any]] = []
+                for raw_wait in raw_waits:
+                    if not isinstance(raw_wait, dict):
+                        continue
+                    try:
+                        after_index = int(raw_wait.get("after_step_index"))
+                    except (TypeError, ValueError):
+                        continue
+                    if after_index != step_index:
+                        continue
+                    strategy = str(raw_wait.get("strategy") or raw_wait.get("type") or "").strip().lower()
+                    target = str(raw_wait.get("target") or raw_wait.get("selector") or raw_wait.get("text") or "").strip()
+                    started = time.monotonic()
+                    status = "success"
+                    try:
+                        if strategy in {"wait_for_text", "text"} and target:
+                            await page_to_wait.get_by_text(target, exact=False).first.wait_for(
+                                state="visible",
+                                timeout=15000,
+                            )
+                        elif strategy in {"wait_for_selector", "selector"} and target:
+                            await page_to_wait.locator(target).first.wait_for(state="visible", timeout=15000)
+                        elif strategy in {"networkidle", "load_state"}:
+                            await page_to_wait.wait_for_load_state("networkidle", timeout=15000)
+                        elif strategy in {"delay", "sleep"}:
+                            await asyncio.sleep(min(5.0, max(0.1, float(raw_wait.get("seconds") or 1))))
+                        else:
+                            continue
+                    except Exception as exc:
+                        status = "timeout"
+                        applied.append(
+                            {
+                                "after_step_index": step_index,
+                                "strategy": strategy,
+                                "target": target,
+                                "status": status,
+                                "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+                                "reason": str(exc)[:300],
+                            }
+                        )
+                        continue
+                    applied.append(
+                        {
+                            "after_step_index": step_index,
+                            "strategy": strategy,
+                            "target": target,
+                            "status": status,
+                            "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+                        }
+                    )
+                return applied
+
             def step_for_diagnostic(step: dict[str, Any] | None, index: int | None) -> dict[str, Any] | None:
                 if not isinstance(step, dict):
                     return None
@@ -1476,17 +1536,25 @@ async def executar_acao_rapida(
                             pass
 
                     elif tipo_acao == "extrair_texto":
-                        elemento = page.locator(seletor).first
-                        tag_name = await elemento.evaluate("el => el.tagName.toLowerCase()")
-
-                        if tag_name in ["input", "textarea"]:
-                            texto = await elemento.input_value(timeout=5000)
-                            if not texto:
-                                texto = await elemento.get_attribute("value", timeout=5000) or ""
+                        extraction_name = str(passo.get("nome") or passo.get("target_label") or "").strip() or seletor
+                        strategy = str(passo.get("extraction_strategy") or "").strip().lower()
+                        if (strategy == "near_label" or not seletor) and extraction_name:
+                            final_dom_for_label = await page.content()
+                            final_text_for_label = await page.locator("body").inner_text(timeout=5000)
+                            texto = extract_value_near_label(final_dom_for_label, extraction_name) or extract_value_near_label(
+                                final_text_for_label,
+                                extraction_name,
+                            )
                         else:
-                            texto = await elemento.inner_text(timeout=5000)
+                            elemento = page.locator(seletor).first
+                            tag_name = await elemento.evaluate("el => el.tagName.toLowerCase()")
 
-                        extraction_name = str(passo.get("nome") or "").strip() or seletor
+                            if tag_name in ["input", "textarea"]:
+                                texto = await elemento.input_value(timeout=5000)
+                                if not texto:
+                                    texto = await elemento.get_attribute("value", timeout=5000) or ""
+                            else:
+                                texto = await elemento.inner_text(timeout=5000)
                         dados_extraidos[extraction_name] = texto.strip()
 
                     elif tipo_acao == "download_pdf":
@@ -1496,6 +1564,7 @@ async def executar_acao_rapida(
                         downloaded_files.append(metadata)
                         arquivos_baixados.append(str(metadata["path"]))
                     after_state = await current_browser_state(page)
+                    overlay_waits_applied = await apply_reviewed_overlay_waits(page, step_index)
                     trace_item.update(
                         {
                             "status": "success",
@@ -1505,6 +1574,8 @@ async def executar_acao_rapida(
                             "title": after_state["page_title"],
                         }
                     )
+                    if overlay_waits_applied:
+                        trace_item["reviewed_overlay_waits"] = overlay_waits_applied
                     last_successful_step_index = step_index
 
                 except ActionPageError:
@@ -1566,16 +1637,29 @@ async def executar_acao_rapida(
             await page.screenshot(path=str(caminho_execucao), full_page=False)
             await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
             final_title = (await page.title()).strip()[:200]
+            final_page_text = ""
+            final_page_dom = ""
+            try:
+                final_page_text = (await page.locator("body").inner_text(timeout=5000)).strip()[:20000]
+            except Exception:
+                final_page_text = ""
+            try:
+                final_page_dom = (await page.content()).strip()[:50000]
+            except Exception:
+                final_page_dom = ""
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
             return {
                 "status": "sucesso",
                 "evidencia": caminho_execucao.name,
+                "screenshot_path": str(caminho_execucao.relative_to(_raiz_projeto())),
                 "arquivos_baixados": arquivos_baixados,
                 "downloaded_files": downloaded_files,
                 "main_file": downloaded_files[0] if downloaded_files else None,
                 "dados_extraidos": dados_extraidos,
                 "passos_executados": len(passos_playwright),
                 "final_page": {"title": final_title, "url": _safe_result_url(page.url)},
+                "final_page_text": final_page_text,
+                "final_page_dom": final_page_dom,
                 "session_state": last_session_state or ("authenticated_system" if browser_mode == "desktop_browser" else ""),
                 "recovery_attempts": total_recovery_attempts,
                 "recovery_steps": recovery_steps,

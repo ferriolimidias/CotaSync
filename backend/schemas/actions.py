@@ -24,6 +24,12 @@ class ActionSummary(BaseModel):
     learning_mode: str | None = None
     ai_reviewed: bool = False
     ai_observer_summary: str | None = None
+    review_status: str | None = None
+    review_last_run_id: str | None = None
+    reviewed_overlay: dict[str, Any] = Field(default_factory=dict)
+    ai_review_summary: str | None = None
+    final_summary_instruction: str | None = None
+    extraction_review: dict[str, Any] = Field(default_factory=dict)
     replay_hints: list[str] = Field(default_factory=list)
     waits: list[dict] = Field(default_factory=list)
     wait_strategies: list[dict] = Field(default_factory=list)

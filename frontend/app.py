@@ -165,6 +165,59 @@ def _executar_acao_aprendida_com_polling(
     return _run_to_resultado_direto(run)
 
 
+def _obter_acao_api(action_id: str) -> dict[str, object]:
+    detail = demo_api_request(
+        "GET",
+        f"/api/actions/{quote(str(action_id), safe='')}",
+        api_base_url=API_BASE_URL,
+        timeout=QUICK_ACTION_POLL_TIMEOUT_SECONDS,
+    )
+    action = detail.get("action", {}) if isinstance(detail, dict) else {}
+    return action if isinstance(action, dict) else {}
+
+
+def _validar_acao_com_ia_polling(
+    action_id: str,
+    variables: dict[str, object],
+    *,
+    requested_by: str,
+) -> dict[str, object]:
+    encoded_action_id = quote(str(action_id), safe="")
+    run_response = demo_api_request(
+        "POST",
+        f"/api/actions/{encoded_action_id}/validate-review",
+        {"variables": variables, "mode": "async", "requested_by": requested_by},
+        api_base_url=API_BASE_URL,
+        timeout=QUICK_ACTION_START_TIMEOUT_SECONDS,
+    )
+    run = run_response.get("run", {}) if isinstance(run_response, dict) else {}
+    if not isinstance(run, dict):
+        raise DemoApiError("Resposta invalida da API da demonstracao.")
+    run_id = str(run.get("id") or "").strip()
+    if not run_id:
+        raise DemoApiError("Run de validacao nao identificada pela API.")
+
+    status_slot = st.empty()
+    deadline = monotonic() + QUICK_ACTION_MAX_WAIT_SECONDS
+    while str(run.get("status") or "") in {"pending", "running"}:
+        remaining = int(max(0, deadline - monotonic()))
+        status_slot.info(f"Validando aprendizado com replay real... até {remaining}s restantes.")
+        if monotonic() >= deadline:
+            return _run_to_resultado_direto(run)
+        sleep(QUICK_ACTION_POLL_INTERVAL_SECONDS)
+        detail = demo_api_request(
+            "GET",
+            f"/api/runs/{quote(run_id, safe='')}",
+            api_base_url=API_BASE_URL,
+            timeout=QUICK_ACTION_POLL_TIMEOUT_SECONDS,
+        )
+        run = detail.get("run", {}) if isinstance(detail, dict) else {}
+        if not isinstance(run, dict):
+            raise DemoApiError("Resposta invalida da API da demonstracao.")
+    status_slot.empty()
+    return _run_to_resultado_direto(run)
+
+
 def _defaults_sessao_agendamentos() -> None:
     st.session_state.setdefault("rotina_boletos", True)
     st.session_state.setdefault("aviso_contemplados", False)
@@ -958,6 +1011,22 @@ def _render_demo_v01() -> None:
                 st.caption(f"Modo: {saved_action.get('learning_mode') or 'aprendizado demonstrado observado por IA'}")
             elif observer_summary:
                 st.info(observer_summary)
+            review_status = str(saved_action.get("review_status") or "").strip() or "not_reviewed"
+            status_labels = {
+                "not_reviewed": "não revisada",
+                "approved": "aprovada",
+                "needs_attention": "precisa atenção",
+                "failed": "falhou",
+                "running": "em revisão",
+            }
+            if review_status == "approved":
+                st.success("Validação com IA: aprovada")
+            elif review_status == "needs_attention":
+                st.warning("Validação com IA: precisa atenção")
+            elif review_status == "failed":
+                st.error("Validação com IA: falhou")
+            else:
+                st.info(f"Validação com IA: {status_labels.get(review_status, review_status)}")
             run_variables: dict[str, str] = {}
             for variable in saved_action.get("variables", []):
                 variable_name, variable_label, _required = _rotulo_variavel(variable)
@@ -968,8 +1037,49 @@ def _render_demo_v01() -> None:
                     placeholder="Ex.: PED-2002",
                     key=f"demo_run_variable_{session_id}_{variable_name}",
                 )
+            if st.button(
+                "Testar rotina e revisar com IA",
+                key="demo_validate_review_action",
+                use_container_width=True,
+            ):
+                try:
+                    result = _validar_acao_com_ia_polling(
+                        str(saved_action.get("id", "")),
+                        run_variables,
+                        requested_by="streamlit-review",
+                    )
+                    st.session_state.demo_validation_review_run = result
+                    refreshed = _obter_acao_api(str(saved_action.get("id", "")))
+                    if refreshed:
+                        st.session_state.demo_saved_action = refreshed
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+            overlay = saved_action.get("reviewed_overlay", {})
+            if isinstance(overlay, dict) and overlay:
+                extraction = overlay.get("extraction", {})
+                extraction = extraction if isinstance(extraction, dict) else {}
+                with st.expander("Revisão prática da IA", expanded=review_status != "approved"):
+                    st.write(
+                        {
+                            "status": overlay.get("review_status", review_status),
+                            "alvo_confirmado": extraction.get("screen_label") or extraction.get("target_label_user"),
+                            "exemplo": extraction.get("expected_example"),
+                            "instrucao_final": overlay.get("summary_instruction"),
+                            "waits": overlay.get("waits", []),
+                            "riscos": overlay.get("risks", []),
+                        }
+                    )
+            validation_run = st.session_state.get("demo_validation_review_run")
+            if isinstance(validation_run, dict) and validation_run:
+                if validation_run.get("status") == "success":
+                    st.success(str(validation_run.get("texto") or "Validação concluída."))
+                elif validation_run.get("status") == "error":
+                    st.error(str(validation_run.get("texto") or "Validação falhou."))
             if st.button("Executar ação aprendida", key="demo_run_action", type="primary", use_container_width=True):
                 try:
+                    if review_status != "approved":
+                        st.warning("Esta rotina ainda não foi validada com IA.")
                     result = _executar_acao_aprendida_com_polling(
                         str(saved_action.get("id", "")),
                         run_variables,

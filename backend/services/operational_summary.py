@@ -11,6 +11,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from backend.services.extraction_targets import (
+    extract_value_near_label,
     friendly_extraction_label,
     normalize_label_key,
     readable_extraction_target,
@@ -82,6 +83,29 @@ def _metadata(action: Any, key: str, default: Any = None) -> Any:
                 return action.get(candidate)
         return default
     return getattr(action, key, default)
+
+
+def _reviewed_overlay(action: Any) -> dict[str, Any]:
+    overlay = _metadata(action, "reviewed_overlay", {})
+    return overlay if isinstance(overlay, dict) else {}
+
+
+def _overlay_extraction(action: Any) -> dict[str, Any]:
+    overlay = _reviewed_overlay(action)
+    extraction = overlay.get("extraction")
+    if isinstance(extraction, dict):
+        return extraction
+    extraction = _metadata(action, "extraction_review", {})
+    return extraction if isinstance(extraction, dict) else {}
+
+
+def _final_summary_instruction(action: Any) -> str:
+    overlay = _reviewed_overlay(action)
+    return _clean_scalar(
+        overlay.get("summary_instruction")
+        or _metadata(action, "final_summary_instruction", "")
+        or ""
+    )
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -323,6 +347,11 @@ def _raw_steps(action: Any) -> list[dict[str, Any]]:
 def extraction_targets(action: Any) -> list[str]:
     configured = _metadata(action, "extraction_targets", [])
     targets = [str(item).strip() for item in configured if str(item).strip()] if isinstance(configured, list) else []
+    overlay_extraction = _overlay_extraction(action)
+    for key in ("target_label_user", "best_label", "screen_label", "nearby_text"):
+        label = str(overlay_extraction.get(key) or "").strip()
+        if label and label not in targets:
+            targets.insert(0, label)
     if targets:
         return targets
     for step in _raw_steps(action):
@@ -349,16 +378,47 @@ def _safe_extracted_values(action: Any, result_payload: dict[str, Any] | None) -
                 selector_labels[selector] = label
 
     safe: dict[str, str] = {}
+    overlay_extraction = _overlay_extraction(action)
+    overlay_labels = [
+        str(overlay_extraction.get(key) or "").strip()
+        for key in ("best_label", "screen_label", "target_label_user", "nearby_text")
+    ]
+    overlay_labels = [item for item in overlay_labels if item]
+    overlay_selector = str(overlay_extraction.get("selector_hint") or overlay_extraction.get("best_selector") or "").strip()
+    overlay_display = friendly_extraction_label(
+        overlay_extraction.get("target_label_user")
+        or overlay_extraction.get("best_label")
+        or (targets[0] if targets else "")
+    )
     for index, (raw_key, raw_value) in enumerate(raw.items()):
         key = str(raw_key or "").strip()
         if _is_sensitive_key(key):
             continue
         label = selector_labels.get(key) or key
+        if overlay_selector and key == overlay_selector and overlay_display:
+            label = overlay_display
+        elif overlay_labels and normalize_label_key(label) in {normalize_label_key(item) for item in overlay_labels}:
+            label = overlay_display or label
         if _is_selector_like(label):
             label = targets[index] if index < len(targets) else f"resultado {index + 1}"
         value = _clean_scalar(raw_value)
         if value:
             safe[_friendly_extraction_label(label)] = value
+    if overlay_labels:
+        payload = result_payload if isinstance(result_payload, dict) else {}
+        search_sources = [
+            payload.get("final_page_dom"),
+            payload.get("final_page_text"),
+            _full_page_text(payload),
+        ]
+        wanted_key = normalize_label_key(overlay_display)
+        if not any(normalize_label_key(key) == wanted_key for key in safe):
+            for label in overlay_labels:
+                for source in search_sources:
+                    value = _clean_scalar(extract_value_near_label(source, label))
+                    if value:
+                        safe[overlay_display or _friendly_extraction_label(label)] = value
+                        return safe
     return safe
 
 
@@ -508,6 +568,19 @@ def deterministic_operational_summary(
 
     extracted = _safe_extracted_values(action, result_payload)
     has_files = _has_files(result_payload)
+    summary_instruction = _final_summary_instruction(action)
+    overlay_extraction = _overlay_extraction(action)
+    return_format = _clean_scalar(overlay_extraction.get("return_format") or "")
+    if extracted and summary_instruction:
+        only_key, only_value = next(iter(extracted.items()))
+        if len(extracted) == 1 and (
+            "somente" in summary_instruction.casefold()
+            or "somente" in return_format.casefold()
+            or "apenas" in return_format.casefold()
+        ):
+            return only_value
+        if len(extracted) == 1:
+            return f"{only_key}: {only_value}"
     full_page_text = _full_page_text(result_payload)
     if full_page_text:
         full_page_summary = _summarize_full_page_text(full_page_text, has_files=has_files)
@@ -645,6 +718,7 @@ async def build_operational_summary_result(
         "objective": _clean_scalar(_metadata(action, "objective", "")),
         "expected_result": _clean_scalar(_metadata(action, "expected_result", "")),
         "output_type": _clean_scalar(_metadata(action, "output_type", "")),
+        "summary_instruction": _final_summary_instruction(action),
         "status": "success" if str(status).lower() == "success" else "error",
         "extracted_data": extracted_context,
         "has_configured_extraction": bool(extraction_targets(action)),
@@ -654,6 +728,7 @@ async def build_operational_summary_result(
     }
     prompt = (
         "Você é o assistente operacional do CotaSync. Resuma o resultado da execução para o usuário final. "
+        "Se houver summary_instruction, siga essa instrução como prioridade. "
         "Use apenas os dados extraídos. Não invente. Ignore menus de navegação quando não forem o conteúdo "
         "principal. Se a tela parecer ser apenas um formulário/filtro sem resultado listado, diga isso "
         "claramente. Seja direto, em português, com no máximo 5 linhas, exceto se houver muitos dados úteis. "

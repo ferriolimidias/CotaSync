@@ -245,6 +245,12 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         learning_mode=learning_mode or None,
         ai_reviewed=bool(data.get("ai_reviewed", False)),
         ai_observer_summary=str(data.get("ai_observer_summary") or "").strip() or None,
+        review_status=str(data.get("review_status") or "").strip() or None,
+        review_last_run_id=str(data.get("review_last_run_id") or "").strip() or None,
+        reviewed_overlay=data.get("reviewed_overlay", {}) if isinstance(data.get("reviewed_overlay"), dict) else {},
+        ai_review_summary=str(data.get("ai_review_summary") or "").strip() or None,
+        final_summary_instruction=str(data.get("final_summary_instruction") or "").strip() or None,
+        extraction_review=data.get("extraction_review", {}) if isinstance(data.get("extraction_review"), dict) else {},
         replay_hints=data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
         waits=data.get("waits", []) if isinstance(data.get("waits"), list) else [],
         wait_strategies=(

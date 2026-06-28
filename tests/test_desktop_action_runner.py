@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -680,6 +681,130 @@ class DesktopActionRunTests(unittest.TestCase):
             created = response.json()["run"]
             listed = client.get("/api/runs").json()["runs"]
         self.assertTrue(any(item["id"] == created["id"] for item in listed))
+
+    def test_validate_review_endpoint_creates_validation_run_and_saves_overlay(self) -> None:
+        raw_action = {
+            "nome_amigavel": "Teste2",
+            "browser_mode": "desktop_browser",
+            "url_inicial": TARGET_URL,
+            "expected_system_host": "nwcweb.randonconsorcios.com.br",
+            "passos_playwright": [{"tipo": "clicar", "seletor": "#buscar", "valor": ""}],
+            "robust_steps": [{"tipo": "clicar", "seletor": "#buscar", "valor": ""}],
+            "learning_events": [{"step_index": 0, "event_type": "click", "selector": "#buscar"}],
+            "variable_schema": [],
+            "variaveis_necessarias": [],
+            "extraction_targets": ["Qtd. Pcls. Pagas"],
+            "extraction_target": "Qtd. Pcls. Pagas",
+            "objective": "número de parcelas pagas",
+            "expected_result": "Retornar número de parcelas pagas",
+            "ai_result_summary_enabled": False,
+        }
+        execution = {
+            "status": "success",
+            "texto": "concluida",
+            "passos_executados": 1,
+            "final_page": {"title": "Consulta", "url": TARGET_URL},
+            "final_page_text": "Cliente: Maria\nQtd. Pcls. Pagas: 032\nSaldo: 100",
+            "final_page_dom": "<table><tr><td>Qtd. Pcls. Pagas</td><td>032</td></tr></table>",
+            "dados_extraidos": {},
+            "step_trace": [{"step_index": 0, "step_type": "clicar", "status": "success"}],
+            "browser_mode": "desktop_browser",
+            "runner": "desktop_browser_replay",
+            "whether_fast_track_used": False,
+            "whether_desktop_browser_used": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ui_path = Path(tmp) / "ui_map.json"
+            runs_path = Path(tmp) / "runs.json"
+            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Teste2": raw_action}}), encoding="utf-8")
+            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
+                "backend.services.action_runner.default_ui_map_path", return_value=ui_path
+            ), patch("backend.services.action_validation_review.default_ui_map_path", return_value=ui_path), patch(
+                "backend.services.runs_repository.default_runs_path", return_value=runs_path
+            ), patch(
+                "backend.services.action_runner._run_desktop_browser_replay",
+                new=AsyncMock(return_value=execution),
+            ) as desktop_replay, patch(
+                "backend.services.action_validation_review._ai_review",
+                new=AsyncMock(
+                    return_value={
+                        "review_status": "approved",
+                        "extraction_target_confirmed": True,
+                        "best_label": "Qtd. Pcls. Pagas",
+                        "best_selector": "",
+                        "best_value_example": "032",
+                        "return_format": "somente o número",
+                        "summary_instruction": (
+                            "Retorne somente a quantidade de parcelas pagas encontrada no campo "
+                            "Qtd. Pcls. Pagas. Não inclua outros dados da tela."
+                        ),
+                        "wait_suggestions": [{"after_step_index": 0, "strategy": "wait_for_text", "target": "Qtd. Pcls. Pagas"}],
+                        "selector_alternatives": [],
+                        "risks": [],
+                        "reasoning_summary": "Alvo confirmado na tela final.",
+                    }
+                ),
+            ):
+                client = TestClient(app)
+                response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
+                self.assertEqual(response.status_code, 200)
+                created = response.json()["run"]
+                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Teste2"]
+
+        desktop_replay.assert_awaited_once()
+        self.assertEqual(created["run_type"], "validation_review")
+        self.assertEqual(created["status"], "success")
+        self.assertEqual(saved["review_status"], "approved")
+        self.assertEqual(saved["reviewed_overlay"]["extraction"]["expected_example"], "032")
+        self.assertIn("Qtd. Pcls. Pagas", saved["final_summary_instruction"])
+        self.assertEqual(saved["robust_steps"], raw_action["robust_steps"])
+        self.assertEqual(saved["learning_events"], raw_action["learning_events"])
+
+    def test_validate_review_failure_marks_failed_and_preserves_diagnostics(self) -> None:
+        raw_action = {
+            "nome_amigavel": "Teste2",
+            "browser_mode": "desktop_browser",
+            "url_inicial": TARGET_URL,
+            "expected_system_host": "nwcweb.randonconsorcios.com.br",
+            "passos_playwright": [{"tipo": "clicar", "seletor": "#buscar", "valor": ""}],
+            "robust_steps": [{"tipo": "clicar", "seletor": "#buscar", "valor": ""}],
+            "learning_events": [{"step_index": 0, "event_type": "click", "selector": "#buscar"}],
+            "variaveis_necessarias": [],
+            "ai_result_summary_enabled": False,
+        }
+        execution = {
+            "status": "erro",
+            "motivo": "Falha na execução",
+            "page_diagnostics": {
+                "reason": "Elemento nao encontrado",
+                "step_trace": [{"step_index": 0, "status": "error"}],
+                "browser_mode": "desktop_browser",
+                "runner": "desktop_browser_replay",
+                "whether_fast_track_used": False,
+                "whether_desktop_browser_used": True,
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ui_path = Path(tmp) / "ui_map.json"
+            runs_path = Path(tmp) / "runs.json"
+            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Teste2": raw_action}}), encoding="utf-8")
+            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
+                "backend.services.action_runner.default_ui_map_path", return_value=ui_path
+            ), patch("backend.services.action_validation_review.default_ui_map_path", return_value=ui_path), patch(
+                "backend.services.runs_repository.default_runs_path", return_value=runs_path
+            ), patch(
+                "backend.services.action_runner._run_desktop_browser_replay",
+                new=AsyncMock(return_value=execution),
+            ):
+                client = TestClient(app)
+                response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
+                self.assertEqual(response.status_code, 200)
+                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Teste2"]
+
+        self.assertEqual(saved["review_status"], "failed")
+        self.assertEqual(saved["reviewed_overlay"]["review_status"], "failed")
+        self.assertIn("diagnostics", saved["reviewed_overlay"])
+        self.assertEqual(saved["robust_steps"], raw_action["robust_steps"])
 
     def test_async_run_persists_running_then_latest_result(self) -> None:
         action = desktop_action().model_copy(
