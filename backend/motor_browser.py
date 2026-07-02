@@ -33,6 +33,7 @@ from backend.services.action_pages import (
 )
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
 from backend.services.extraction_targets import extract_value_near_label
+from backend.services.file_names import safe_file_name
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
 
@@ -765,7 +766,7 @@ async def acionar_ia_cartografa(
     checklist_base = checklist_aprovada if checklist_aprovada else [instrucao_limpa]
     checklist_original = [re.sub(r"\{(.*?)\}", r"\1", str(item)) for item in checklist_base]
     objetivo_checklist = " | ".join(str(item) for item in checklist_original if str(item).strip()) or instrucao_limpa
-    nome_arquivo = nome_acao.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    nome_arquivo = safe_file_name(nome_acao)
     screenshot_path = _DATA_DIR / f"mapeamento_{nome_arquivo}.png"
     passos_aprendidos: list[dict[str, str]] = []
     dados_extraidos: dict[str, str] = {}
@@ -1029,7 +1030,7 @@ async def executar_acao_rapida(
 
     raiz = _raiz_projeto()
     url_sistema, usuario, senha = _carregar_erp_config()
-    nome_arquivo = re.sub(r"[^\w\-]+", "_", str(nome_acao or "acao"), flags=re.UNICODE).strip("_")
+    nome_arquivo = safe_file_name(nome_acao)
     caminho_execucao = _DATA_DIR / f"execucao_{nome_arquivo}.png"
     caminho_evidencia_padrao = raiz / NOME_ARQUIVO_EVIDENCIA
     arquivos_baixados: list[str] = []
@@ -1073,12 +1074,17 @@ async def executar_acao_rapida(
             async def capture_error_screenshot(page_to_capture: Any | None, step_index: int, step_type: str) -> str:
                 if page_to_capture is None:
                     return ""
-                evidence_path = _DATA_DIR / "runs" / f"{run_id}_step_{step_index}_{_safe_file_name(step_type)}_error.png"
                 try:
+                    evidence_path = _DATA_DIR / "runs" / f"{run_id}_step_{step_index}_{safe_file_name(step_type)}_error.png"
                     evidence_path.parent.mkdir(parents=True, exist_ok=True)
                     await page_to_capture.screenshot(path=str(evidence_path), full_page=False, timeout=15000)
                     return str(evidence_path.relative_to(_raiz_projeto()))
-                except Exception:
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "[FAST-TRACK] Falha ao salvar screenshot de erro no passo %s: %s",
+                        step_index,
+                        type(exc).__name__,
+                    )
                     return ""
 
             async def build_step_failure_diagnostics(
@@ -1578,7 +1584,7 @@ async def executar_acao_rapida(
                         trace_item["reviewed_overlay_waits"] = overlay_waits_applied
                     last_successful_step_index = step_index
 
-                except ActionPageError:
+                except ActionPageError as e:
                     screenshot_path = await capture_error_screenshot(page, step_index, tipo_acao)
                     after_state = await current_browser_state(page)
                     trace_item.update(
@@ -1634,8 +1640,26 @@ async def executar_acao_rapida(
             if browser_mode == "desktop_browser":
                 await run_session_checkpoint(page, "final_auth_check")
                 validate_action_page_url(action_config, page.url)
-            await page.screenshot(path=str(caminho_execucao), full_page=False)
-            await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
+            screenshot_path_result = ""
+            evidence_name = ""
+            try:
+                await page.screenshot(path=str(caminho_execucao), full_page=False)
+                screenshot_path_result = str(caminho_execucao.relative_to(_raiz_projeto()))
+                evidence_name = caminho_execucao.name
+            except Exception as exc:
+                _LOGGER.warning(
+                    "[FAST-TRACK] Falha ao salvar screenshot final da execução '%s': %s",
+                    nome_acao,
+                    type(exc).__name__,
+                )
+            try:
+                await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "[FAST-TRACK] Falha ao salvar evidencia padrao da execução '%s': %s",
+                    nome_acao,
+                    type(exc).__name__,
+                )
             final_title = (await page.title()).strip()[:200]
             final_page_text = ""
             final_page_dom = ""
@@ -1650,8 +1674,8 @@ async def executar_acao_rapida(
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
             return {
                 "status": "sucesso",
-                "evidencia": caminho_execucao.name,
-                "screenshot_path": str(caminho_execucao.relative_to(_raiz_projeto())),
+                "evidencia": evidence_name,
+                "screenshot_path": screenshot_path_result,
                 "arquivos_baixados": arquivos_baixados,
                 "downloaded_files": downloaded_files,
                 "main_file": downloaded_files[0] if downloaded_files else None,

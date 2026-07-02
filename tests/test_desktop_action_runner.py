@@ -20,6 +20,7 @@ from backend.services.action_pages import (
 )
 from backend.services.action_runner import finish_action_run, run_action_sync, start_action_run
 from backend.services.actions_repository import load_actions_catalog
+from backend.services.file_names import safe_file_name
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
 
@@ -71,6 +72,70 @@ class FakeContext:
         page = FakePage("about:blank")
         self.pages.append(page)
         return page
+
+
+class FakeReplayLocator:
+    @property
+    def first(self) -> "FakeReplayLocator":
+        return self
+
+    def nth(self, _index: int) -> "FakeReplayLocator":
+        return self
+
+    async def wait_for(self, **_kwargs: object) -> None:
+        return None
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def fill(self, _value: str, **_kwargs: object) -> None:
+        raise RuntimeError("Campo indisponivel")
+
+
+class FakeReplayPage:
+    url = TARGET_URL
+
+    def locator(self, _selector: str) -> FakeReplayLocator:
+        return FakeReplayLocator()
+
+    async def title(self) -> str:
+        return "Consulta"
+
+    async def screenshot(self, **_kwargs: object) -> None:
+        raise OSError("sem permissao")
+
+
+class FakeReplayBrowser:
+    contexts: list[object] = []
+
+    async def new_context(self) -> "FakeReplayContext":
+        return FakeReplayContext()
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeReplayContext:
+    async def new_page(self) -> FakeReplayPage:
+        return FakeReplayPage()
+
+
+class FakeReplayChromium:
+    async def connect_over_cdp(self, _url: str) -> FakeReplayBrowser:
+        return FakeReplayBrowser()
+
+
+class FakeAsyncPlaywright:
+    chromium = FakeReplayChromium()
+
+    async def __aenter__(self) -> "FakeAsyncPlaywright":
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
 
 
 class FakeGuardianLocator:
@@ -601,6 +666,14 @@ class AccessProfileCatalogTests(unittest.TestCase):
 
 
 class DesktopActionRunTests(unittest.TestCase):
+    def test_safe_file_name_removes_accents_and_preserves_extension(self) -> None:
+        self.assertEqual(
+            safe_file_name("número de parcelas pagas?.png"),
+            "numero_de_parcelas_pagas.png",
+        )
+        self.assertEqual(safe_file_name("  ação: grupo/ cota * teste  "), "acao_grupo_cota_teste")
+        self.assertLessEqual(len(safe_file_name("á" * 200 + ".pdf", max_length=40)), 40)
+
     def _run_with_final_url(self, final_url: str):
         execution = {
             "status": "success",
@@ -759,6 +832,93 @@ class DesktopActionRunTests(unittest.TestCase):
         self.assertIn("Qtd. Pcls. Pagas", saved["final_summary_instruction"])
         self.assertEqual(saved["robust_steps"], raw_action["robust_steps"])
         self.assertEqual(saved["learning_events"], raw_action["learning_events"])
+
+    def test_validate_review_accepts_accented_action_name_and_preserves_variables(self) -> None:
+        raw_action = {
+            "nome_amigavel": "número de parcelas pagas",
+            "browser_mode": "desktop_browser",
+            "url_inicial": TARGET_URL,
+            "expected_system_host": "nwcweb.randonconsorcios.com.br",
+            "passos_playwright": [{"tipo": "preencher", "seletor": "#grupo", "variavel": "grupo"}],
+            "robust_steps": [{"tipo": "preencher", "seletor": "#grupo", "variavel": "grupo"}],
+            "learning_events": [{"step_index": 0, "event_type": "fill", "selector": "#grupo", "variable_key": "grupo"}],
+            "variable_schema": [{"key": "grupo", "label": "Grupo", "required": True}],
+            "variaveis_necessarias": [{"key": "grupo", "label": "Grupo", "required": True}],
+            "extraction_target": "Qtd. Pcls. Pagas",
+            "objective": "número de parcelas pagas",
+            "ai_result_summary_enabled": False,
+        }
+        execution = {
+            "status": "success",
+            "texto": "concluida",
+            "passos_executados": 1,
+            "final_page": {"title": "Consulta", "url": TARGET_URL},
+            "final_page_text": "Qtd. Pcls. Pagas: 038",
+            "final_page_dom": "<td>Qtd. Pcls. Pagas</td><td>038</td>",
+            "dados_extraidos": {"Qtd. Pcls. Pagas": "038"},
+            "input_variables": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
+            "variables_used": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
+            "step_trace": [{"step_index": 0, "step_type": "preencher", "status": "success"}],
+            "browser_mode": "desktop_browser",
+            "runner": "desktop_browser_replay",
+            "whether_fast_track_used": False,
+            "whether_desktop_browser_used": True,
+            "screenshot_path": "data/runs/review.png",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ui_path = Path(tmp) / "ui_map.json"
+            runs_path = Path(tmp) / "runs.json"
+            ui_path.write_text(json.dumps({"acoes_conhecidas": {"NumeroParcelas": raw_action}}), encoding="utf-8")
+            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
+                "backend.services.action_runner.default_ui_map_path", return_value=ui_path
+            ), patch("backend.services.action_validation_review.default_ui_map_path", return_value=ui_path), patch(
+                "backend.services.runs_repository.default_runs_path", return_value=runs_path
+            ), patch(
+                "backend.services.action_runner._run_desktop_browser_replay",
+                new=AsyncMock(return_value=execution),
+            ), patch("backend.services.action_validation_review._ai_review", new=AsyncMock(return_value=None)):
+                client = TestClient(app)
+                response = client.post(
+                    "/api/actions/numero-de-parcelas-pagas/validate-review",
+                    json={
+                        "variables": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
+                        "mode": "sync",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                created = response.json()["run"]
+                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["NumeroParcelas"]
+
+        self.assertEqual(created["status"], "success")
+        self.assertEqual(created["run_type"], "validation_review")
+        self.assertTrue(created["result_payload"]["validation_review"])
+        self.assertEqual(created["result_payload"]["variables_used"]["grupo_3"], "00")
+        self.assertEqual(created["result_payload"]["dados_extraidos"]["Qtd. Pcls. Pagas"], "038")
+        self.assertEqual(saved["reviewed_overlay"]["extraction"]["expected_example"], "038")
+        self.assertIn("summary_instruction", saved["reviewed_overlay"])
+
+    def test_validation_replay_screenshot_failure_keeps_original_diagnostics(self) -> None:
+        from backend.motor_browser import executar_acao_rapida
+
+        with patch("backend.motor_browser.async_playwright", return_value=FakeAsyncPlaywright()), patch(
+            "backend.motor_browser._login_automatico", new=AsyncMock(return_value=(True, "ok"))
+        ), patch("backend.motor_browser._ws_browserless", return_value="ws://browserless"):
+            result = asyncio.run(
+                executar_acao_rapida(
+                    "número de parcelas pagas",
+                    [{"tipo": "preencher", "seletor": "#grupo", "variavel": "grupo"}],
+                    {"grupo": "935"},
+                    action_config={"browser_mode": "browserless"},
+                    run_id="run-acento",
+                )
+            )
+
+        self.assertEqual(result["status"], "erro")
+        diagnostics = result["page_diagnostics"]
+        self.assertNotIn("_safe_file_name", result["motivo"])
+        self.assertEqual(diagnostics["exception_message"], "Campo indisponivel")
+        self.assertEqual(diagnostics["step_trace"][0]["status"], "error")
+        self.assertEqual(diagnostics["step_trace"][0]["screenshot_path"], "")
 
     def test_validate_review_failure_marks_failed_and_preserves_diagnostics(self) -> None:
         raw_action = {

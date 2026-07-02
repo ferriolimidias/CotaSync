@@ -49,6 +49,7 @@ from backend.services.session_guardian import (
 )
 from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.extraction_targets import extract_value_near_label
+from backend.services.file_names import safe_file_name
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -397,7 +398,7 @@ def _page_matches_url(page: Page, expected_url: str) -> bool:
 
 
 def _safe_file_name(value: str) -> str:
-    return re.sub(r"[^\w\-]+", "_", str(value or "acao"), flags=re.UNICODE).strip("_") or "acao"
+    return safe_file_name(value)
 
 
 def _is_sensitive_selector(selector: str) -> bool:
@@ -3542,13 +3543,17 @@ class DemoSessionManager:
             diagnostics.update(await self._selector_state(page, selector))
         except Exception:
             pass
-        evidence_path = _DATA_DIR / "runs" / f"{run_id}_step_{step_index}_{_safe_file_name(step_type)}_error.png"
         try:
+            evidence_path = _DATA_DIR / "runs" / f"{run_id}_step_{step_index}_{_safe_file_name(step_type)}_error.png"
             evidence_path.parent.mkdir(parents=True, exist_ok=True)
             await page.screenshot(path=str(evidence_path), full_page=False, timeout=_REPLAY_STEP_TIMEOUT_MS)
             diagnostics["screenshot_path"] = str(evidence_path.relative_to(_ROOT))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Falha ao salvar screenshot de erro do replay no passo %s: %s",
+                step_index,
+                type(exc).__name__,
+            )
         try:
             diagnostics["safe_dom_summary"] = await page.evaluate(
                 """() => ({
