@@ -18,6 +18,13 @@ from backend.services.operational_summary import (
     deterministic_operational_summary,
 )
 from backend.services.extraction_targets import extract_value_near_label
+from backend.services.result_selection import (
+    build_extraction_contract,
+    detect_extraction_candidates,
+    extraction_contract_from_action,
+    extract_with_contract,
+    validate_candidate_value,
+)
 from frontend.api_client import DemoApiError, DemoApiTimeout, demo_api_request
 
 
@@ -239,6 +246,60 @@ class OperationalSummaryTests(unittest.TestCase):
         self.assertEqual(extract_value_near_label(text, "Nome"), "Maria Silva")
         self.assertEqual(extract_value_near_label(text, "Grupo"), "935")
         self.assertEqual(extract_value_near_label(text, "Cota"), "001")
+
+    def test_visual_candidate_detector_identifies_label_value_pairs(self) -> None:
+        html = "<div><span>Qtd. Pcls. Pagas:</span> 038</div>"
+        candidates = detect_extraction_candidates(html, target_name="número de parcelas", screen_label="Qtd. Pcls. Pagas")
+
+        self.assertTrue(any(item["label"] == "Qtd. Pcls. Pagas" and item["value"] == "038" for item in candidates))
+
+    def test_visual_candidate_detector_distinguishes_footer_total_from_table_column(self) -> None:
+        html = """
+        <table>
+          <tr><th>Valor Pagar</th><th>Ocorrência</th><th>% Pagar</th></tr>
+          <tr><td>6776,91</td><td>Percentual Ideal</td><td>77,4000</td></tr>
+          <tr><td>Total</td><td>% Pagar</td><td>0,0000</td></tr>
+        </table>
+        """
+        candidates = detect_extraction_candidates(html, target_name="porcentagem a pagar", screen_label="% Pagar")
+
+        footer = next(item for item in candidates if item["label"] == "% Pagar" and item["value"] == "0,0000")
+        self.assertEqual(footer["type"], "table_footer_total")
+        self.assertTrue(any(item["label"] == "Valor Pagar" and item["type"] == "table_column_or_cell" for item in candidates))
+
+    def test_table_footer_total_for_percent_rejects_ocorrencia(self) -> None:
+        contract = build_extraction_contract(
+            target_name="porcentagem a pagar",
+            screen_label="% Pagar",
+            selection_type="table_footer_total",
+            candidate={"label": "% Pagar", "value": "Ocorrência", "type": "table_footer_total"},
+        )
+
+        self.assertTrue(contract["needs_attention"])
+        self.assertFalse(validate_candidate_value("Ocorrência", "decimal_percent")["valid"])
+
+    def test_visual_contract_marks_type_mismatch_needs_attention(self) -> None:
+        result = extract_with_contract(
+            "<table><tr><td>% Pagar</td><td>Ocorrência</td></tr></table>",
+            "",
+            {"target_name": "porcentagem a pagar", "screen_label": "% Pagar", "selection_type": "table_footer_total", "value_type": "decimal_percent"},
+        )
+
+        self.assertTrue(result["needs_attention"])
+
+    def test_visual_extraction_review_has_priority_over_legacy_overlay(self) -> None:
+        contract = extraction_contract_from_action(
+            {
+                "reviewed_overlay": {"extraction": {"source": "legacy", "screen_label": "Ocorrência"}},
+                "extraction_review": {
+                    "source": "visual_result_selection",
+                    "screen_label": "% Pagar",
+                    "selection_type": "table_footer_total",
+                },
+            }
+        )
+
+        self.assertEqual(contract["screen_label"], "% Pagar")
 
     def test_timeout_with_step_diagnostics_has_actionable_summary(self) -> None:
         summary = deterministic_operational_summary(

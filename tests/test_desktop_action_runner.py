@@ -21,11 +21,91 @@ from backend.services.action_pages import (
 from backend.services.action_runner import finish_action_run, run_action_sync, start_action_run
 from backend.services.actions_repository import load_actions_catalog
 from backend.services.file_names import safe_file_name
+from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
 
 
 TARGET_URL = "https://nwcweb.randonconsorcios.com.br/CONCP/frmConCpRelResultadoAssembleia.aspx"
+
+
+class VisualResultSelectionTests(unittest.TestCase):
+    def test_confirm_visual_contract_preserves_mechanical_map_and_generates_summary(self) -> None:
+        raw_action = {
+            "nome_amigavel": "Porcentagem a pagar",
+            "browser_mode": "desktop_browser",
+            "url_inicial": TARGET_URL,
+            "passos_playwright": [{"tipo": "clicar", "seletor": "#consultar"}],
+            "robust_steps": [{"tipo": "clicar", "seletor": "#consultar", "elapsed_ms": 10}],
+            "learning_events": [{"step_index": 0, "event_type": "click", "selector": "#consultar"}],
+            "variable_schema": [{"key": "grupo", "label": "Grupo", "required": True}],
+            "reviewed_overlay": {"waits": [{"after_step_index": 0, "strategy": "dom_stable"}]},
+            "extraction_review": {},
+            "extraction_targets": ["% Pagar"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            ui_path = Path(tmp) / "ui_map.json"
+            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Porcentagem": raw_action}}), encoding="utf-8")
+            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
+                "backend.api.actions.default_ui_map_path", return_value=ui_path, create=True
+            ), patch("backend.services.result_selection.default_ui_map_path", return_value=ui_path):
+                response = TestClient(app).post(
+                    "/api/actions/porcentagem/result-selection/confirm",
+                    json={
+                        "target_name": "porcentagem a pagar",
+                        "screen_label": "% Pagar",
+                        "selection_type": "table_footer_total",
+                        "candidate": {
+                            "label": "% Pagar",
+                            "value": "0,0000",
+                            "type": "table_footer_total",
+                            "table_headers": ["Valor Pagar", "Ocorrência", "% Pagar"],
+                            "row_context": "Total | % Pagar | 0,0000",
+                        },
+                    },
+                )
+                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Porcentagem"]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(saved["passos_playwright"], raw_action["passos_playwright"])
+        self.assertEqual(saved["robust_steps"], raw_action["robust_steps"])
+        self.assertEqual(saved["learning_events"], raw_action["learning_events"])
+        self.assertEqual(saved["variable_schema"], raw_action["variable_schema"])
+        self.assertEqual(saved["extraction_review"]["selection_type"], "table_footer_total")
+        self.assertEqual(saved["extraction_review"]["example_value"], "0,0000")
+        self.assertIn("% Pagar", saved["final_summary_instruction"])
+
+    def test_quick_execution_contract_priority_replaces_generic_ocorrencia_result(self) -> None:
+        dom = """
+        <table>
+          <tr><th>Valor Pagar</th><th>Ocorrência</th><th>% Pagar</th></tr>
+          <tr><td>6776,91</td><td>Percentual Ideal</td><td>77,4000</td></tr>
+          <tr><td>Total</td><td>% Pagar</td><td>0,0000</td></tr>
+        </table>
+        """
+        contract = {
+            "target_name": "porcentagem a pagar",
+            "screen_label": "% Pagar",
+            "selection_type": "table_footer_total",
+            "value_type": "decimal_percent",
+            "avoid_labels": ["Ocorrência", "Valor Pagar"],
+        }
+        generic = {"porcentagem a pagar": "Ocorrência"}
+        result = extract_with_contract(dom, "", contract)
+        if result["value"]:
+            generic[contract["target_name"]] = result["value"]
+
+        self.assertEqual(generic["porcentagem a pagar"], "0,0000")
+
+    def test_qtd_pcls_pagas_visual_contract_still_extracts_simple_field(self) -> None:
+        result = extract_with_contract(
+            "<table><tr><td>Qtd. Pcls. Pagas</td><td>038</td></tr></table>",
+            "",
+            {"target_name": "Qtd. Pcls. Pagas", "screen_label": "Qtd. Pcls. Pagas", "selection_type": "field_value", "value_type": "integer"},
+        )
+
+        self.assertEqual(result["value"], "038")
+        self.assertFalse(result["needs_attention"])
 
 
 def desktop_action() -> ActionDetail:

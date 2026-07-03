@@ -1055,6 +1055,131 @@ def _render_demo_v01() -> None:
                     st.rerun()
                 except DemoApiError as exc:
                     st.error(str(exc))
+            st.markdown("**Resultado da rotina**")
+            result_target = st.text_input(
+                "O que esta rotina deve retornar?",
+                value=str(saved_action.get("objective") or saved_action.get("extraction_target") or ""),
+                placeholder="Ex.: porcentagem a pagar",
+                key=f"result_target_name_{session_id}_{saved_action.get('id', '')}",
+            )
+            result_label = st.text_input(
+                "Rótulo visível, se souber",
+                value=str(saved_action.get("extraction_target") or ""),
+                placeholder="Ex.: % Pagar",
+                key=f"result_screen_label_{session_id}_{saved_action.get('id', '')}",
+            )
+            selection_payload = {
+                "session_id": session_id,
+                "target_name": result_target,
+                "screen_label": result_label,
+            }
+            col_select, col_detect = st.columns(2)
+            with col_select:
+                if st.button("Selecionar resultado na tela", key="result_selection_start", use_container_width=True):
+                    try:
+                        demo_api_request(
+                            "POST",
+                            f"/api/actions/{quote(str(saved_action.get('id', '')), safe='')}/result-selection/start",
+                            selection_payload,
+                            api_base_url=API_BASE_URL,
+                            timeout=10,
+                        )
+                        st.session_state.result_selection_armed = True
+                        st.info("Modo seleção ativado. Clique no resultado desejado no navegador e depois capture abaixo.")
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+            with col_detect:
+                if st.button("Detectar candidatos automaticamente", key="result_candidates_detect", use_container_width=True):
+                    try:
+                        detected = demo_api_request(
+                            "POST",
+                            f"/api/actions/{quote(str(saved_action.get('id', '')), safe='')}/extraction-candidates",
+                            selection_payload,
+                            api_base_url=API_BASE_URL,
+                            timeout=15,
+                        )
+                        st.session_state.result_selection_candidates = detected.get("candidates", [])
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+            if st.session_state.get("result_selection_armed"):
+                if st.button("Capturar clique selecionado", key="result_selection_capture", use_container_width=True):
+                    try:
+                        captured = demo_api_request(
+                            "POST",
+                            f"/api/actions/{quote(str(saved_action.get('id', '')), safe='')}/result-selection/capture",
+                            selection_payload,
+                            api_base_url=API_BASE_URL,
+                            timeout=15,
+                        )
+                        st.session_state.result_selection_capture = captured.get("captured")
+                        st.session_state.result_selection_candidates = captured.get("candidates", [])
+                        if captured.get("status") == "waiting":
+                            st.warning("Ainda não recebi o clique. Clique no navegador e tente capturar novamente.")
+                        else:
+                            st.success("Elemento capturado.")
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+            candidates = st.session_state.get("result_selection_candidates", [])
+            if isinstance(candidates, list) and candidates:
+                labels = [
+                    f"{idx + 1}. {item.get('label', '')} -> {item.get('value', '')} ({item.get('type', '')})"
+                    for idx, item in enumerate(candidates)
+                    if isinstance(item, dict)
+                ]
+                selected_label = st.selectbox(
+                    "Candidatos de extração",
+                    labels,
+                    key=f"result_candidate_choice_{session_id}_{saved_action.get('id', '')}",
+                )
+                selected_index = labels.index(selected_label) if selected_label in labels else 0
+                selected_candidate = candidates[selected_index] if selected_index < len(candidates) else {}
+                edit_type = st.selectbox(
+                    "Tipo",
+                    ["field_value", "table_footer_total", "table_cell", "block_text"],
+                    index=["field_value", "table_footer_total", "table_cell", "block_text"].index(
+                        str(selected_candidate.get("type") if isinstance(selected_candidate, dict) else "field_value")
+                        if str(selected_candidate.get("type") if isinstance(selected_candidate, dict) else "") in {"field_value", "table_footer_total", "table_cell", "block_text"}
+                        else "field_value"
+                    ),
+                    key=f"result_candidate_type_{session_id}_{saved_action.get('id', '')}",
+                )
+                return_format = st.text_input(
+                    "Formato de retorno",
+                    value="somente o valor",
+                    key=f"result_return_format_{session_id}_{saved_action.get('id', '')}",
+                )
+                col_save, col_test = st.columns(2)
+                with col_save:
+                    if st.button("Salvar contrato de extração", key="result_contract_save", use_container_width=True):
+                        try:
+                            confirmed = demo_api_request(
+                                "POST",
+                                f"/api/actions/{quote(str(saved_action.get('id', '')), safe='')}/result-selection/confirm",
+                                {
+                                    "target_name": result_target,
+                                    "screen_label": result_label,
+                                    "selection_type": edit_type,
+                                    "candidate": selected_candidate,
+                                    "return_format": return_format,
+                                },
+                                api_base_url=API_BASE_URL,
+                                timeout=15,
+                            )
+                            st.session_state.result_selection_contract = confirmed.get("extraction_review", {})
+                            refreshed = _obter_acao_api(str(saved_action.get("id", "")))
+                            if refreshed:
+                                st.session_state.demo_saved_action = refreshed
+                            st.success("Contrato de extração salvo.")
+                            st.rerun()
+                        except DemoApiError as exc:
+                            st.error(str(exc))
+                with col_test:
+                    if st.button("Testar extração", key="result_contract_test", use_container_width=True):
+                        st.json(selected_candidate)
+            contract = saved_action.get("extraction_review", {})
+            if isinstance(contract, dict) and contract:
+                with st.expander("Contrato de extração salvo", expanded=False):
+                    st.json(contract)
             overlay = saved_action.get("reviewed_overlay", {})
             if isinstance(overlay, dict) and overlay:
                 extraction = overlay.get("extraction", {})

@@ -34,6 +34,7 @@ from backend.services.action_pages import (
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
+from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
 
@@ -1671,8 +1672,28 @@ async def executar_acao_rapida(
                 final_page_dom = (await page.content()).strip()[:50000]
             except Exception:
                 final_page_dom = ""
+            extraction_attention: dict[str, Any] = {}
+            contract = extraction_contract_from_action(action_config if isinstance(action_config, dict) else {})
+            if contract:
+                contract_result = extract_with_contract(final_page_dom, final_page_text, contract)
+                contract_value = str(contract_result.get("value") or "").strip()
+                contract_key = str(
+                    contract.get("target_name")
+                    or contract.get("screen_label")
+                    or contract.get("selected_text")
+                    or "resultado"
+                ).strip()
+                if contract_key and contract_value:
+                    dados_extraidos[contract_key] = contract_value
+                if contract_result.get("needs_attention"):
+                    extraction_attention = {
+                        "needs_attention": True,
+                        "contract": contract,
+                        "validation": contract_result.get("validation", {}),
+                        "candidate": contract_result.get("candidate", {}),
+                    }
             _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
-            return {
+            result_payload = {
                 "status": "sucesso",
                 "evidencia": evidence_name,
                 "screenshot_path": screenshot_path_result,
@@ -1699,6 +1720,9 @@ async def executar_acao_rapida(
                 "whether_fast_track_used": browser_mode != "desktop_browser",
                 "whether_desktop_browser_used": browser_mode == "desktop_browser",
             }
+            if extraction_attention:
+                result_payload["extraction_attention"] = extraction_attention
+            return result_payload
     except SessionGuardianError as exc:
         _LOGGER.info(f"[ERRO] Sessao invalida na execução rápida '{nome_acao}': {exc}")
         exc.diagnostics.setdefault("step_trace", step_trace)

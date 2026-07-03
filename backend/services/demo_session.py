@@ -50,6 +50,12 @@ from backend.services.session_guardian import (
 from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
+from backend.services.result_selection import (
+    detect_extraction_candidates,
+    extraction_contract_from_action,
+    extract_with_contract,
+    host_from_url,
+)
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -278,6 +284,130 @@ _RECORDER_SCRIPT = r"""
   });
   captureOutputs();
 })();
+"""
+
+_RESULT_SELECTION_SCRIPT = r"""
+() => {
+  const attrValue = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const textOf = (el) => String(el?.innerText || el?.textContent || el?.value || '').replace(/\s+/g, ' ').trim();
+  const selectorFor = (el) => {
+    if (!el || !el.tagName) return '';
+    const tag = el.tagName.toLowerCase();
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    const testId = el.getAttribute('data-testid');
+    if (testId) return `[data-testid="${attrValue(testId)}"]`;
+    if (el.name) return `${tag}[name="${attrValue(el.name)}"]`;
+    const aria = el.getAttribute('aria-label');
+    if (aria) return `${tag}[aria-label="${attrValue(aria)}"]`;
+    const parent = el.parentElement;
+    if (!parent) return tag;
+    const siblings = Array.from(parent.children).filter((item) => item.tagName === el.tagName);
+    const position = siblings.indexOf(el) + 1;
+    return `${selectorFor(parent)} > ${tag}:nth-of-type(${Math.max(position, 1)})`;
+  };
+  const tableInfo = (el) => {
+    const cell = el.closest && el.closest('td,th');
+    const row = cell && cell.parentElement;
+    const table = row && row.closest('table');
+    if (!cell || !row || !table) return {};
+    const rows = Array.from(table.querySelectorAll('tr'));
+    const cells = Array.from(row.children).filter((item) => /^(TD|TH)$/.test(item.tagName));
+    const colIndex = cells.indexOf(cell);
+    const rowIndex = rows.indexOf(row);
+    const headerRow = rows.find((candidate) => candidate.querySelector('th')) || rows[0];
+    const headers = headerRow ? Array.from(headerRow.children).filter((item) => /^(TD|TH)$/.test(item.tagName)).map(textOf) : [];
+    const rowCells = cells.map(textOf);
+    const rowKey = rowCells.join(' ').toLowerCase();
+    const isFooter = rowIndex >= Math.max(1, rows.length - 2) || /total|totais|cont/.test(rowKey);
+    const nextCells = rowCells.slice(colIndex + 1).filter(Boolean);
+    const numeric = nextCells.find((item) => /^(?:R\$\s*)?-?\d{1,3}(?:\.\d{3})*(?:,\d+)?%?$|-?\d+(?:,\d+)?%?$/.test(item));
+    return {
+      row_text: rowCells.join(' | '),
+      table_row_cells: rowCells,
+      column_header: headers[colIndex] || '',
+      table_headers: headers,
+      table_row_index: rowIndex,
+      table_col_index: colIndex,
+      table_is_footer: isFooter,
+      next_cell_text: nextCells[0] || '',
+      next_numeric_text: numeric || ''
+    };
+  };
+  window.__cotasyncResultSelection = {active: true, captured: null};
+  if (!document.getElementById('__cotasync_result_selection_style')) {
+    const style = document.createElement('style');
+    style.id = '__cotasync_result_selection_style';
+    style.textContent = '.__cotasync-result-hover{outline:3px solid #0ea5e9!important;cursor:crosshair!important;}';
+    document.documentElement.appendChild(style);
+  }
+  let last = null;
+  const clear = () => { if (last) last.classList.remove('__cotasync-result-hover'); last = null; };
+  const onMove = (event) => {
+    if (!window.__cotasyncResultSelection?.active) return;
+    const el = event.target;
+    if (!el || el === document.documentElement || el === document.body) return;
+    if (last !== el) clear();
+    last = el;
+    el.classList.add('__cotasync-result-hover');
+  };
+  const onClick = (event) => {
+    if (!window.__cotasyncResultSelection?.active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const el = event.target;
+    const rect = el.getBoundingClientRect();
+    const parent = el.parentElement;
+    const before = [];
+    const after = [];
+    if (parent) {
+      const siblings = Array.from(parent.children);
+      const index = siblings.indexOf(el);
+      siblings.slice(Math.max(0, index - 3), index).forEach((item) => before.push(textOf(item)));
+      siblings.slice(index + 1, index + 4).forEach((item) => after.push(textOf(item)));
+    }
+    const table = tableInfo(el);
+    const selectedText = textOf(el);
+    const candidateLabel = table.column_header || before.filter(Boolean).slice(-1)[0] || selectedText;
+    const selectedKey = selectedText.toLowerCase().replace(/[^a-z0-9à-ÿ%]+/g, ' ').trim();
+    const headerKey = String(table.column_header || '').toLowerCase().replace(/[^a-z0-9à-ÿ%]+/g, ' ').trim();
+    const clickedLooksLikeLabel = selectedKey && (selectedKey === headerKey || /[%a-zà-ÿ]/.test(selectedKey));
+    const tableValue = clickedLooksLikeLabel ? (table.next_numeric_text || table.next_cell_text || selectedText) : selectedText;
+    window.__cotasyncResultSelection = {
+      active: false,
+      captured: {
+        selected_text: selectedText,
+        selected_html: String(el.outerHTML || '').slice(0, 5000),
+        selector: selectorFor(el),
+        css_path: selectorFor(el),
+        tag_name: String(el.tagName || '').toLowerCase(),
+        id: String(el.id || ''),
+        name: String(el.getAttribute('name') || ''),
+        class: String(el.getAttribute('class') || ''),
+        aria_label: String(el.getAttribute('aria-label') || ''),
+        title: String(el.getAttribute('title') || ''),
+        bounding_box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
+        nearby_text: [...before, selectedText, ...after].filter(Boolean).join(' | '),
+        nearby_text_before: before.filter(Boolean),
+        nearby_text_after: after.filter(Boolean),
+        parent_text: textOf(parent).slice(0, 1200),
+        candidate_label: clickedLooksLikeLabel ? selectedText : candidateLabel,
+        candidate_value: table.table_headers ? tableValue : selectedText,
+        candidate_type: table.table_headers ? (table.table_is_footer ? 'table_footer_total' : 'table_cell') : 'block_text',
+        current_url: String(location.href || '').split(/[?#]/, 1)[0],
+        current_host: String(location.host || ''),
+        page_title: String(document.title || ''),
+        ...table
+      }
+    };
+    clear();
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('click', onClick, true);
+    return false;
+  };
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('click', onClick, true);
+  return {status: 'active', current_url: String(location.href || '').split(/[?#]/, 1)[0], page_title: String(document.title || '')};
+}
 """
 
 
@@ -648,6 +778,64 @@ class DemoSessionManager:
         if session is None:
             raise DemoSessionError("Sessao de demonstracao nao encontrada ou encerrada.")
         return session
+
+    async def start_result_selection(self, session_id: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        if session.page.is_closed():
+            raise DemoSessionError("Pagina da sessao nao esta disponivel para selecao.")
+        result = await session.page.evaluate(_RESULT_SELECTION_SCRIPT)
+        return result if isinstance(result, dict) else {"status": "active"}
+
+    async def capture_result_selection(
+        self,
+        session_id: str,
+        *,
+        target_name: str = "",
+        screen_label: str = "",
+    ) -> dict[str, Any]:
+        session = self._get(session_id)
+        if session.page.is_closed():
+            raise DemoSessionError("Pagina da sessao nao esta disponivel para captura.")
+        captured = await session.page.evaluate(
+            "() => window.__cotasyncResultSelection && window.__cotasyncResultSelection.captured"
+        )
+        if not isinstance(captured, dict) or not captured:
+            return {"captured": None, "candidates": [], "status": "waiting"}
+        captured.setdefault("current_url", _safe_page_url(session.page.url))
+        captured.setdefault("current_host", host_from_url(session.page.url))
+        captured.setdefault("page_title", await self._current_title(session.page))
+        try:
+            source = await session.page.content()
+        except Exception:
+            source = str(captured.get("parent_text") or captured.get("nearby_text") or "")
+        candidates = detect_extraction_candidates(
+            source,
+            target_name=target_name,
+            screen_label=screen_label,
+            selected_element=captured,
+        )
+        return {"captured": captured, "candidates": candidates, "status": "captured"}
+
+    async def detect_result_candidates(
+        self,
+        session_id: str,
+        *,
+        target_name: str = "",
+        screen_label: str = "",
+    ) -> dict[str, Any]:
+        session = self._get(session_id)
+        if session.page.is_closed():
+            raise DemoSessionError("Pagina da sessao nao esta disponivel para detectar candidatos.")
+        try:
+            source = await session.page.content()
+        except Exception:
+            source = await session.page.locator("body").inner_text(timeout=5000)
+        return {
+            "candidates": detect_extraction_candidates(source, target_name=target_name, screen_label=screen_label),
+            "current_url": _safe_page_url(session.page.url),
+            "current_host": host_from_url(session.page.url),
+            "page_title": await self._current_title(session.page),
+        }
 
     def _append_step(
         self,
@@ -3209,8 +3397,38 @@ class DemoSessionManager:
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
         await session.page.screenshot(path=str(evidence_path), full_page=False)
         final_title = (await session.page.title()).strip()[:200]
+        final_page_text = ""
+        final_page_dom = ""
+        try:
+            final_page_text = (await session.page.locator("body").inner_text(timeout=5000)).strip()[:20000]
+        except Exception:
+            final_page_text = ""
+        try:
+            final_page_dom = (await session.page.content()).strip()[:50000]
+        except Exception:
+            final_page_dom = ""
+        extraction_attention: dict[str, Any] = {}
+        contract = extraction_contract_from_action(action)
+        if contract:
+            contract_result = extract_with_contract(final_page_dom, final_page_text, contract)
+            contract_value = str(contract_result.get("value") or "").strip()
+            contract_key = str(
+                contract.get("target_name")
+                or contract.get("screen_label")
+                or contract.get("selected_text")
+                or "resultado"
+            ).strip()
+            if contract_key and contract_value:
+                extracted[contract_key] = contract_value
+            if contract_result.get("needs_attention"):
+                extraction_attention = {
+                    "needs_attention": True,
+                    "contract": contract,
+                    "validation": contract_result.get("validation", {}),
+                    "candidate": contract_result.get("candidate", {}),
+                }
         logger.info("Replay concluido na sessao %s, run %s", session_id, run_id)
-        return {
+        result_payload = {
             "texto": "Execucao assistida concluida com sucesso.",
             "evidencia": str(evidence_path.relative_to(_ROOT)),
             "dados_extraidos": extracted,
@@ -3238,7 +3456,12 @@ class DemoSessionManager:
             "retryable": False,
             "evidence": str(evidence_path.relative_to(_ROOT)),
             "final_page": {"title": final_title, "url": _safe_page_url(session.page.url)},
+            "final_page_text": final_page_text,
+            "final_page_dom": final_page_dom,
         }
+        if extraction_attention:
+            result_payload["extraction_attention"] = extraction_attention
+        return result_payload
 
     def _candidate_frames_for_step(self, page: Page, step: dict[str, Any]) -> list[Frame]:
         frames = list(page.frames)

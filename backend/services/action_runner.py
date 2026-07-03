@@ -174,6 +174,7 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "diagnostics",
         "validation_review",
         "extraction_candidates",
+        "extraction_attention",
         "reviewed_overlay",
     ):
         value = result.get(key)

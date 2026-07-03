@@ -4,16 +4,33 @@ import logging
 import json
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.schemas.actions import ActionDetailResponse, ActionsListResponse, ActionsRawResponse
 from backend.schemas.runs import ActionRunRequest, ActionRunResponse
 from backend.services.action_validation_review import run_validation_review, schedule_validation_review
 from backend.services.actions_repository import ActionsRepositoryError, find_action, load_actions_catalog
+from backend.services.demo_session import DemoSessionError, demo_session_manager
+from backend.services.result_selection import build_extraction_contract, save_visual_extraction_contract
 from backend.services.runs_repository import RunsRepositoryError
 
 logger = logging.getLogger("cotasync.api.actions")
 
 router = APIRouter(prefix="/api/actions", tags=["actions"])
+
+
+class ResultSelectionRequest(BaseModel):
+    session_id: str = ""
+    target_name: str = ""
+    screen_label: str = ""
+
+
+class ResultSelectionConfirmRequest(BaseModel):
+    target_name: str
+    screen_label: str = ""
+    selection_type: str = ""
+    candidate: dict[str, object] = Field(default_factory=dict)
+    return_format: str = "somente o valor"
 
 
 @router.get("", response_model=ActionsListResponse)
@@ -85,3 +102,72 @@ async def validate_review_action(action_id: str, payload: ActionRunRequest) -> A
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return ActionRunResponse(run=run)
+
+
+@router.post("/{action_id}/result-selection/start")
+async def start_result_selection(action_id: str, payload: ResultSelectionRequest) -> dict[str, object]:
+    action = find_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Acao nao encontrada.")
+    if not payload.session_id:
+        raise HTTPException(status_code=422, detail="session_id obrigatorio para selecao visual.")
+    try:
+        result = await demo_session_manager.start_result_selection(payload.session_id)
+    except DemoSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", "selection": result}
+
+
+@router.post("/{action_id}/result-selection/capture")
+async def capture_result_selection(action_id: str, payload: ResultSelectionRequest) -> dict[str, object]:
+    action = find_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Acao nao encontrada.")
+    if not payload.session_id:
+        raise HTTPException(status_code=422, detail="session_id obrigatorio para captura visual.")
+    try:
+        result = await demo_session_manager.capture_result_selection(
+            payload.session_id,
+            target_name=payload.target_name,
+            screen_label=payload.screen_label,
+        )
+    except DemoSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/{action_id}/result-selection/confirm")
+async def confirm_result_selection(action_id: str, payload: ResultSelectionConfirmRequest) -> dict[str, object]:
+    action = find_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Acao nao encontrada.")
+    contract = build_extraction_contract(
+        target_name=payload.target_name,
+        screen_label=payload.screen_label,
+        candidate=payload.candidate,
+        selection_type=payload.selection_type,
+        return_format=payload.return_format,
+    )
+    try:
+        saved = save_visual_extraction_contract(action.key, contract)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"status": "ok", "extraction_review": contract, "reviewed_overlay": saved.get("reviewed_overlay", {})}
+
+
+@router.post("/{action_id}/extraction-candidates")
+async def extraction_candidates(action_id: str, payload: ResultSelectionRequest) -> dict[str, object]:
+    action = find_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Acao nao encontrada.")
+    if not payload.session_id:
+        raise HTTPException(status_code=422, detail="session_id obrigatorio para detectar candidatos.")
+    try:
+        result = await demo_session_manager.detect_result_candidates(
+            payload.session_id,
+            target_name=payload.target_name,
+            screen_label=payload.screen_label,
+        )
+    except DemoSessionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "ok", **result}
