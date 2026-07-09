@@ -45,6 +45,7 @@ from frontend.api_client import (  # noqa: E402
     DEMO_API_TIMEOUT_MESSAGE,
     DemoApiError,
     DemoApiTimeout,
+    confirm_last_extraction_result,
     create_batch,
     create_client,
     deactivate_client,
@@ -62,6 +63,7 @@ from frontend.api_client import (  # noqa: E402
     operator_type_active,
     parse_batch_csv_text,
     required_batch_columns,
+    test_action_extraction,
     update_client,
     validate_batch_rows_for_action,
     validate_clients_for_action,
@@ -100,8 +102,52 @@ def _run_to_resultado_direto(run: dict[str, object]) -> dict[str, object]:
         "downloaded_files": payload.get("downloaded_files", []),
         "main_file": payload.get("main_file"),
         "status": status,
+        "run_id": run.get("id"),
+        "operational_summary": run.get("operational_summary"),
         "estado": "NORMAL",
     }
+
+
+def _detected_value_from_run(run: dict[str, object] | None) -> tuple[str, str]:
+    if not isinstance(run, dict):
+        return "", ""
+    payload = run.get("result_payload") if isinstance(run.get("result_payload"), dict) else {}
+    extracted = payload.get("dados_extraidos") if isinstance(payload, dict) else {}
+    if isinstance(extracted, dict):
+        for label, value in extracted.items():
+            text = str(value or "").strip()
+            if text:
+                return str(label or "resultado"), text
+    summary = str(run.get("operational_summary") or run.get("texto") or "").strip()
+    if summary:
+        if ":" in summary:
+            label, value = summary.split(":", 1)
+            if value.strip():
+                return label.strip() or "resultado", value.strip()
+        return "resultado", summary
+    return "", ""
+
+
+def _learning_status_cards(action: dict[str, object], last_run: dict[str, object] | None) -> None:
+    steps_count = int(action.get("steps_count") or 0)
+    extraction_review = action.get("extraction_review") if isinstance(action.get("extraction_review"), dict) else {}
+    review_status = str(action.get("review_status") or "").strip()
+    last_status = str(last_run.get("status") or "") if isinstance(last_run, dict) else ""
+    label, value = _detected_value_from_run(last_run)
+
+    cols = st.columns(4)
+    cols[0].metric("Caminho aprendido", "OK" if steps_count > 0 else "pendente", f"{steps_count} passo(s)")
+    cols[1].metric("Teste da ação", "OK" if last_status == "success" else ("erro" if last_status == "error" else "não executado"))
+    cols[2].metric("Extração", "OK" if extraction_review and not extraction_review.get("needs_attention") else ("precisa configurar" if not extraction_review else "atenção"))
+    ai_label = {
+        "approved": "concluída",
+        "needs_attention": "atenção",
+        "failed": "erro",
+        "running": "em revisão",
+    }.get(review_status, "opcional")
+    cols[3].metric("Revisão IA", ai_label)
+    if value:
+        st.info(f"Resultado detectado: {value}" + (f" ({label})" if label and label != "resultado" else ""))
 
 
 def _buscar_run_mais_recente(action_id: str) -> dict[str, object] | None:
@@ -1612,8 +1658,9 @@ def _render_demo_v01() -> None:
                     placeholder="Ex.: PED-2002",
                     key=f"demo_run_variable_{session_id}_{variable_name}",
                 )
+            _learning_status_cards(saved_action, st.session_state.get("demo_last_run"))
             if st.button(
-                "Testar rotina e revisar com IA",
+                "Revisar com IA (opcional)",
                 key="demo_validate_review_action",
                 use_container_width=True,
             ):
@@ -1629,7 +1676,7 @@ def _render_demo_v01() -> None:
                         st.session_state.demo_saved_action = refreshed
                     st.rerun()
                 except DemoApiError as exc:
-                    st.error(str(exc))
+                    st.warning(f"Revisão com IA indisponível. A ação continua utilizável se o teste e a extração estiverem OK. Detalhe: {exc}")
             st.markdown("**Resultado da rotina**")
             result_target = st.text_input(
                 "O que esta rotina deve retornar?",
@@ -1648,6 +1695,48 @@ def _render_demo_v01() -> None:
                 "target_name": result_target,
                 "screen_label": result_label,
             }
+            last_label, last_value = _detected_value_from_run(st.session_state.get("demo_last_run"))
+            st.markdown("**Resultado que será retornado**")
+            if last_value:
+                st.success(f"Valor detectado no último teste: {last_value}")
+                confirm_cols = st.columns(2)
+                if confirm_cols[0].button("Confirmar este resultado", key="confirm_last_result", use_container_width=True):
+                    try:
+                        confirmed = confirm_last_extraction_result(
+                            str(saved_action.get("id", "")),
+                            target_name=result_target,
+                            screen_label=result_label or last_label,
+                            api_base_url=API_BASE_URL,
+                        )
+                        st.session_state.result_selection_contract = confirmed.get("extraction_review", {})
+                        refreshed = _obter_acao_api(str(saved_action.get("id", "")))
+                        if refreshed:
+                            st.session_state.demo_saved_action = refreshed
+                        st.success("Resultado confirmado e contrato de extração salvo.")
+                        st.rerun()
+                    except DemoApiError as exc:
+                        st.error(str(exc))
+                if confirm_cols[1].button("Testar extração salva", key="test_saved_extraction", use_container_width=True):
+                    try:
+                        tested = test_action_extraction(str(saved_action.get("id", "")), api_base_url=API_BASE_URL)
+                        st.session_state.result_extraction_test = tested.get("extraction_test", {})
+                    except DemoApiError as exc:
+                        st.warning(str(exc))
+            else:
+                st.warning("Precisamos configurar o resultado da tela. Execute um teste ou selecione o resultado na tela.")
+
+            extraction_test = st.session_state.get("result_extraction_test")
+            if isinstance(extraction_test, dict) and extraction_test:
+                if extraction_test.get("status") == "ok":
+                    st.success(
+                        f"Extração OK. Label: {extraction_test.get('label', '')}. "
+                        f"Valor extraído: {extraction_test.get('value', '')}. "
+                        f"Tipo: {extraction_test.get('selection_type', '') or extraction_test.get('value_type', '')}."
+                    )
+                else:
+                    st.warning(
+                        f"Extração precisa configurar. Motivo: {extraction_test.get('reason', 'valor inválido ou vazio')}."
+                    )
             col_select, col_detect = st.columns(2)
             with col_select:
                 if st.button("Selecionar resultado na tela", key="result_selection_start", use_container_width=True):
@@ -1696,61 +1785,70 @@ def _render_demo_v01() -> None:
                         st.error(str(exc))
             candidates = st.session_state.get("result_selection_candidates", [])
             if isinstance(candidates, list) and candidates:
-                labels = [
-                    f"{idx + 1}. {item.get('label', '')} -> {item.get('value', '')} ({item.get('type', '')})"
-                    for idx, item in enumerate(candidates)
-                    if isinstance(item, dict)
-                ]
-                selected_label = st.selectbox(
-                    "Candidatos de extração",
-                    labels,
-                    key=f"result_candidate_choice_{session_id}_{saved_action.get('id', '')}",
-                )
-                selected_index = labels.index(selected_label) if selected_label in labels else 0
-                selected_candidate = candidates[selected_index] if selected_index < len(candidates) else {}
-                edit_type = st.selectbox(
-                    "Tipo",
-                    ["field_value", "table_footer_total", "table_cell", "block_text"],
-                    index=["field_value", "table_footer_total", "table_cell", "block_text"].index(
-                        str(selected_candidate.get("type") if isinstance(selected_candidate, dict) else "field_value")
-                        if str(selected_candidate.get("type") if isinstance(selected_candidate, dict) else "") in {"field_value", "table_footer_total", "table_cell", "block_text"}
-                        else "field_value"
-                    ),
-                    key=f"result_candidate_type_{session_id}_{saved_action.get('id', '')}",
-                )
-                return_format = st.text_input(
-                    "Formato de retorno",
-                    value="somente o valor",
-                    key=f"result_return_format_{session_id}_{saved_action.get('id', '')}",
-                )
-                col_save, col_test = st.columns(2)
-                with col_save:
-                    if st.button("Salvar contrato de extração", key="result_contract_save", use_container_width=True):
-                        try:
-                            confirmed = demo_api_request(
-                                "POST",
-                                f"/api/actions/{quote(str(saved_action.get('id', '')), safe='')}/result-selection/confirm",
-                                {
-                                    "target_name": result_target,
-                                    "screen_label": result_label,
-                                    "selection_type": edit_type,
-                                    "candidate": selected_candidate,
-                                    "return_format": return_format,
-                                },
-                                api_base_url=API_BASE_URL,
-                                timeout=15,
-                            )
-                            st.session_state.result_selection_contract = confirmed.get("extraction_review", {})
-                            refreshed = _obter_acao_api(str(saved_action.get("id", "")))
-                            if refreshed:
-                                st.session_state.demo_saved_action = refreshed
-                            st.success("Contrato de extração salvo.")
-                            st.rerun()
-                        except DemoApiError as exc:
-                            st.error(str(exc))
-                with col_test:
-                    if st.button("Testar extração", key="result_contract_test", use_container_width=True):
-                        st.json(selected_candidate)
+                with st.expander("Avançado: candidatos de extração", expanded=False):
+                    labels = [
+                        f"{idx + 1}. {item.get('label', '')} -> {item.get('value', '')} ({item.get('type', '')})"
+                        for idx, item in enumerate(candidates)
+                        if isinstance(item, dict)
+                    ]
+                    selected_label = st.selectbox(
+                        "Candidatos de extração",
+                        labels,
+                        key=f"result_candidate_choice_{session_id}_{saved_action.get('id', '')}",
+                    )
+                    selected_index = labels.index(selected_label) if selected_label in labels else 0
+                    selected_candidate = candidates[selected_index] if selected_index < len(candidates) else {}
+                    edit_type = st.selectbox(
+                        "Tipo",
+                        ["field_value", "table_footer_total", "table_cell", "block_text"],
+                        index=["field_value", "table_footer_total", "table_cell", "block_text"].index(
+                            str(selected_candidate.get("type") if isinstance(selected_candidate, dict) else "field_value")
+                            if str(selected_candidate.get("type") if isinstance(selected_candidate, dict) else "") in {"field_value", "table_footer_total", "table_cell", "block_text"}
+                            else "field_value"
+                        ),
+                        key=f"result_candidate_type_{session_id}_{saved_action.get('id', '')}",
+                    )
+                    return_format = st.text_input(
+                        "Formato de retorno",
+                        value="somente o valor",
+                        key=f"result_return_format_{session_id}_{saved_action.get('id', '')}",
+                    )
+                    col_save, col_test = st.columns(2)
+                    with col_save:
+                        if st.button("Salvar contrato de extração", key="result_contract_save", use_container_width=True):
+                            try:
+                                confirmed = demo_api_request(
+                                    "POST",
+                                    f"/api/actions/{quote(str(saved_action.get('id', '')), safe='')}/result-selection/confirm",
+                                    {
+                                        "target_name": result_target,
+                                        "screen_label": result_label,
+                                        "selection_type": edit_type,
+                                        "candidate": selected_candidate,
+                                        "return_format": return_format,
+                                    },
+                                    api_base_url=API_BASE_URL,
+                                    timeout=15,
+                                )
+                                st.session_state.result_selection_contract = confirmed.get("extraction_review", {})
+                                refreshed = _obter_acao_api(str(saved_action.get("id", "")))
+                                if refreshed:
+                                    st.session_state.demo_saved_action = refreshed
+                                st.success("Contrato de extração salvo.")
+                                st.rerun()
+                            except DemoApiError as exc:
+                                st.error(str(exc))
+                    with col_test:
+                        if st.button("Testar candidato", key="result_contract_test", use_container_width=True):
+                            value = str(selected_candidate.get("value") if isinstance(selected_candidate, dict) else "").strip()
+                            label = str(selected_candidate.get("label") if isinstance(selected_candidate, dict) else "").strip()
+                            if value:
+                                st.success(
+                                    f"Status: OK. Label: {label}. Valor extraído: {value}. "
+                                    f"Tipo: {selected_candidate.get('type', '') if isinstance(selected_candidate, dict) else ''}."
+                                )
+                            else:
+                                st.warning(f"Status: precisa configurar. Motivo: valor vazio ou inválido. Label detectado: {label}.")
             contract = saved_action.get("extraction_review", {})
             if isinstance(contract, dict) and contract:
                 with st.expander("Contrato de extração salvo", expanded=False):
@@ -1776,10 +1874,8 @@ def _render_demo_v01() -> None:
                     st.success(str(validation_run.get("texto") or "Validação concluída."))
                 elif validation_run.get("status") == "error":
                     st.error(str(validation_run.get("texto") or "Validação falhou."))
-            if st.button("Executar ação aprendida", key="demo_run_action", type="primary", use_container_width=True):
+            if st.button("Executar teste da ação", key="demo_run_action", type="primary", use_container_width=True):
                 try:
-                    if review_status != "approved":
-                        st.warning("Esta rotina ainda não foi validada com IA.")
                     result = _executar_acao_aprendida_com_polling(
                         str(saved_action.get("id", "")),
                         run_variables,
@@ -1789,6 +1885,8 @@ def _render_demo_v01() -> None:
                     st.session_state.demo_last_run = {
                         "status": result.get("status"),
                         "operational_summary": result.get("texto"),
+                        "texto": result.get("texto"),
+                        "run_id": result.get("run_id"),
                         "result_payload": result.get("result_payload", {}),
                     }
                     st.rerun()

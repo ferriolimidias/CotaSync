@@ -25,6 +25,20 @@ HEADER_WORDS = {
     "pr",
     "rt",
 }
+TECHNICAL_DOM_PATTERNS = (
+    "max-width",
+    "webkit",
+    "chrome",
+    "safari",
+    "css",
+    "javascript",
+    "function(",
+    "document.",
+    "window.",
+    "@media",
+    "font-family",
+    "stylesheet",
+)
 
 
 def utc_now_iso() -> str:
@@ -57,6 +71,32 @@ def _looks_numeric(value: Any) -> bool:
     return bool(re.fullmatch(r"(?:R\$\s*)?-?\d{1,3}(?:\.\d{3})*(?:,\d+)?%?|-?\d+(?:,\d+)?%?", text))
 
 
+def is_technical_dom_text(value: Any) -> bool:
+    text = clean_text(value)
+    lowered = text.casefold()
+    if not text:
+        return False
+    if any(pattern in lowered for pattern in TECHNICAL_DOM_PATTERNS):
+        return True
+    if re.search(r"[{};]\s*(?:/\*|[.#]?[a-z-]+\s*:)", text, flags=re.I):
+        return True
+    if re.search(r"</?(?:script|style|head|meta|link)\b", text, flags=re.I):
+        return True
+    return False
+
+
+def is_candidate_text_valid(label: Any, value: Any, value_type: str = "", avoid_labels: list[str] | None = None) -> bool:
+    label_text = clean_text(label)
+    value_text = clean_text(value)
+    if not label_text or not value_text:
+        return False
+    if is_technical_dom_text(label_text) or is_technical_dom_text(value_text):
+        return False
+    if normalize_label_key(label_text) == normalize_label_key(value_text):
+        return False
+    return bool(validate_candidate_value(value_text, value_type, avoid_labels)["valid"])
+
+
 def validate_candidate_value(value: Any, value_type: str = "", avoid_labels: list[str] | None = None) -> dict[str, Any]:
     text = clean_text(value)
     normalized = normalize_label_key(text)
@@ -65,6 +105,8 @@ def validate_candidate_value(value: Any, value_type: str = "", avoid_labels: lis
     result = {"valid": True, "needs_attention": False, "reason": ""}
     if not text:
         return {"valid": False, "needs_attention": True, "reason": "empty_value"}
+    if is_technical_dom_text(text):
+        return {"valid": False, "needs_attention": True, "reason": "technical_dom_text"}
     if normalized in avoid_keys:
         return {"valid": False, "needs_attention": True, "reason": "header_or_avoid_label"}
     if normalized in {"na", "pr", "rt"} and value_type not in {"status", "code", "text"}:
@@ -139,11 +181,16 @@ def _headers_for(table: list[list[dict[str, Any]]]) -> list[str]:
 
 def _candidate(label: str, value: str, ctype: str, confidence: float, **extra: Any) -> dict[str, Any]:
     cleaned_label = clean_label(label)
+    cleaned_value = clean_text(value)
     value_type = infer_value_type(extra.get("target_name", ""), cleaned_label, value)
     validation = validate_candidate_value(value, value_type, extra.get("avoid_labels"))
+    if is_technical_dom_text(cleaned_label):
+        validation = {"valid": False, "needs_attention": True, "reason": "technical_dom_text"}
+    if normalize_label_key(cleaned_label) == normalize_label_key(cleaned_value):
+        validation = {"valid": False, "needs_attention": True, "reason": "label_without_value"}
     return {
         "label": cleaned_label,
-        "value": clean_text(value),
+        "value": cleaned_value,
         "type": ctype,
         "candidate_type": ctype,
         "confidence": round(confidence, 2),
@@ -162,7 +209,7 @@ def detect_extraction_candidates(
     selected_element: dict[str, Any] | None = None,
     limit: int = 30,
 ) -> list[dict[str, Any]]:
-    source = str(final_page_dom_or_text or "")
+    source = re.sub(r"<(?:script|style|head|meta|link)\b[^>]*>.*?</(?:script|style|head|meta|link)>", " ", str(final_page_dom_or_text or ""), flags=re.I | re.S)
     wanted = normalize_label_key(screen_label or target_name)
     candidates: list[dict[str, Any]] = []
 
@@ -185,7 +232,7 @@ def detect_extraction_candidates(
             )
             for col_index, cell in enumerate(row):
                 text = clean_text(cell.get("text"))
-                if not text:
+                if not text or is_technical_dom_text(text):
                     continue
                 header = headers[col_index] if col_index < len(headers) else ""
                 label_match = wanted and (wanted == normalize_label_key(text) or wanted in normalize_label_key(text))
@@ -200,6 +247,7 @@ def detect_extraction_candidates(
 
     plain = re.sub(r"<[^>]+>", "\n", source)
     lines = [clean_text(line) for line in re.split(r"[\r\n]+", plain) if clean_text(line)]
+    lines = [line for line in lines if not is_technical_dom_text(line)]
     for index, line in enumerate(lines):
         match = re.match(r"(?P<label>[^:;]{2,80})[:;]\s*(?P<value>.{1,120})$", line)
         if match:
@@ -215,6 +263,13 @@ def detect_extraction_candidates(
     deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for item in sorted(candidates, key=lambda raw: float(raw.get("confidence") or 0), reverse=True):
+        if not is_candidate_text_valid(
+            item.get("label"),
+            item.get("value"),
+            str(item.get("value_type") or ""),
+            item.get("avoid_labels") if isinstance(item.get("avoid_labels"), list) else None,
+        ):
+            continue
         key = (normalize_label_key(item.get("label")), clean_text(item.get("value")), str(item.get("type") or ""))
         if key in seen:
             continue
@@ -253,6 +308,12 @@ def build_extraction_contract(
     value_type = str(selected.get("value_type") or infer_value_type(target_name, label, value))
     avoid_labels = ["Ocorrência", "Valor Pagar", "Parcela Paga", "Modalidad.", "NA", "PR", "RT"]
     validation = validate_candidate_value(value, value_type, avoid_labels)
+    if not is_candidate_text_valid(label, value, value_type, avoid_labels):
+        validation = {
+            "valid": False,
+            "needs_attention": True,
+            "reason": validation.get("reason") or "invalid_candidate",
+        }
     contract = {
         "selection_type": ctype,
         "target_name": clean_text(target_name),
@@ -280,6 +341,25 @@ def build_extraction_contract(
         "source": "visual_result_selection",
     }
     return contract
+
+
+def build_extraction_contract_from_confirmed_result(
+    *,
+    target_name: str,
+    screen_label: str,
+    value: str,
+    return_format: str = "somente o valor",
+) -> dict[str, Any]:
+    label = clean_text(screen_label or target_name or "resultado")
+    example = clean_text(value)
+    value_type = infer_value_type(target_name, label, example)
+    return build_extraction_contract(
+        target_name=target_name or label,
+        screen_label=label,
+        candidate={"label": label, "value": example, "type": "field_value", "value_type": value_type},
+        selection_type="field_value",
+        return_format=return_format,
+    )
 
 
 def extraction_contract_from_action(action_config: dict[str, Any]) -> dict[str, Any]:

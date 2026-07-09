@@ -11,8 +11,14 @@ from backend.schemas.runs import ActionRunRequest, ActionRunResponse
 from backend.services.action_validation_review import run_validation_review, schedule_validation_review
 from backend.services.actions_repository import ActionsRepositoryError, find_action, load_actions_catalog
 from backend.services.demo_session import DemoSessionError, demo_session_manager
-from backend.services.result_selection import build_extraction_contract, save_visual_extraction_contract
+from backend.services.result_selection import (
+    build_extraction_contract,
+    build_extraction_contract_from_confirmed_result,
+    extract_with_contract,
+    save_visual_extraction_contract,
+)
 from backend.services.runs_repository import RunsRepositoryError
+from backend.services.runs_repository import list_runs
 
 logger = logging.getLogger("cotasync.api.actions")
 
@@ -30,6 +36,12 @@ class ResultSelectionConfirmRequest(BaseModel):
     screen_label: str = ""
     selection_type: str = ""
     candidate: dict[str, object] = Field(default_factory=dict)
+    return_format: str = "somente o valor"
+
+
+class ConfirmLastResultRequest(BaseModel):
+    target_name: str = ""
+    screen_label: str = ""
     return_format: str = "somente o valor"
 
 
@@ -148,11 +160,119 @@ async def confirm_result_selection(action_id: str, payload: ResultSelectionConfi
         selection_type=payload.selection_type,
         return_format=payload.return_format,
     )
+    if contract.get("needs_attention"):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Candidato de extração inválido ou sem valor confiável.",
+                "validation": contract.get("validation", {}),
+            },
+        )
     try:
         saved = save_visual_extraction_contract(action.key, contract)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"status": "ok", "extraction_review": contract, "reviewed_overlay": saved.get("reviewed_overlay", {})}
+
+
+def _last_success_run(action_id: str):
+    runs = list_runs(action_id=action_id, status="success", limit=10)
+    return runs[0] if runs else None
+
+
+def _extract_last_success_value(run) -> dict[str, str]:
+    payload = run.result_payload if isinstance(run.result_payload, dict) else {}
+    extracted = payload.get("dados_extraidos")
+    if isinstance(extracted, dict):
+        for label, value in extracted.items():
+            text = str(value or "").strip()
+            if text:
+                return {"label": str(label or "resultado"), "value": text, "source": "dados_extraidos"}
+    summary = str(run.operational_summary or run.result_summary or "").strip()
+    if summary:
+        if ":" in summary:
+            label, value = summary.split(":", 1)
+            if value.strip():
+                return {"label": label.strip() or "resultado", "value": value.strip(), "source": "operational_summary"}
+        return {"label": "resultado", "value": summary, "source": "operational_summary"}
+    return {"label": "", "value": "", "source": ""}
+
+
+@router.post("/{action_id}/extraction/confirm-last-result")
+async def confirm_last_result(action_id: str, payload: ConfirmLastResultRequest | None = None) -> dict[str, object]:
+    action = find_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Acao nao encontrada.")
+    request = payload or ConfirmLastResultRequest()
+    try:
+        run = _last_success_run(action.id)
+    except RunsRepositoryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if run is None:
+        raise HTTPException(status_code=404, detail="Nenhuma run de sucesso encontrada para esta ação.")
+    detected = _extract_last_success_value(run)
+    if not detected.get("value"):
+        raise HTTPException(status_code=422, detail="Última run de sucesso não possui valor detectado.")
+    target = request.target_name or action.extraction_target or action.objective or action.name
+    label = request.screen_label or detected.get("label") or target
+    contract = build_extraction_contract_from_confirmed_result(
+        target_name=target,
+        screen_label=label,
+        value=detected["value"],
+        return_format=request.return_format,
+    )
+    if contract.get("needs_attention"):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Último resultado não parece ser um valor de extração confiável.",
+                "detected": detected,
+                "validation": contract.get("validation", {}),
+            },
+        )
+    try:
+        saved = save_visual_extraction_contract(action.key, contract)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {
+        "status": "ok",
+        "run_id": run.id,
+        "detected_result": detected,
+        "extraction_review": contract,
+        "reviewed_overlay": saved.get("reviewed_overlay", {}),
+    }
+
+
+@router.post("/{action_id}/extraction/test")
+async def test_saved_extraction(action_id: str) -> dict[str, object]:
+    action = find_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Acao nao encontrada.")
+    try:
+        run = _last_success_run(action.id)
+    except RunsRepositoryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if run is None:
+        raise HTTPException(status_code=404, detail="Nenhuma run de sucesso encontrada para esta ação.")
+    contract = action.extraction_review if isinstance(action.extraction_review, dict) else {}
+    if not contract:
+        raise HTTPException(status_code=422, detail="Extração ainda não configurada.")
+    payload = run.result_payload if isinstance(run.result_payload, dict) else {}
+    result = extract_with_contract(payload.get("final_page_dom", ""), payload.get("final_page_text", ""), contract)
+    value = str(result.get("value") or "").strip()
+    technical_status = "needs_attention" if result.get("needs_attention") or not value else "ok"
+    return {
+        "status": "ok",
+        "run_id": run.id,
+        "extraction_test": {
+            "status": technical_status,
+            "label": contract.get("screen_label") or contract.get("target_name") or "",
+            "value": value,
+            "value_type": contract.get("value_type") or "",
+            "selection_type": contract.get("selection_type") or "",
+            "reason": result.get("validation", {}).get("reason", "") if isinstance(result.get("validation"), dict) else "",
+        },
+    }
 
 
 @router.post("/{action_id}/extraction-candidates")

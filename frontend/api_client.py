@@ -586,3 +586,35 @@ def operator_clear_active(
         api_base_url=api_base_url,
         timeout=timeout,
     )
+
+
+def confirm_last_extraction_result(
+    action_id: str,
+    *,
+    target_name: str = "",
+    screen_label: str = "",
+    return_format: str = "somente o valor",
+    api_base_url: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        f"/api/actions/{quote(str(action_id), safe='')}/extraction/confirm-last-result",
+        {"target_name": target_name, "screen_label": screen_label, "return_format": return_format},
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def test_action_extraction(
+    action_id: str,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        f"/api/actions/{quote(str(action_id), safe='')}/extraction/test",
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
