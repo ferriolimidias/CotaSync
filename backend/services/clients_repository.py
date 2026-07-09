@@ -12,7 +12,16 @@ from uuid import uuid4
 
 from backend.services.actions_repository import project_root
 
-CLIENT_TEMPLATE_COLUMNS = ["id", "name", "group", "active", "notes", "grupo", "grupo_2", "grupo_3", "cota", "vers_o"]
+CLIENT_TEMPLATE_COLUMNS = ["id", "name", "group", "active", "grupo", "cota", "versao", "notes"]
+
+VARIABLE_ALIASES = {
+    "grupo": ("grupo",),
+    "cota": ("cota", "grupo_2"),
+    "grupo_2": ("grupo_2", "cota"),
+    "versao": ("versao", "vers_o", "grupo_3"),
+    "vers_o": ("vers_o", "versao", "grupo_3"),
+    "grupo_3": ("grupo_3", "versao", "vers_o"),
+}
 
 
 class ClientsRepositoryError(Exception):
@@ -80,6 +89,50 @@ def _normalize_variables(raw: Any) -> dict[str, str]:
     }
 
 
+def _first_variable_value(variables: dict[str, str], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(variables.get(key, "") or "")
+        if value.strip():
+            return value
+    return ""
+
+
+def normalize_client_variables(raw_variables: Any) -> dict[str, str]:
+    variables = _normalize_variables(raw_variables)
+    if "cota" not in variables or not variables["cota"].strip():
+        cota = _first_variable_value(variables, ("grupo_2",))
+        if cota:
+            variables["cota"] = cota
+    if "versao" not in variables or not variables["versao"].strip():
+        versao = _first_variable_value(variables, ("vers_o", "grupo_3"))
+        if versao:
+            variables["versao"] = versao
+    return variables
+
+
+def get_client_display_fields(client: dict[str, Any]) -> dict[str, str]:
+    variables = normalize_client_variables(client.get("variables", {}))
+    return {
+        "grupo": _first_variable_value(variables, ("grupo",)),
+        "cota": _first_variable_value(variables, ("cota", "grupo_2")),
+        "versao": _first_variable_value(variables, ("versao", "vers_o", "grupo_3")),
+    }
+
+
+def resolve_variables_for_action(client: dict[str, Any], action_variable_schema: list[Any]) -> dict[str, str]:
+    variables = normalize_client_variables(client.get("variables", {}))
+    resolved: dict[str, str] = {}
+    for variable in action_variable_schema:
+        key = str(getattr(variable, "key", "") or "").strip()
+        if not key and isinstance(variable, dict):
+            key = str(variable.get("key") or "").strip()
+        if not key:
+            continue
+        aliases = VARIABLE_ALIASES.get(key, (key,))
+        resolved[key] = _first_variable_value(variables, aliases)
+    return resolved
+
+
 def _normalize_client(raw: dict[str, Any], existing: dict[str, Any] | None = None) -> dict[str, Any]:
     now = utc_now_iso()
     base = existing if isinstance(existing, dict) else {}
@@ -88,8 +141,8 @@ def _normalize_client(raw: dict[str, Any], existing: dict[str, Any] | None = Non
     if not name:
         raise ClientsRepositoryError("Nome do cliente e obrigatorio.")
     group = str(raw.get("group") or base.get("group") or "Lista Principal").strip() or "Lista Principal"
-    variables = _normalize_variables(base.get("variables", {}))
-    variables.update(_normalize_variables(raw.get("variables", {})))
+    variables = normalize_client_variables(base.get("variables", {}))
+    variables.update(normalize_client_variables(raw.get("variables", {})))
     return {
         "id": client_id,
         "name": name,
@@ -99,6 +152,11 @@ def _normalize_client(raw: dict[str, Any], existing: dict[str, Any] | None = Non
         "created_at": str(base.get("created_at") or now),
         "updated_at": now,
         "variables": variables,
+        "display_variables": {
+            "grupo": _first_variable_value(variables, ("grupo",)),
+            "cota": _first_variable_value(variables, ("cota", "grupo_2")),
+            "versao": _first_variable_value(variables, ("versao", "vers_o", "grupo_3")),
+        },
     }
 
 
@@ -192,6 +250,13 @@ def parse_clients_csv(csv_text: str) -> list[dict[str, Any]]:
             for key, value in row.items()
             if key not in {"id", "name", "group", "active", "notes"}
         }
+        if "cota" not in variables and row.get("grupo_2"):
+            variables["cota"] = row["grupo_2"]
+        if "versao" not in variables:
+            if row.get("grupo_3"):
+                variables["versao"] = row["grupo_3"]
+            elif row.get("vers_o"):
+                variables["versao"] = row["vers_o"]
         rows.append(
             {
                 "id": row.get("id", "").strip(),
@@ -264,14 +329,15 @@ def validate_clients_for_action(
     incomplete: list[dict[str, Any]] = []
     inactive: list[dict[str, Any]] = []
     for client in selected:
-        variables = client.get("variables") if isinstance(client.get("variables"), dict) else {}
-        missing = [key for key in required if not str(variables.get(key, "")).strip()]
+        resolved_variables = resolve_variables_for_action(client, getattr(action, "variables", []) or [])
+        missing = [key for key in required if not str(resolved_variables.get(key, "")).strip()]
         summary = {
             "id": client.get("id", ""),
             "name": client.get("name", ""),
             "group": client.get("group", ""),
             "active": bool(client.get("active", True)),
-            "variables": variables,
+            "variables": resolved_variables,
+            "display_variables": get_client_display_fields(client),
             "missing_variables": missing,
         }
         if not bool(client.get("active", True)):
@@ -298,10 +364,8 @@ def client_template_csv() -> str:
             "group": "Lista Principal",
             "active": "true",
             "grupo": "935",
-            "grupo_2": "110",
-            "grupo_3": "00",
             "cota": "110",
-            "vers_o": "00",
+            "versao": "00",
         }
     )
     return output.getvalue()

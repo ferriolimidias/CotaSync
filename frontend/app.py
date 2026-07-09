@@ -345,32 +345,42 @@ def _render_desktop_view_access(state_suffix: str) -> None:
 
 def _common_client_variables(prefix: str, values: dict[str, object] | None = None) -> dict[str, str]:
     values = values if isinstance(values, dict) else {}
-    cols = st.columns(5)
+    display_values = {
+        "grupo": str(values.get("grupo", "") or ""),
+        "cota": str(values.get("cota") or values.get("grupo_2") or ""),
+        "versao": str(values.get("versao") or values.get("vers_o") or values.get("grupo_3") or ""),
+    }
+    st.markdown("**Dados para consulta**")
+    cols = st.columns(3)
     variables: dict[str, str] = {}
-    for column, key in zip(cols, ["grupo", "grupo_2", "grupo_3", "cota", "vers_o"]):
+    labels = {"grupo": "Grupo", "cota": "Cota", "versao": "Versão"}
+    for column, key in zip(cols, ["grupo", "cota", "versao"]):
         variables[key] = column.text_input(
-            key,
-            value=str(values.get(key, "") or ""),
+            labels[key],
+            value=display_values[key],
             key=f"{prefix}_{key}",
         )
-    extra_json = st.text_area(
-        "Outras variáveis (JSON)",
-        value=json.dumps(
-            {key: value for key, value in values.items() if key not in variables},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        height=90,
-        key=f"{prefix}_extra_json",
-    )
-    try:
-        extra = json.loads(extra_json) if extra_json.strip() else {}
-        if isinstance(extra, dict):
-            variables.update({str(key): str(value) for key, value in extra.items() if str(key).strip()})
-        else:
-            st.warning("Variáveis extras precisam ser um objeto JSON.")
-    except json.JSONDecodeError:
-        st.warning("JSON de variáveis extras inválido.")
+    technical_keys = {"grupo", "cota", "versao", "grupo_2", "grupo_3", "vers_o"}
+    with st.expander("Avançado / outras variáveis", expanded=False):
+        st.caption("Use apenas se uma ação precisar de campos adicionais.")
+        extra_json = st.text_area(
+            "Outras variáveis JSON",
+            value=json.dumps(
+                {key: value for key, value in values.items() if key not in technical_keys},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            height=90,
+            key=f"{prefix}_extra_json",
+        )
+        try:
+            extra = json.loads(extra_json) if extra_json.strip() else {}
+            if isinstance(extra, dict):
+                variables.update({str(key): str(value) for key, value in extra.items() if str(key).strip()})
+            else:
+                st.warning("Variáveis extras precisam ser um objeto JSON.")
+        except json.JSONDecodeError:
+            st.warning("JSON de variáveis extras inválido.")
     return {key: value for key, value in variables.items() if str(value).strip()}
 
 
@@ -403,9 +413,9 @@ def _render_clients() -> None:
 
     with st.expander("Importar CSV de clientes", expanded=False):
         template = (
-            "name,group,active,grupo,grupo_2,grupo_3,cota,vers_o\n"
-            "Cliente 1,Lista Principal,true,935,110,00,110,00\n"
-            "Cliente 2,Lista Principal,true,935,111,00,111,00\n"
+            "name,group,active,grupo,cota,versao,notes\n"
+            "Cliente 1,Lista Principal,true,935,110,00,\n"
+            "Cliente 2,Lista Principal,true,935,111,00,\n"
         )
         try:
             template = get_clients_template_csv(api_base_url=API_BASE_URL)
@@ -463,18 +473,25 @@ def _render_clients() -> None:
     for client in clients:
         if not isinstance(client, dict):
             continue
-        variables = client.get("variables") if isinstance(client.get("variables"), dict) else {}
+        display_variables = (
+            client.get("display_variables") if isinstance(client.get("display_variables"), dict) else {}
+        )
+        raw_variables = client.get("variables") if isinstance(client.get("variables"), dict) else {}
         table.append(
             {
-                "id": client.get("id", ""),
-                "nome": client.get("name", ""),
-                "grupo/lista": client.get("group", ""),
-                "ativo": bool(client.get("active", True)),
-                "grupo": variables.get("grupo", ""),
-                "grupo_2": variables.get("grupo_2", ""),
-                "grupo_3": variables.get("grupo_3", ""),
-                "cota": variables.get("cota", ""),
-                "vers_o": variables.get("vers_o", ""),
+                "Nome": client.get("name", ""),
+                "Lista/grupo": client.get("group", ""),
+                "Ativo": bool(client.get("active", True)),
+                "Grupo": display_variables.get("grupo") or raw_variables.get("grupo", ""),
+                "Cota": display_variables.get("cota") or raw_variables.get("cota") or raw_variables.get("grupo_2", ""),
+                "Versão": (
+                    display_variables.get("versao")
+                    or raw_variables.get("versao")
+                    or raw_variables.get("vers_o")
+                    or raw_variables.get("grupo_3", "")
+                ),
+                "Notas": client.get("notes", ""),
+                "Atualizado em": client.get("updated_at", ""),
             }
         )
     st.dataframe(pd.DataFrame(table), use_container_width=True)
