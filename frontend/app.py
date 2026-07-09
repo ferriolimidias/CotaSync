@@ -45,8 +45,15 @@ from frontend.api_client import (  # noqa: E402
     DEMO_API_TIMEOUT_MESSAGE,
     DemoApiError,
     DemoApiTimeout,
+    create_batch,
     demo_api_request,
+    get_batch,
+    get_batch_results_csv,
     get_actions_for_ui,
+    list_batches,
+    parse_batch_csv_text,
+    required_batch_columns,
+    validate_batch_rows_for_action,
 )
 
 _EVIDENCIA = "data/print_teste.png"
@@ -326,6 +333,188 @@ def _render_desktop_view_access(state_suffix: str) -> None:
         ttl_minutes = max(1, ttl_seconds // 60)
         expiry_label = expires_at.replace("T", " ").replace("+00:00", " UTC")
         st.caption(f"Link temporário: {ttl_minutes} min · expira em {expiry_label}.")
+
+
+def _batch_rows_table(batch: dict[str, object]) -> list[dict[str, object]]:
+    table: list[dict[str, object]] = []
+    rows = batch.get("rows") if isinstance(batch, dict) else []
+    if not isinstance(rows, list):
+        return table
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("result_payload") if isinstance(row.get("result_payload"), dict) else {}
+        dados_extraidos = row.get("dados_extraidos")
+        if not isinstance(dados_extraidos, dict) and isinstance(payload, dict):
+            dados_extraidos = payload.get("dados_extraidos", {})
+        table.append(
+            {
+                "linha": row.get("index", ""),
+                "status": row.get("status", ""),
+                "run_id": row.get("run_id", ""),
+                "variaveis": json.dumps(row.get("variables") or {}, ensure_ascii=False),
+                "resultado": row.get("operational_summary", ""),
+                "dados_extraidos": json.dumps(dados_extraidos or {}, ensure_ascii=False),
+                "erro": row.get("error_message", ""),
+                "inicio": row.get("started_at", ""),
+                "fim": row.get("finished_at", ""),
+            }
+        )
+    return table
+
+
+def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
+    st.header("Execução em massa")
+    st.caption("Fila sequencial permanente: uma linha por vez, com pausa configurável entre consultas.")
+
+    executable_actions = {
+        key: value
+        for key, value in actions_by_key.items()
+        if isinstance(value, dict) and _acao_configurada_para_execucao_rapida(value)
+    }
+    if not executable_actions:
+        st.info("Nenhuma ação aprendida pronta para execução.")
+        return
+
+    labels = {
+        str(action.get("name") or key): key
+        for key, action in executable_actions.items()
+        if isinstance(action, dict)
+    }
+    selected_label = st.selectbox("Ação", options=list(labels.keys()), key="batch_action_select")
+    selected_key = labels[selected_label]
+    action = executable_actions[selected_key]
+    action_id = str(action.get("id") or selected_key)
+
+    required_columns = required_batch_columns(action)
+    st.markdown("**Variáveis obrigatórias**")
+    if required_columns:
+        st.write(", ".join(f"`{column}`" for column in required_columns))
+    else:
+        st.caption("Esta ação não declara variáveis obrigatórias.")
+
+    csv_text = st.text_area(
+        "CSV",
+        value="",
+        height=150,
+        placeholder="grupo,grupo_2,grupo_3\n935,110,00\n935,111,00",
+        key="batch_csv_text",
+    )
+    uploaded_file = st.file_uploader("Arquivo CSV", type=["csv"], key="batch_csv_upload")
+    delay_seconds = st.number_input(
+        "Delay entre linhas (segundos)",
+        min_value=0.0,
+        max_value=3600.0,
+        value=3.0,
+        step=1.0,
+        key="batch_delay_seconds",
+    )
+
+    raw_csv = csv_text
+    if uploaded_file is not None:
+        raw_csv = uploaded_file.getvalue().decode("utf-8-sig", errors="replace")
+
+    if st.button("Validar lote", type="secondary", key="batch_validate"):
+        rows = parse_batch_csv_text(raw_csv)
+        errors = validate_batch_rows_for_action(action, rows)
+        st.session_state.batch_validation_rows = rows
+        st.session_state.batch_validation_errors = errors
+        if errors:
+            st.session_state.pop("batch_ready_action_id", None)
+        else:
+            st.session_state.batch_ready_action_id = action_id
+
+    rows = st.session_state.get("batch_validation_rows", [])
+    errors = st.session_state.get("batch_validation_errors", [])
+    if errors:
+        for error in errors:
+            st.error(error)
+    elif isinstance(rows, list) and rows:
+        st.success(f"Lote validado com {len(rows)} linha(s).")
+        st.dataframe(pd.DataFrame(rows).head(10), use_container_width=True)
+
+    can_execute = (
+        isinstance(rows, list)
+        and bool(rows)
+        and not errors
+        and st.session_state.get("batch_ready_action_id") == action_id
+    )
+    if st.button("Executar lote", type="primary", key="batch_execute", disabled=not can_execute):
+        try:
+            response = create_batch(
+                action_id=action_id,
+                rows=rows,
+                requested_by="streamlit-batch",
+                delay_between_rows_seconds=delay_seconds,
+                api_base_url=API_BASE_URL,
+            )
+            batch = response.get("batch", {}) if isinstance(response, dict) else {}
+            st.session_state.current_batch_id = str(batch.get("batch_id") or "")
+            st.rerun()
+        except DemoApiError as exc:
+            st.error(str(exc))
+
+    batch_id = str(st.session_state.get("current_batch_id") or "").strip()
+    if batch_id:
+        try:
+            batch = get_batch(batch_id, api_base_url=API_BASE_URL).get("batch", {})
+        except DemoApiError as exc:
+            st.error(str(exc))
+            batch = {}
+        if isinstance(batch, dict) and batch:
+            status = str(batch.get("status") or "")
+            batch_rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
+            completed = sum(1 for row in batch_rows if isinstance(row, dict) and row.get("status") in {"success", "error", "skipped"})
+            total = len(batch_rows)
+            st.markdown("### Lote atual")
+            st.write(f"**Batch:** `{batch.get('batch_id')}` · **Status:** `{status}`")
+            st.progress(0 if total == 0 else completed / total)
+            table = _batch_rows_table(batch)
+            if table:
+                st.dataframe(pd.DataFrame(table), use_container_width=True)
+            if status in {"pending", "running"}:
+                st.info("Executando em fila sequencial. A próxima linha só começa após a anterior terminar e aguardar o delay.")
+                sleep(2)
+                st.rerun()
+            else:
+                try:
+                    csv_final = get_batch_results_csv(str(batch.get("batch_id")), api_base_url=API_BASE_URL)
+                    st.download_button(
+                        "Baixar resultados CSV",
+                        data=csv_final.encode("utf-8"),
+                        file_name=f"batch_{batch.get('batch_id')}_results.csv",
+                        mime="text/csv",
+                        type="primary",
+                        use_container_width=True,
+                    )
+                except DemoApiError as exc:
+                    st.warning(str(exc))
+
+    with st.expander("Histórico recente", expanded=False):
+        try:
+            history = list_batches(api_base_url=API_BASE_URL).get("batches", [])
+        except DemoApiError as exc:
+            st.warning(str(exc))
+            history = []
+        if isinstance(history, list) and history:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "batch_id": item.get("batch_id", ""),
+                            "action_id": item.get("action_id", ""),
+                            "status": item.get("status", ""),
+                            "created_at": item.get("created_at", ""),
+                            "finished_at": item.get("finished_at", ""),
+                        }
+                        for item in history
+                        if isinstance(item, dict)
+                    ]
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.caption("Nenhum lote salvo ainda.")
 
 
 def render_access_profile_summary(session: dict, session_id: str) -> bool:
@@ -1536,8 +1725,15 @@ with st.sidebar:
     st.caption("Status do sistema: 🟢 Online")
     menu_selecionado = option_menu(
         menu_title="Menu Principal",
-        options=["Chat & Ações", "Agendamentos e Filas", "Catálogo de Ações", "Logs do Sistema", "Configurações"],
-        icons=["chat-dots", "calendar2-check", "book", "terminal", "gear"],
+        options=[
+            "Chat & Ações",
+            "Execução em massa",
+            "Agendamentos e Filas",
+            "Catálogo de Ações",
+            "Logs do Sistema",
+            "Configurações",
+        ],
+        icons=["chat-dots", "list-task", "calendar2-check", "book", "terminal", "gear"],
         default_index=0,
         styles={
             "container": {"padding": "0!important", "background-color": "#0f172a"},
@@ -1814,6 +2010,9 @@ if menu_selecionado == "Chat & Ações":
         st.session_state.messages.append(_normalizar_resposta_assistente(resposta_chat))
         salvar_historico_disco(st.session_state.messages)
         st.rerun()
+
+elif menu_selecionado == "Execução em massa":
+    _render_batch_execution(acoes_ui)
 
 elif menu_selecionado == "Agendamentos e Filas":
     st.header("⏰ Agendamentos e Operação em Lote")

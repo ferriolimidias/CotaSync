@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import csv
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +33,59 @@ DEMO_API_TIMEOUT_MESSAGE = (
     "A ação ainda está em execução ou demorou mais que o esperado. "
     "Vou buscar o resultado mais recente."
 )
+
+
+def parse_batch_csv_text(csv_text: str) -> list[dict[str, str]]:
+    """Parseia CSV simples preservando valores como texto, inclusive zeros a esquerda."""
+
+    text = str(csv_text or "")
+    if text.startswith("\ufeff"):
+        text = text.lstrip("\ufeff")
+    if not text.strip():
+        return []
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        return []
+
+    rows: list[dict[str, str]] = []
+    for raw_row in reader:
+        if raw_row is None:
+            continue
+        row = {
+            str(key or "").lstrip("\ufeff").strip(): "" if value is None else str(value)
+            for key, value in raw_row.items()
+            if key is not None and str(key).strip()
+        }
+        if any(value.strip() for value in row.values()):
+            rows.append(row)
+    return rows
+
+
+def required_batch_columns(action: dict[str, Any]) -> list[str]:
+    columns: list[str] = []
+    for variable in action.get("variables", []):
+        if not isinstance(variable, dict):
+            continue
+        key = str(variable.get("key") or "").strip()
+        if key and bool(variable.get("required", True)):
+            columns.append(key)
+    return columns
+
+
+def validate_batch_rows_for_action(action: dict[str, Any], rows: list[dict[str, str]]) -> list[str]:
+    errors: list[str] = []
+    if not rows:
+        return ["CSV sem linhas para executar."]
+    required = required_batch_columns(action)
+    columns = set().union(*(set(row.keys()) for row in rows)) if rows else set()
+    missing_columns = [column for column in required if column not in columns]
+    if missing_columns:
+        errors.append("Colunas obrigatorias ausentes: " + ", ".join(missing_columns))
+    for index, row in enumerate(rows, start=1):
+        missing_values = [column for column in required if not str(row.get(column, "")).strip()]
+        if missing_values:
+            errors.append(f"Linha {index} sem valor para: {', '.join(missing_values)}")
+    return errors
 
 
 @dataclass(frozen=True)
@@ -326,3 +381,51 @@ def demo_api_request(
     if not isinstance(body, dict):
         raise DemoApiError("Resposta invalida da API da demonstracao.")
     return body
+
+
+def create_batch(
+    *,
+    action_id: str,
+    rows: list[dict[str, str]],
+    requested_by: str = "streamlit-batch",
+    delay_between_rows_seconds: float = 3,
+    api_base_url: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        "/api/batches",
+        {
+            "action_id": action_id,
+            "rows": rows,
+            "requested_by": requested_by,
+            "delay_between_rows_seconds": delay_between_rows_seconds,
+        },
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def get_batch(batch_id: str, *, api_base_url: str | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    return demo_api_request("GET", f"/api/batches/{batch_id}", api_base_url=api_base_url, timeout=timeout)
+
+
+def list_batches(*, api_base_url: str | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    return demo_api_request("GET", "/api/batches", api_base_url=api_base_url, timeout=timeout)
+
+
+def get_batch_results_csv(
+    batch_id: str,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 10.0,
+) -> str:
+    url = f"{_api_base_url(api_base_url)}/api/batches/{str(batch_id).strip()}/results.csv"
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.Timeout as exc:
+        raise DemoApiTimeout(DEMO_API_TIMEOUT_MESSAGE) from exc
+    except requests.RequestException as exc:
+        raise DemoApiError("CSV do batch indisponivel.") from exc
+    return response.text

@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from backend.api.actions import router as actions_router
+from backend.api.batches import router as batches_router
 from backend.api.browser import router as browser_router
 from backend.api.demo import router as demo_router
 from backend.api.desktop_browser import router as desktop_browser_router
@@ -82,6 +83,7 @@ app = FastAPI(
 )
 
 app.include_router(actions_router)
+app.include_router(batches_router)
 app.include_router(browser_router)
 app.include_router(actions_run_router)
 app.include_router(runs_router)
