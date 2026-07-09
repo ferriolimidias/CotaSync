@@ -22,6 +22,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from backend.api.actions import router as actions_router
 from backend.api.batches import router as batches_router
 from backend.api.browser import router as browser_router
+from backend.api.clients import groups_router as client_groups_router
+from backend.api.clients import router as clients_router
 from backend.api.demo import router as demo_router
 from backend.api.desktop_browser import router as desktop_browser_router
 from backend.api.external_systems import router as external_systems_router
@@ -85,6 +87,8 @@ app = FastAPI(
 app.include_router(actions_router)
 app.include_router(batches_router)
 app.include_router(browser_router)
+app.include_router(clients_router)
+app.include_router(client_groups_router)
 app.include_router(actions_run_router)
 app.include_router(runs_router)
 app.include_router(demo_router)

@@ -21,6 +21,8 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 class BatchCreateRequest(BaseModel):
     action_id: str
     rows: list[dict[str, Any]] = Field(default_factory=list)
+    client_group: str | None = None
+    client_ids: list[str] = Field(default_factory=list)
     requested_by: str = "api"
     delay_between_rows_seconds: float = 3
 
@@ -31,6 +33,8 @@ async def create_batch_endpoint(payload: BatchCreateRequest) -> dict[str, Any]:
         batch = create_batch(
             action_id=payload.action_id,
             rows=payload.rows,
+            client_group=payload.client_group,
+            client_ids=payload.client_ids,
             requested_by=payload.requested_by,
             delay_between_rows_seconds=payload.delay_between_rows_seconds,
             auto_start=True,

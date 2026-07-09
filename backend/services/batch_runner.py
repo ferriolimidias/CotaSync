@@ -15,6 +15,7 @@ from uuid import uuid4
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.services.action_runner import missing_required_variables, run_action_sync
 from backend.services.actions_repository import find_action, project_root
+from backend.services.clients_repository import validate_clients_for_action
 
 logger = logging.getLogger("cotasync.batch_runner")
 
@@ -104,6 +105,39 @@ def validate_batch_rows(action: Any, rows: list[dict[str, Any]]) -> None:
             row_errors.append(f"linha {index}: {', '.join(missing_values)}")
     if row_errors:
         raise BatchRunnerError("Variaveis obrigatorias ausentes no lote: " + "; ".join(row_errors))
+
+
+def _prepared_variables(row: dict[str, Any]) -> dict[str, Any]:
+    variables = row.get("variables") if isinstance(row.get("variables"), dict) else row
+    return variables if isinstance(variables, dict) else {}
+
+
+def _validate_prepared_rows(action: Any, rows: list[dict[str, Any]]) -> None:
+    validate_batch_rows(action, [_prepared_variables(row) for row in rows])
+
+
+def _rows_from_clients(
+    action: Any,
+    *,
+    client_group: str | None = None,
+    client_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    validation = validate_clients_for_action(action, client_group=client_group, client_ids=client_ids)
+    ready = validation.get("ready") if isinstance(validation, dict) else []
+    rows: list[dict[str, Any]] = []
+    for client in ready if isinstance(ready, list) else []:
+        if not isinstance(client, dict):
+            continue
+        variables = client.get("variables") if isinstance(client.get("variables"), dict) else {}
+        rows.append(
+            {
+                "client_id": str(client.get("id") or ""),
+                "client_name": str(client.get("name") or ""),
+                "client_group": str(client.get("group") or ""),
+                "variables": {str(key): str(value) for key, value in variables.items()},
+            }
+        )
+    return rows
 
 
 def _write_batch(batch: dict[str, Any], batches_dir: Path | None = None) -> dict[str, Any]:
@@ -267,7 +301,9 @@ def schedule_batch_worker(batch_id: str, *, batches_dir: Path | None = None) -> 
 def create_batch(
     *,
     action_id: str,
-    rows: list[dict[str, Any]],
+    rows: list[dict[str, Any]] | None = None,
+    client_group: str | None = None,
+    client_ids: list[str] | None = None,
     requested_by: str = "api",
     delay_between_rows_seconds: int | float = DEFAULT_DELAY_BETWEEN_ROWS_SECONDS,
     batches_dir: Path | None = None,
@@ -282,7 +318,14 @@ def create_batch(
     action = find_action(action_id)
     if action is None:
         raise BatchRunnerError("Acao nao encontrada.")
-    validate_batch_rows(action, rows)
+    source = "rows"
+    prepared_rows = rows or []
+    if client_group or client_ids:
+        source = "clients"
+        prepared_rows = _rows_from_clients(action, client_group=client_group, client_ids=client_ids)
+        if not prepared_rows:
+            raise BatchRunnerError("Nenhum cliente ativo com dados completos para esta acao.")
+    _validate_prepared_rows(action, prepared_rows)
 
     batch_id = str(uuid4())
     created_at = utc_now_iso()
@@ -292,6 +335,9 @@ def create_batch(
         "action_key": action.key,
         "status": "pending",
         "requested_by": str(requested_by or "api"),
+        "source": source,
+        "client_group": str(client_group or ""),
+        "client_ids": [str(item) for item in client_ids or []],
         "delay_between_rows_seconds": max(0, float(delay_between_rows_seconds)),
         "created_at": created_at,
         "started_at": None,
@@ -300,7 +346,10 @@ def create_batch(
         "rows": [
             {
                 "index": index,
-                "variables": {str(key): str(value) for key, value in row.items()},
+                "client_id": str(row.get("client_id") or ""),
+                "client_name": str(row.get("client_name") or ""),
+                "client_group": str(row.get("client_group") or ""),
+                "variables": {str(key): str(value) for key, value in _prepared_variables(row).items()},
                 "status": "pending",
                 "run_id": "",
                 "operational_summary": "",
@@ -310,7 +359,7 @@ def create_batch(
                 "started_at": None,
                 "finished_at": None,
             }
-            for index, row in enumerate(rows, start=1)
+            for index, row in enumerate(prepared_rows, start=1)
         ],
     }
     _write_batch(batch, batches_dir)
@@ -335,6 +384,9 @@ def batch_results_csv(batch: dict[str, Any]) -> str:
     columns = [
         "batch_id",
         "row_index",
+        "client_id",
+        "client_name",
+        "client_group",
         "action_id",
         "status",
         "run_id",
@@ -359,6 +411,9 @@ def batch_results_csv(batch: dict[str, Any]) -> str:
             {
                 "batch_id": batch.get("batch_id", ""),
                 "row_index": row.get("index", ""),
+                "client_id": row.get("client_id", ""),
+                "client_name": row.get("client_name", ""),
+                "client_group": row.get("client_group", ""),
                 "action_id": batch.get("action_id", ""),
                 "status": row.get("status", ""),
                 "run_id": row.get("run_id", ""),

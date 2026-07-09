@@ -46,14 +46,22 @@ from frontend.api_client import (  # noqa: E402
     DemoApiError,
     DemoApiTimeout,
     create_batch,
+    create_client,
+    deactivate_client,
     demo_api_request,
     get_batch,
     get_batch_results_csv,
+    get_clients_template_csv,
     get_actions_for_ui,
+    import_clients_csv,
     list_batches,
+    list_client_groups,
+    list_clients,
     parse_batch_csv_text,
     required_batch_columns,
+    update_client,
     validate_batch_rows_for_action,
+    validate_clients_for_action,
 )
 
 _EVIDENCIA = "data/print_teste.png"
@@ -335,6 +343,195 @@ def _render_desktop_view_access(state_suffix: str) -> None:
         st.caption(f"Link temporário: {ttl_minutes} min · expira em {expiry_label}.")
 
 
+def _common_client_variables(prefix: str, values: dict[str, object] | None = None) -> dict[str, str]:
+    values = values if isinstance(values, dict) else {}
+    cols = st.columns(5)
+    variables: dict[str, str] = {}
+    for column, key in zip(cols, ["grupo", "grupo_2", "grupo_3", "cota", "vers_o"]):
+        variables[key] = column.text_input(
+            key,
+            value=str(values.get(key, "") or ""),
+            key=f"{prefix}_{key}",
+        )
+    extra_json = st.text_area(
+        "Outras variáveis (JSON)",
+        value=json.dumps(
+            {key: value for key, value in values.items() if key not in variables},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        height=90,
+        key=f"{prefix}_extra_json",
+    )
+    try:
+        extra = json.loads(extra_json) if extra_json.strip() else {}
+        if isinstance(extra, dict):
+            variables.update({str(key): str(value) for key, value in extra.items() if str(key).strip()})
+        else:
+            st.warning("Variáveis extras precisam ser um objeto JSON.")
+    except json.JSONDecodeError:
+        st.warning("JSON de variáveis extras inválido.")
+    return {key: value for key, value in variables.items() if str(value).strip()}
+
+
+def _render_clients() -> None:
+    st.header("Clientes")
+    st.caption("Base persistente usada pela execução em massa e pelos agendamentos.")
+
+    with st.expander("Cadastrar cliente manualmente", expanded=True):
+        name = st.text_input("Nome do cliente", key="client_form_name")
+        group = st.text_input("Grupo/lista", value="Lista Principal", key="client_form_group")
+        active = st.checkbox("Ativo", value=True, key="client_form_active")
+        notes = st.text_area("Notas", height=70, key="client_form_notes")
+        variables = _common_client_variables("client_form_vars")
+        if st.button("Salvar cliente", type="primary", key="client_form_save"):
+            try:
+                create_client(
+                    {
+                        "name": name,
+                        "group": group,
+                        "active": active,
+                        "notes": notes,
+                        "variables": variables,
+                    },
+                    api_base_url=API_BASE_URL,
+                )
+                st.success("Cliente salvo.")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+
+    with st.expander("Importar CSV de clientes", expanded=False):
+        template = (
+            "name,group,active,grupo,grupo_2,grupo_3,cota,vers_o\n"
+            "Cliente 1,Lista Principal,true,935,110,00,110,00\n"
+            "Cliente 2,Lista Principal,true,935,111,00,111,00\n"
+        )
+        try:
+            template = get_clients_template_csv(api_base_url=API_BASE_URL)
+        except DemoApiError:
+            pass
+        st.download_button(
+            "Baixar modelo CSV",
+            data=template.encode("utf-8"),
+            file_name="clientes_cotasync_modelo.csv",
+            mime="text/csv",
+        )
+        csv_text = st.text_area("CSV de clientes", height=150, key="clients_import_text")
+        uploaded = st.file_uploader("Arquivo CSV de clientes", type=["csv"], key="clients_import_upload")
+        raw_csv = csv_text
+        if uploaded is not None:
+            raw_csv = uploaded.getvalue().decode("utf-8-sig", errors="replace")
+        if st.button("Importar clientes", key="clients_import_button"):
+            try:
+                result = import_clients_csv(raw_csv, api_base_url=API_BASE_URL)
+                st.success(
+                    f"Importação concluída: {result.get('created', 0)} criado(s), "
+                    f"{result.get('updated', 0)} atualizado(s)."
+                )
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+
+    try:
+        groups = list_client_groups(api_base_url=API_BASE_URL).get("groups", [])
+    except DemoApiError as exc:
+        st.warning(str(exc))
+        groups = []
+    group_options = ["Todos"] + [str(item) for item in groups if str(item).strip()]
+    filters = st.columns(2)
+    selected_group = filters[0].selectbox("Filtrar por grupo/lista", options=group_options, key="clients_filter_group")
+    include_inactive = filters[1].checkbox("Mostrar inativos", value=True, key="clients_filter_inactive")
+
+    try:
+        response = list_clients(
+            group=None if selected_group == "Todos" else selected_group,
+            include_inactive=include_inactive,
+            api_base_url=API_BASE_URL,
+        )
+        clients = response.get("clients", [])
+    except DemoApiError as exc:
+        st.error(str(exc))
+        clients = []
+
+    st.markdown("### Clientes cadastrados")
+    if not clients:
+        st.info("Nenhum cliente cadastrado.")
+        return
+
+    table = []
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        variables = client.get("variables") if isinstance(client.get("variables"), dict) else {}
+        table.append(
+            {
+                "id": client.get("id", ""),
+                "nome": client.get("name", ""),
+                "grupo/lista": client.get("group", ""),
+                "ativo": bool(client.get("active", True)),
+                "grupo": variables.get("grupo", ""),
+                "grupo_2": variables.get("grupo_2", ""),
+                "grupo_3": variables.get("grupo_3", ""),
+                "cota": variables.get("cota", ""),
+                "vers_o": variables.get("vers_o", ""),
+            }
+        )
+    st.dataframe(pd.DataFrame(table), use_container_width=True)
+
+    selected_client_id = st.selectbox(
+        "Editar cliente",
+        options=[str(client.get("id")) for client in clients if isinstance(client, dict)],
+        format_func=lambda item: next(
+            (
+                f"{client.get('name', '')} · {client.get('group', '')}"
+                for client in clients
+                if isinstance(client, dict) and str(client.get("id")) == item
+            ),
+            item,
+        ),
+        key="clients_edit_select",
+    )
+    selected_client = next(
+        (client for client in clients if isinstance(client, dict) and str(client.get("id")) == selected_client_id),
+        {},
+    )
+    with st.expander("Editar cliente selecionado", expanded=False):
+        edit_name = st.text_input("Nome", value=str(selected_client.get("name", "") or ""), key="client_edit_name")
+        edit_group = st.text_input("Grupo/lista", value=str(selected_client.get("group", "") or ""), key="client_edit_group")
+        edit_active = st.checkbox("Ativo", value=bool(selected_client.get("active", True)), key="client_edit_active")
+        edit_notes = st.text_area("Notas", value=str(selected_client.get("notes", "") or ""), height=70, key="client_edit_notes")
+        edit_vars = _common_client_variables(
+            "client_edit_vars",
+            selected_client.get("variables") if isinstance(selected_client.get("variables"), dict) else {},
+        )
+        buttons = st.columns(2)
+        if buttons[0].button("Salvar alterações", type="primary", key="client_edit_save"):
+            try:
+                update_client(
+                    selected_client_id,
+                    {
+                        "name": edit_name,
+                        "group": edit_group,
+                        "active": edit_active,
+                        "notes": edit_notes,
+                        "variables": edit_vars,
+                    },
+                    api_base_url=API_BASE_URL,
+                )
+                st.success("Cliente atualizado.")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+        if buttons[1].button("Desativar cliente", key="client_edit_deactivate"):
+            try:
+                deactivate_client(selected_client_id, api_base_url=API_BASE_URL)
+                st.success("Cliente desativado.")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+
+
 def _batch_rows_table(batch: dict[str, object]) -> list[dict[str, object]]:
     table: list[dict[str, object]] = []
     rows = batch.get("rows") if isinstance(batch, dict) else []
@@ -350,6 +547,8 @@ def _batch_rows_table(batch: dict[str, object]) -> list[dict[str, object]]:
         table.append(
             {
                 "linha": row.get("index", ""),
+                "cliente": row.get("client_name", ""),
+                "lista": row.get("client_group", ""),
                 "status": row.get("status", ""),
                 "run_id": row.get("run_id", ""),
                 "variaveis": json.dumps(row.get("variables") or {}, ensure_ascii=False),
@@ -365,7 +564,7 @@ def _batch_rows_table(batch: dict[str, object]) -> list[dict[str, object]]:
 
 def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
     st.header("Execução em massa")
-    st.caption("Fila sequencial permanente: uma linha por vez, com pausa configurável entre consultas.")
+    st.caption("Escolha uma ação e uma lista de clientes. A fila roda sempre um cliente por vez.")
 
     executable_actions = {
         key: value
@@ -393,16 +592,22 @@ def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
     else:
         st.caption("Esta ação não declara variáveis obrigatórias.")
 
-    csv_text = st.text_area(
-        "CSV",
-        value="",
-        height=150,
-        placeholder="grupo,grupo_2,grupo_3\n935,110,00\n935,111,00",
-        key="batch_csv_text",
+    try:
+        groups = list_client_groups(api_base_url=API_BASE_URL).get("groups", [])
+    except DemoApiError as exc:
+        st.error(str(exc))
+        groups = []
+    group_options = [str(item) for item in groups if str(item).strip()]
+    if not group_options:
+        st.info("Cadastre clientes na aba Clientes antes de executar por lista.")
+    selected_group = st.selectbox(
+        "Lista/grupo de clientes",
+        options=group_options or ["Lista Principal"],
+        key="batch_client_group",
+        disabled=not bool(group_options),
     )
-    uploaded_file = st.file_uploader("Arquivo CSV", type=["csv"], key="batch_csv_upload")
     delay_seconds = st.number_input(
-        "Delay entre linhas (segundos)",
+        "Delay entre clientes (segundos)",
         min_value=0.0,
         max_value=3600.0,
         value=3.0,
@@ -410,41 +615,76 @@ def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
         key="batch_delay_seconds",
     )
 
-    raw_csv = csv_text
-    if uploaded_file is not None:
-        raw_csv = uploaded_file.getvalue().decode("utf-8-sig", errors="replace")
+    validation: dict[str, object] = {}
+    if group_options:
+        try:
+            validation = validate_clients_for_action(
+                action_id=action_id,
+                client_group=selected_group,
+                api_base_url=API_BASE_URL,
+            )
+        except DemoApiError as exc:
+            st.error(str(exc))
+    ready = validation.get("ready") if isinstance(validation.get("ready"), list) else []
+    incomplete = validation.get("incomplete") if isinstance(validation.get("incomplete"), list) else []
+    inactive = validation.get("inactive") if isinstance(validation.get("inactive"), list) else []
 
-    if st.button("Validar lote", type="secondary", key="batch_validate"):
-        rows = parse_batch_csv_text(raw_csv)
-        errors = validate_batch_rows_for_action(action, rows)
-        st.session_state.batch_validation_rows = rows
-        st.session_state.batch_validation_errors = errors
-        if errors:
-            st.session_state.pop("batch_ready_action_id", None)
-        else:
-            st.session_state.batch_ready_action_id = action_id
+    metrics = st.columns(3)
+    metrics[0].metric("Prontos", len(ready))
+    metrics[1].metric("Incompletos", len(incomplete))
+    metrics[2].metric("Inativos", len(inactive))
 
-    rows = st.session_state.get("batch_validation_rows", [])
-    errors = st.session_state.get("batch_validation_errors", [])
-    if errors:
-        for error in errors:
-            st.error(error)
-    elif isinstance(rows, list) and rows:
-        st.success(f"Lote validado com {len(rows)} linha(s).")
-        st.dataframe(pd.DataFrame(rows).head(10), use_container_width=True)
+    if ready:
+        st.markdown("**Clientes que entrarão na fila**")
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "cliente": item.get("name", ""),
+                        "lista": item.get("group", ""),
+                        "variaveis": json.dumps(item.get("variables") or {}, ensure_ascii=False),
+                    }
+                    for item in ready
+                    if isinstance(item, dict)
+                ]
+            ).head(20),
+            use_container_width=True,
+        )
+    if incomplete:
+        with st.expander("Clientes ignorados por falta de dados", expanded=False):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "cliente": item.get("name", ""),
+                            "lista": item.get("group", ""),
+                            "faltando": ", ".join(item.get("missing_variables") or []),
+                        }
+                        for item in incomplete
+                        if isinstance(item, dict)
+                    ]
+                ),
+                use_container_width=True,
+            )
+    if inactive:
+        with st.expander("Clientes inativos ignorados", expanded=False):
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"cliente": item.get("name", ""), "lista": item.get("group", "")}
+                        for item in inactive
+                        if isinstance(item, dict)
+                    ]
+                ),
+                use_container_width=True,
+            )
 
-    can_execute = (
-        isinstance(rows, list)
-        and bool(rows)
-        and not errors
-        and st.session_state.get("batch_ready_action_id") == action_id
-    )
-    if st.button("Executar lote", type="primary", key="batch_execute", disabled=not can_execute):
+    if st.button("Executar agora", type="primary", key="batch_execute_clients", disabled=not bool(ready)):
         try:
             response = create_batch(
                 action_id=action_id,
-                rows=rows,
-                requested_by="streamlit-batch",
+                client_group=selected_group,
+                requested_by="streamlit-client-list",
                 delay_between_rows_seconds=delay_seconds,
                 api_base_url=API_BASE_URL,
             )
@@ -453,6 +693,54 @@ def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
             st.rerun()
         except DemoApiError as exc:
             st.error(str(exc))
+
+    with st.expander("Avançado: executar com CSV avulso", expanded=False):
+        st.caption("Use apenas para testes pontuais. O fluxo principal usa a base de clientes.")
+        csv_text = st.text_area(
+            "CSV avulso",
+            value="",
+            height=140,
+            placeholder="grupo,grupo_2,grupo_3\n935,110,00\n935,111,00",
+            key="batch_csv_text",
+        )
+        uploaded_file = st.file_uploader("Arquivo CSV avulso", type=["csv"], key="batch_csv_upload")
+        raw_csv = csv_text
+        if uploaded_file is not None:
+            raw_csv = uploaded_file.getvalue().decode("utf-8-sig", errors="replace")
+        if st.button("Validar CSV avulso", type="secondary", key="batch_validate_csv"):
+            rows = parse_batch_csv_text(raw_csv)
+            errors = validate_batch_rows_for_action(action, rows)
+            st.session_state.batch_validation_rows = rows
+            st.session_state.batch_validation_errors = errors
+            st.session_state.batch_ready_action_id = action_id if not errors else ""
+        rows = st.session_state.get("batch_validation_rows", [])
+        errors = st.session_state.get("batch_validation_errors", [])
+        if errors:
+            for error in errors:
+                st.error(error)
+        elif isinstance(rows, list) and rows:
+            st.success(f"CSV avulso validado com {len(rows)} linha(s).")
+            st.dataframe(pd.DataFrame(rows).head(10), use_container_width=True)
+        can_execute_csv = (
+            isinstance(rows, list)
+            and bool(rows)
+            and not errors
+            and st.session_state.get("batch_ready_action_id") == action_id
+        )
+        if st.button("Executar CSV avulso", key="batch_execute_csv", disabled=not can_execute_csv):
+            try:
+                response = create_batch(
+                    action_id=action_id,
+                    rows=rows,
+                    requested_by="streamlit-batch-csv",
+                    delay_between_rows_seconds=delay_seconds,
+                    api_base_url=API_BASE_URL,
+                )
+                batch = response.get("batch", {}) if isinstance(response, dict) else {}
+                st.session_state.current_batch_id = str(batch.get("batch_id") or "")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
 
     batch_id = str(st.session_state.get("current_batch_id") or "").strip()
     if batch_id:
@@ -1727,13 +2015,14 @@ with st.sidebar:
         menu_title="Menu Principal",
         options=[
             "Chat & Ações",
+            "Clientes",
             "Execução em massa",
             "Agendamentos e Filas",
             "Catálogo de Ações",
             "Logs do Sistema",
             "Configurações",
         ],
-        icons=["chat-dots", "list-task", "calendar2-check", "book", "terminal", "gear"],
+        icons=["chat-dots", "people", "list-task", "calendar2-check", "book", "terminal", "gear"],
         default_index=0,
         styles={
             "container": {"padding": "0!important", "background-color": "#0f172a"},
@@ -2014,8 +2303,60 @@ if menu_selecionado == "Chat & Ações":
 elif menu_selecionado == "Execução em massa":
     _render_batch_execution(acoes_ui)
 
+elif menu_selecionado == "Clientes":
+    _render_clients()
+
 elif menu_selecionado == "Agendamentos e Filas":
     st.header("⏰ Agendamentos e Operação em Lote")
+
+    st.subheader("Agendamento por lista de clientes")
+    st.caption("Estrutura alinhada ao novo modelo: uma ação, uma lista de clientes e fila sequencial.")
+    schedule_cols = st.columns(4)
+    schedule_actions = {
+        str(action.get("name") or key): str(action.get("id") or key)
+        for key, action in acoes_ui.items()
+        if isinstance(action, dict) and _acao_configurada_para_execucao_rapida(action)
+    }
+    try:
+        schedule_groups = list_client_groups(api_base_url=API_BASE_URL).get("groups", [])
+    except DemoApiError:
+        schedule_groups = []
+    schedule_action = schedule_cols[0].selectbox(
+        "Ação",
+        options=list(schedule_actions.keys()) or ["Nenhuma ação"],
+        key="schedule_client_action",
+        disabled=not bool(schedule_actions),
+    )
+    schedule_group = schedule_cols[1].selectbox(
+        "Lista",
+        options=[str(item) for item in schedule_groups] or ["Nenhuma lista"],
+        key="schedule_client_group",
+        disabled=not bool(schedule_groups),
+    )
+    schedule_frequency = schedule_cols[2].selectbox(
+        "Frequência",
+        options=["Mensal", "Semanal"],
+        key="schedule_client_frequency",
+    )
+    schedule_delay = schedule_cols[3].number_input(
+        "Delay (s)",
+        min_value=0.0,
+        max_value=3600.0,
+        value=3.0,
+        step=1.0,
+        key="schedule_client_delay",
+    )
+    if st.button("Salvar rascunho de agendamento", key="schedule_client_draft"):
+        st.session_state.client_schedule_draft = {
+            "action_id": schedule_actions.get(schedule_action, ""),
+            "client_group": schedule_group,
+            "frequency": schedule_frequency,
+            "delay_between_rows_seconds": schedule_delay,
+            "active": True,
+        }
+        st.success("Rascunho salvo para demonstração. A execução automática do cron fica para a próxima etapa.")
+    if isinstance(st.session_state.get("client_schedule_draft"), dict):
+        st.json(st.session_state.client_schedule_draft)
     
     st.subheader("📁 Operação em Lote (Excel)")
     

@@ -9,6 +9,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -386,7 +387,9 @@ def demo_api_request(
 def create_batch(
     *,
     action_id: str,
-    rows: list[dict[str, str]],
+    rows: list[dict[str, str]] | None = None,
+    client_group: str | None = None,
+    client_ids: list[str] | None = None,
     requested_by: str = "streamlit-batch",
     delay_between_rows_seconds: float = 3,
     api_base_url: str | None = None,
@@ -397,7 +400,9 @@ def create_batch(
         "/api/batches",
         {
             "action_id": action_id,
-            "rows": rows,
+            "rows": rows or [],
+            "client_group": client_group,
+            "client_ids": client_ids or [],
             "requested_by": requested_by,
             "delay_between_rows_seconds": delay_between_rows_seconds,
         },
@@ -428,4 +433,109 @@ def get_batch_results_csv(
         raise DemoApiTimeout(DEMO_API_TIMEOUT_MESSAGE) from exc
     except requests.RequestException as exc:
         raise DemoApiError("CSV do batch indisponivel.") from exc
+    return response.text
+
+
+def list_clients(
+    *,
+    group: str | None = None,
+    include_inactive: bool = True,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    params = {"include_inactive": str(bool(include_inactive)).lower()}
+    if group:
+        params["group"] = group
+    return demo_api_request("GET", f"/api/clients?{urlencode(params)}", api_base_url=api_base_url, timeout=timeout)
+
+
+def create_client(
+    payload: dict[str, Any],
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    return demo_api_request("POST", "/api/clients", payload, api_base_url=api_base_url, timeout=timeout)
+
+
+def update_client(
+    client_id: str,
+    payload: dict[str, Any],
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "PUT",
+        f"/api/clients/{quote(str(client_id), safe='')}",
+        payload,
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def deactivate_client(
+    client_id: str,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        f"/api/clients/{quote(str(client_id), safe='')}/deactivate",
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def import_clients_csv(
+    csv_text: str,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        "/api/clients/import-csv",
+        {"csv_text": csv_text},
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def list_client_groups(*, api_base_url: str | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    return demo_api_request("GET", "/api/client-groups", api_base_url=api_base_url, timeout=timeout)
+
+
+def validate_clients_for_action(
+    action_id: str,
+    *,
+    client_group: str | None = None,
+    client_ids: list[str] | None = None,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    params: dict[str, str] = {}
+    if client_group:
+        params["client_group"] = client_group
+    if client_ids:
+        params["client_ids"] = ",".join(str(item) for item in client_ids)
+    suffix = f"?{urlencode(params)}" if params else ""
+    return demo_api_request(
+        "GET",
+        f"/api/clients/validate-for-action/{quote(str(action_id), safe='')}{suffix}",
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def get_clients_template_csv(*, api_base_url: str | None = None, timeout: float = 10.0) -> str:
+    url = f"{_api_base_url(api_base_url)}/api/clients/template.csv"
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.Timeout as exc:
+        raise DemoApiTimeout(DEMO_API_TIMEOUT_MESSAGE) from exc
+    except requests.RequestException as exc:
+        raise DemoApiError("Modelo CSV de clientes indisponivel.") from exc
     return response.text

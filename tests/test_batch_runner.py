@@ -208,9 +208,40 @@ class BatchRunnerTests(unittest.TestCase):
 
         csv_text = batch_results_csv(batch)
 
-        self.assertIn("batch_id,row_index,action_id,status,run_id", csv_text)
+        self.assertIn("batch_id,row_index,client_id,client_name,client_group,action_id,status,run_id", csv_text)
         self.assertIn('""grupo_3"": ""00""', csv_text)
         self.assertIn("Qtd. Pcls. Pagas", csv_text)
+
+    def test_create_batch_from_client_group_saves_client_metadata(self) -> None:
+        validation = {
+            "ready": [
+                {
+                    "id": "client-1",
+                    "name": "Cliente 1",
+                    "group": "Lista Principal",
+                    "variables": {"grupo": "935", "grupo_2": "110", "grupo_3": "00"},
+                }
+            ],
+            "incomplete": [],
+            "inactive": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "backend.services.batch_runner.find_action", return_value=fake_action()
+        ), patch("backend.services.batch_runner.validate_clients_for_action", return_value=validation):
+            batch = create_batch(
+                action_id="numero-de-parcelas-pagas",
+                rows=[],
+                client_group="Lista Principal",
+                requested_by="test",
+                batches_dir=Path(tmp),
+                auto_start=False,
+            )
+
+        self.assertEqual(batch["source"], "clients")
+        self.assertEqual(batch["rows"][0]["client_id"], "client-1")
+        self.assertEqual(batch["rows"][0]["client_name"], "Cliente 1")
+        self.assertEqual(batch["rows"][0]["client_group"], "Lista Principal")
+        self.assertEqual(batch["rows"][0]["variables"]["grupo_3"], "00")
 
 
 if __name__ == "__main__":
