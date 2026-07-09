@@ -54,6 +54,11 @@ class OperatorFillRequest(BaseModel):
 
 class OperatorInsertActiveRequest(BaseModel):
     value: str = ""
+    sensitive: bool = False
+
+
+class OperatorPressRequest(BaseModel):
+    key: str
 
 
 class OperatorClickRequest(BaseModel):
@@ -125,7 +130,29 @@ async def operator_insert_active(
     payload: OperatorInsertActiveRequest,
 ) -> dict[str, Any]:
     try:
-        result = await demo_session_manager.operator_insert_active(session_id, payload.value)
+        result = await demo_session_manager.operator_insert_active(
+            session_id,
+            payload.value,
+            sensitive=payload.sensitive,
+        )
+    except DemoSessionError as exc:
+        _raise_safe(exc)
+    return {"status": "ok", "operator": result}
+
+
+@router.post("/api/demo/sessions/{session_id}/operator/press")
+async def operator_press(session_id: str, payload: OperatorPressRequest) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.operator_press(session_id, payload.key)
+    except DemoSessionError as exc:
+        _raise_safe(exc)
+    return {"status": "ok", "operator": result}
+
+
+@router.post("/api/demo/sessions/{session_id}/operator/clear-active")
+async def operator_clear_active(session_id: str) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.operator_clear_active(session_id)
     except DemoSessionError as exc:
         _raise_safe(exc)
     return {"status": "ok", "operator": result}

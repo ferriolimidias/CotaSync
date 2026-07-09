@@ -57,6 +57,9 @@ from frontend.api_client import (  # noqa: E402
     list_batches,
     list_client_groups,
     list_clients,
+    operator_clear_active,
+    operator_press_key,
+    operator_type_active,
     parse_batch_csv_text,
     required_batch_columns,
     update_client,
@@ -341,6 +344,84 @@ def _render_desktop_view_access(state_suffix: str) -> None:
         ttl_minutes = max(1, ttl_seconds // 60)
         expiry_label = expires_at.replace("T", " ").replace("+00:00", " UTC")
         st.caption(f"Link temporário: {ttl_minutes} min · expira em {expiry_label}.")
+
+
+def _render_login_operator_controls(session_id: str) -> None:
+    st.markdown("**Modo operador para login**")
+    st.caption(
+        "Clique primeiro no campo desejado dentro do navegador/noVNC. Depois digite ou cole o texto aqui e envie para o navegador."
+    )
+    text_key = f"settings_login_operator_text_{session_id}"
+    secret_key = f"settings_login_operator_secret_{session_id}"
+    flash_key = f"settings_login_operator_flash_{session_id}"
+
+    normal_text = st.text_input("Texto/login", key=text_key)
+    if st.button("Digitar texto no campo ativo", key=f"settings_login_operator_type_{session_id}"):
+        try:
+            result = operator_type_active(
+                session_id,
+                normal_text,
+                sensitive=False,
+                api_base_url=API_BASE_URL,
+            ).get("operator", {})
+            st.session_state[flash_key] = ("success", f"Texto enviado ({int(result.get('typed_chars') or 0)} caracteres).")
+        except DemoApiError as exc:
+            st.session_state[flash_key] = ("error", str(exc))
+        st.rerun()
+
+    with st.form(f"settings_login_operator_secret_form_{session_id}", clear_on_submit=True):
+        secret_text = st.text_input(
+            "Senha ou texto sensível",
+            type="password",
+            help="Não é salvo. É enviado apenas ao campo ativo do navegador.",
+            key=secret_key,
+        )
+        send_secret = st.form_submit_button("Digitar senha no campo ativo")
+    if send_secret:
+        try:
+            result = operator_type_active(
+                session_id,
+                secret_text,
+                sensitive=True,
+                api_base_url=API_BASE_URL,
+            ).get("operator", {})
+            st.session_state[flash_key] = (
+                "success",
+                f"Texto sensível enviado ({int(result.get('typed_chars') or 0)} caracteres).",
+            )
+        except DemoApiError as exc:
+            st.session_state[flash_key] = ("error", str(exc))
+        st.rerun()
+
+    quick_cols = st.columns(3)
+    if quick_cols[0].button("Tab", key=f"settings_login_operator_tab_{session_id}", use_container_width=True):
+        try:
+            operator_press_key(session_id, "Tab", api_base_url=API_BASE_URL)
+            st.session_state[flash_key] = ("success", "Tab enviado.")
+        except DemoApiError as exc:
+            st.session_state[flash_key] = ("error", str(exc))
+        st.rerun()
+    if quick_cols[1].button("Enter", key=f"settings_login_operator_enter_{session_id}", use_container_width=True):
+        try:
+            operator_press_key(session_id, "Enter", api_base_url=API_BASE_URL)
+            st.session_state[flash_key] = ("success", "Enter enviado.")
+        except DemoApiError as exc:
+            st.session_state[flash_key] = ("error", str(exc))
+        st.rerun()
+    if quick_cols[2].button("Limpar campo ativo", key=f"settings_login_operator_clear_{session_id}", use_container_width=True):
+        try:
+            operator_clear_active(session_id, api_base_url=API_BASE_URL)
+            st.session_state[flash_key] = ("success", "Campo ativo limpo.")
+        except DemoApiError as exc:
+            st.session_state[flash_key] = ("error", str(exc))
+        st.rerun()
+
+    flash = st.session_state.pop(flash_key, None)
+    if isinstance(flash, tuple) and len(flash) == 2:
+        if flash[0] == "success":
+            st.success(flash[1])
+        else:
+            st.error(flash[1])
 
 
 def _common_client_variables(prefix: str, values: dict[str, object] | None = None) -> dict[str, str]:
@@ -2885,6 +2966,8 @@ elif menu_selecionado == "Configurações":
             st.link_button("Abrir navegador da sessão", live_url, use_container_width=True)
         elif settings_session.get("browser_mode") == "desktop_browser":
             _render_desktop_view_access(f"settings_login_{settings_session_id}")
+        st.divider()
+        _render_login_operator_controls(settings_session_id)
     public_base_url = os.getenv("COTASYNC_PUBLIC_BASE_URL", "").strip()
     browserless_public_url = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
     desktop_public_url = os.getenv("COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL", "").strip()

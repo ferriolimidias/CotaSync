@@ -539,3 +539,50 @@ def get_clients_template_csv(*, api_base_url: str | None = None, timeout: float 
     except requests.RequestException as exc:
         raise DemoApiError("Modelo CSV de clientes indisponivel.") from exc
     return response.text
+
+
+def operator_type_active(
+    session_id: str,
+    value: str,
+    *,
+    sensitive: bool = False,
+    api_base_url: str | None = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        f"/api/demo/sessions/{quote(str(session_id), safe='')}/operator/insert-active",
+        {"value": value, "sensitive": bool(sensitive)},
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def operator_press_key(
+    session_id: str,
+    key: str,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        f"/api/demo/sessions/{quote(str(session_id), safe='')}/operator/press",
+        {"key": key},
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )
+
+
+def operator_clear_active(
+    session_id: str,
+    *,
+    api_base_url: str | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    return demo_api_request(
+        "POST",
+        f"/api/demo/sessions/{quote(str(session_id), safe='')}/operator/clear-active",
+        api_base_url=api_base_url,
+        timeout=timeout,
+    )

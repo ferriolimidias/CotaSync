@@ -1752,7 +1752,7 @@ class DemoSessionManager:
             raise DemoSessionError("O elemento precisa estar visível e habilitado.")
         return locator
 
-    async def operator_insert_active(self, session_id: str, value: str) -> dict[str, Any]:
+    async def operator_insert_active(self, session_id: str, value: str, *, sensitive: bool = False) -> dict[str, Any]:
         session = self._get(session_id)
         self._validate_operator_session(session)
         safe_value = str(value or "")
@@ -1800,7 +1800,12 @@ class DemoSessionManager:
             raise
         except Exception as exc:
             raise DemoSessionError("Não foi possível inserir texto no campo ativo.") from exc
-        logger.info("Modo operador inseriu texto no campo ativo: session=%s", session.id)
+        logger.info(
+            "Modo operador inseriu texto no campo ativo: session=%s chars=%s sensitive=%s",
+            session.id,
+            len(safe_value),
+            bool(sensitive),
+        )
         result = {
             "session_id": session.id,
             "operator_request_session_id": session.id,
@@ -1808,6 +1813,86 @@ class DemoSessionManager:
                 getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
             ),
             "operation": "insert_active_text",
+            "typed_chars": len(safe_value),
+            "sensitive": bool(sensitive),
+            "recording": session.recording,
+            "recording_active": session.recording,
+            "recorded": False,
+        }
+        session.last_operator_result = dict(result)
+        return result
+
+    async def operator_press(self, session_id: str, key: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        self._validate_operator_session(session)
+        safe_key = str(key or "").strip()
+        if safe_key not in {"Enter", "Tab"}:
+            raise DemoSessionError("Tecla não permitida no Modo operador.")
+        if not session.recording:
+            self._prepare_operator_utility(session)
+        try:
+            await session.page.keyboard.press(safe_key)
+            await asyncio.sleep(0.2)
+        except Exception as exc:
+            raise DemoSessionError("Não foi possível pressionar a tecla no navegador.") from exc
+        logger.info("Modo operador pressionou tecla: session=%s key=%s", session.id, safe_key)
+        result = {
+            "session_id": session.id,
+            "operator_request_session_id": session.id,
+            "active_recording_session_id": str(
+                getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
+            ),
+            "operation": "press_key",
+            "key": safe_key,
+            "recording": session.recording,
+            "recording_active": session.recording,
+            "recorded": False,
+        }
+        session.last_operator_result = dict(result)
+        return result
+
+    async def operator_clear_active(self, session_id: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        self._validate_operator_session(session)
+        if not session.recording:
+            self._prepare_operator_utility(session)
+        try:
+            cleared = await session.page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (!el) return false;
+                    const tag = String(el.tagName || '').toLowerCase();
+                    if (tag === 'input' || tag === 'textarea') {
+                        const prototype = tag === 'input'
+                            ? HTMLInputElement.prototype
+                            : HTMLTextAreaElement.prototype;
+                        const setter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
+                        setter.call(el, '');
+                    } else if (el.isContentEditable) {
+                        el.textContent = '';
+                    } else {
+                        return false;
+                    }
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
+                }"""
+            )
+            if not cleared:
+                raise DemoSessionError("Foque um campo editável no navegador remoto antes de limpar.")
+            await asyncio.sleep(0.2)
+        except DemoSessionError:
+            raise
+        except Exception as exc:
+            raise DemoSessionError("Não foi possível limpar o campo ativo.") from exc
+        logger.info("Modo operador limpou campo ativo: session=%s", session.id)
+        result = {
+            "session_id": session.id,
+            "operator_request_session_id": session.id,
+            "active_recording_session_id": str(
+                getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
+            ),
+            "operation": "clear_active",
             "recording": session.recording,
             "recording_active": session.recording,
             "recorded": False,
