@@ -18,8 +18,10 @@ import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from backend.api.actions import router as actions_router
+from backend.api.auth import router as auth_router
 from backend.api.batches import router as batches_router
 from backend.api.browser import router as browser_router
 from backend.api.clients import groups_router as client_groups_router
@@ -28,7 +30,8 @@ from backend.api.demo import router as demo_router
 from backend.api.desktop_browser import router as desktop_browser_router
 from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
-from backend.motor_browser import processar_lote_com_semaforo, verificar_browserless
+from backend.motor_browser import processar_lote_com_semaforo
+from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf
 from backend.services.demo_session import demo_session_manager
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
@@ -85,6 +88,7 @@ app = FastAPI(
 )
 
 app.include_router(actions_router)
+app.include_router(auth_router)
 app.include_router(batches_router)
 app.include_router(browser_router)
 app.include_router(clients_router)
@@ -94,6 +98,27 @@ app.include_router(runs_router)
 app.include_router(demo_router)
 app.include_router(desktop_browser_router)
 app.include_router(external_systems_router)
+
+
+_PUBLIC_API_PATHS = {
+    "/api/health/desktop-browser",
+    "/api/v1/auth/login",
+    "/api/v1/auth/logout",
+    "/webhook/evolution",
+}
+
+
+@app.middleware("http")
+async def cotasync_auth_middleware(request: Request, call_next):
+    path = request.url.path.rstrip("/") or "/"
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        user = parse_session_token(request.cookies.get(SESSION_COOKIE, ""))
+        if user is None:
+            return JSONResponse({"detail": "Authentication required."}, status_code=401)
+        request.state.auth_user = user
+        if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and not validate_csrf(request):
+            return JSONResponse({"detail": "CSRF token required."}, status_code=403)
+    return await call_next(request)
 
 
 async def verificar_fila_agendamentos():
@@ -165,11 +190,6 @@ async def startup_event():
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": "cotasync"}
-
-
-@app.get("/api/health/browserless")
-async def health_browserless() -> dict[str, Any]:
-    return await verificar_browserless()
 
 
 @app.get("/api/health/desktop-browser")

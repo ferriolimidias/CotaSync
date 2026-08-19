@@ -1,53 +1,40 @@
-# Orquestração CotaSync: Browserless + Evolution (Postgres/Redis) + app Python.
-# Ajuste variáveis em `.env` antes de subir em produção.
+# Orquestracao CotaSync: FastAPI + Streamlit + Desktop Browser + PostgreSQL.
+# Ajuste variaveis em `.env` antes de subir em ambiente operacional.
 
 services:
-  browserless:
-    image: ghcr.io/browserless/chromium@sha256:18d3e547a04941e57665b8f38a695177c4ddc89aad8d62483341643b59032e0a
-    ports:
-      - "3000:3000"
+  desktop_browser:
+    build:
+      context: .
+      dockerfile: desktop-browser/Dockerfile
     environment:
-      TIMEOUT: "600000"
+      DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
+    ports:
+      - "127.0.0.1:${DESKTOP_BROWSER_VIEW_PORT:-3200}:6080"
+      - "127.0.0.1:${DESKTOP_BROWSER_CDP_PORT:-9222}:9222"
+    volumes:
+      - cotasync_desktop_browser_profile:${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
+    shm_size: "2gb"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9222/json/version >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
 
   postgres:
     image: postgres:15-alpine
     environment:
-      POSTGRES_USER: evolution
-      POSTGRES_PASSWORD: evolution
-      POSTGRES_DB: evolution
+      POSTGRES_USER: ${POSTGRES_USER:-cotasync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cotasync_password}
+      POSTGRES_DB: ${POSTGRES_DB:-cotasync}
     volumes:
-      - evolution_postgres_data:/var/lib/postgresql/data
+      - cotasync_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cotasync} -d ${POSTGRES_DB:-cotasync}"]
       interval: 5s
       timeout: 5s
       retries: 10
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-
-  evolution-api:
-    image: atendai/evolution-api:latest
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    ports:
-      - "8080:8080"
-    environment:
-      # URL pública da Evolution (ajuste se usar proxy/domínio).
-      SERVER_URL: http://localhost:8080
-      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:-changeme}
-      DATABASE_ENABLED: "true"
-      DATABASE_PROVIDER: postgresql
-      DATABASE_CONNECTION_URI: postgresql://evolution:evolution@postgres:5432/evolution?schema=public
-      CACHE_REDIS_ENABLED: "true"
-      CACHE_REDIS_URI: redis://redis:6379/0
-      CACHE_LOCAL_ENABLED: "false"
     restart: unless-stopped
 
   cotasync_app:
@@ -55,21 +42,25 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      - browserless
+      desktop_browser:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     ports:
-      - "8000:8000"
-      - "8501:8501"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+      - "127.0.0.1:${FRONTEND_PORT:-8501}:8501"
     volumes:
       - .:/app
     env_file:
       - .env
     environment:
-      # Dentro da rede Docker o host `localhost` do .env aponta para o próprio container;
-      # sobrescrevemos para alcançar o serviço Browserless.
-      BROWSERLESS_URL: ws://browserless:3000
-      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3000}
+      COTASYNC_BROWSER_MODE: desktop_browser
+      DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://desktop_browser:9222}
+      DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_app:8000/demo/alvo
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cotasync}:${POSTGRES_PASSWORD:-cotasync_password}@postgres:5432/${POSTGRES_DB:-cotasync}
     restart: unless-stopped
 
 volumes:
-  evolution_postgres_data:
+  cotasync_postgres_data:
+  cotasync_desktop_browser_profile:

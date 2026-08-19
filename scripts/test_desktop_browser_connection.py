@@ -25,10 +25,33 @@ TRACKED_FILES = (
     ROOT / "data" / "ui_map.json",
     ROOT / "data" / "runs" / "runs.json",
 )
+_SESSION = requests.Session()
+_CSRF_TOKEN = ""
+
+
+def authenticate() -> None:
+    global _CSRF_TOKEN
+    username = os.getenv("COTASYNC_ADMIN_USERNAME", "admin")
+    password = os.getenv("COTASYNC_ADMIN_PASSWORD", "")
+    if not password:
+        raise AssertionError("COTASYNC_ADMIN_PASSWORD precisa estar definido para o smoke test autenticado.")
+    response = _SESSION.post(
+        f"{API_BASE}/api/v1/auth/login",
+        json={"username": username, "password": password},
+        timeout=15,
+    )
+    if not response.ok:
+        raise AssertionError(f"POST /api/v1/auth/login retornou {response.status_code}: {response.text}")
+    body = response.json()
+    csrf_token = str(body.get("csrf_token") or "")
+    if not csrf_token:
+        raise AssertionError("Login autenticado nao retornou csrf_token.")
+    _CSRF_TOKEN = csrf_token
 
 
 def api(method: str, path: str, payload: dict[str, Any] | None = None, timeout: float = 45) -> dict[str, Any]:
-    response = requests.request(method, f"{API_BASE}{path}", json=payload, timeout=timeout)
+    headers = {"X-CSRF-Token": _CSRF_TOKEN} if method.upper() not in {"GET", "HEAD", "OPTIONS"} else None
+    response = _SESSION.request(method, f"{API_BASE}{path}", json=payload, headers=headers, timeout=timeout)
     if not response.ok:
         raise AssertionError(f"{method} {path} retornou {response.status_code}: {response.text}")
     body = response.json()
@@ -67,6 +90,7 @@ async def main() -> None:
     session_id = ""
     manual_session_id = ""
     try:
+        authenticate()
         await clear_local_demo_cookie_and_check_cdp()
 
         internal_view = os.getenv(
@@ -199,12 +223,16 @@ async def main() -> None:
                 "variables": {ACTION_VARIABLE: "PED-2002"},
                 "mode": "sync",
                 "requested_by": "desktop-browser-smoke",
-                "session_id": session_id,
             },
             timeout=60,
         )["run"]
         assert replay["status"] == "success", replay
         assert replay["result_payload"]["dados_extraidos"]["status_pedido"] == "Enviado"
+        print(f"run_id={replay['id']}")
+        print(f"runner={replay.get('result_payload', {}).get('runner')}")
+        print(f"whether_desktop_browser_used={replay.get('result_payload', {}).get('whether_desktop_browser_used')}")
+        print(f"status={replay['status']}")
+        print("resultado=status_pedido:Enviado")
 
         health = api("GET", "/api/health/desktop-browser")
         assert health["status"] == "ok" and health["cdp_reachable"] is True

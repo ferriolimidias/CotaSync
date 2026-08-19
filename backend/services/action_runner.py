@@ -8,10 +8,9 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from backend.agente import executar_acao_fast_track
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
-from backend.services.action_pages import validate_action_page_url
+from backend.services.action_pages import expected_action_hosts, validate_action_page_url
 from backend.services.actions_repository import default_ui_map_path, enrich_action_access_profile
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
 from backend.services.runs_repository import append_run, update_run
@@ -168,7 +167,6 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "exception_message",
         "browser_mode",
         "runner",
-        "whether_fast_track_used",
         "whether_desktop_browser_used",
         "last_successful_step_index",
         "diagnostics",
@@ -225,7 +223,9 @@ def _run_local_fixture(action: ActionDetail, variables: dict[str, Any]) -> dict[
 
 
 def _validate_desktop_result(action: ActionDetail, result: dict[str, Any]) -> None:
-    if str(action.browser_mode or "browserless").strip() != "desktop_browser":
+    if str(action.browser_mode or "desktop_browser").strip() != "desktop_browser":
+        return
+    if not expected_action_hosts(action):
         return
     final_page = result.get("final_page")
     final_url = final_page.get("url") if isinstance(final_page, dict) else ""
@@ -279,7 +279,6 @@ async def _run_desktop_browser_replay(
     result["runner"] = "desktop_browser_replay"
     result["browser_mode"] = "desktop_browser"
     result["whether_desktop_browser_used"] = True
-    result["whether_fast_track_used"] = False
     return result
 
 
@@ -338,7 +337,6 @@ def _build_error_payload(
     *,
     runner: str,
     browser_mode: str,
-    whether_fast_track_used: bool,
     whether_desktop_browser_used: bool,
 ) -> dict[str, Any]:
     raw_diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
@@ -384,7 +382,6 @@ def _build_error_payload(
         "exception_message": safe_error,
         "browser_mode": browser_mode,
         "runner": runner,
-        "whether_fast_track_used": whether_fast_track_used,
         "whether_desktop_browser_used": whether_desktop_browser_used,
         "last_successful_step_index": raw_diagnostics.get(
             "last_successful_step_index",
@@ -461,8 +458,7 @@ def start_action_run(
 
 async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run: RunRecord) -> RunRecord:
     runner_used = "local_fixture" if _is_local_fixture(action) else "action_runner"
-    browser_mode_used = str(action.browser_mode or "browserless").strip() or "browserless"
-    whether_fast_track_used = False
+    browser_mode_used = str(action.browser_mode or "desktop_browser").strip() or "desktop_browser"
     whether_desktop_browser_used = browser_mode_used == "desktop_browser"
     try:
         if _is_local_fixture(action):
@@ -490,12 +486,10 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 run.result_payload.setdefault("action_key", action.key)
                 run.result_payload.setdefault("browser_mode", browser_mode_used)
                 run.result_payload.setdefault("runner", runner_used)
-                run.result_payload.setdefault("whether_fast_track_used", False)
                 run.result_payload.setdefault("whether_desktop_browser_used", browser_mode_used == "desktop_browser")
         elif _is_desktop_learned_action(action):
             runner_used = "desktop_browser_replay"
             browser_mode_used = "desktop_browser"
-            whether_fast_track_used = False
             whether_desktop_browser_used = True
             result = await _run_desktop_browser_replay(action, request.variables, run.id)
             text = str(result.get("texto") or result.get("motivo") or "").strip()
@@ -508,7 +502,6 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 if isinstance(page_diagnostics, dict):
                     page_diagnostics.setdefault("runner", runner_used)
                     page_diagnostics.setdefault("browser_mode", browser_mode_used)
-                    page_diagnostics.setdefault("whether_fast_track_used", False)
                     page_diagnostics.setdefault("whether_desktop_browser_used", True)
                     execution_error.diagnostics = page_diagnostics  # type: ignore[attr-defined]
                 elif isinstance(result, dict):
@@ -525,36 +518,9 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 run.result_payload.setdefault("action_key", action.key)
                 run.result_payload.setdefault("browser_mode", browser_mode_used)
                 run.result_payload.setdefault("runner", runner_used)
-                run.result_payload.setdefault("whether_fast_track_used", False)
                 run.result_payload.setdefault("whether_desktop_browser_used", True)
         else:
-            runner_used = "legacy_fast_track"
-            whether_fast_track_used = True
-            whether_desktop_browser_used = False
-            result = await executar_acao_fast_track(action.key, request.variables, run.id)
-            text = str(result.get("texto") or "").strip()
-            execution_status = str(result.get("status") or "").strip().lower()
-            if execution_status == "error" or text.startswith("❌") or "Falha" in text or "falha" in text:
-                execution_error = RuntimeError(
-                    str(result.get("error_message") or text or "Falha na execucao da acao.")
-                )
-                page_diagnostics = result.get("page_diagnostics")
-                if isinstance(page_diagnostics, dict):
-                    execution_error.diagnostics = page_diagnostics  # type: ignore[attr-defined]
-                raise execution_error
-
-            _validate_desktop_result(action, result)
-            run.status = "success"
-            run.result_payload = _safe_result_payload(result)
-            if run.result_payload is not None:
-                run.result_payload.setdefault("input_variables", mask_variables(request.variables))
-                run.result_payload.setdefault("run_id", run.id)
-                run.result_payload.setdefault("action_id", action.id)
-                run.result_payload.setdefault("action_key", action.key)
-                run.result_payload.setdefault("browser_mode", browser_mode_used)
-                run.result_payload.setdefault("runner", runner_used)
-                run.result_payload.setdefault("whether_fast_track_used", True)
-                run.result_payload.setdefault("whether_desktop_browser_used", False)
+            raise RuntimeError("Acao antiga sem replay desktop_browser nao e suportada nesta arquitetura.")
     except Exception as exc:
         safe_error = _safe_error_message(exc)
         logger.info("Run %s finalizada com erro do tipo %s", run.id, type(exc).__name__)
@@ -570,7 +536,6 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 diagnostics,
                 runner=runner_used,
                 browser_mode=browser_mode_used,
-                whether_fast_track_used=whether_fast_track_used,
                 whether_desktop_browser_used=whether_desktop_browser_used,
             )
         else:
@@ -582,7 +547,6 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 {},
                 runner=runner_used,
                 browser_mode=browser_mode_used,
-                whether_fast_track_used=whether_fast_track_used,
                 whether_desktop_browser_used=whether_desktop_browser_used,
             )
     finally:

@@ -470,7 +470,7 @@ class OperationalSummaryTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), patch.object(
             agente, "carregar_ui_map", return_value={"acoes_conhecidas": {"Consultar cliente": raw_action}}
         ), patch.object(agente, "executar_acao_rapida", new=AsyncMock(return_value=execution)):
-            response = asyncio.run(agente.executar_acao_fast_track("Consultar cliente"))
+            response = asyncio.run(agente.executar_acao_desktop_replay("Consultar cliente"))
 
         self.assertEqual(response["texto"], response["operational_summary"])
         self.assertIn("Ativo", response["texto"])
@@ -494,12 +494,13 @@ class OperationalSummaryTests(unittest.TestCase):
             "texto": "execução técnica concluída",
             "dados_extraidos": {"status_cliente": "Ativo"},
             "passos_executados": 1,
+            "final_page": {"title": "Consulta", "url": "https://nwcweb.randonconsorcios.com.br/CONCP/consulta"},
             "selector_diagnostics": [{"selector": "#status-interno", "visible": True}],
         }
         with patch.dict(os.environ, {}, clear=True), patch(
             "backend.services.action_runner.append_run"
         ), patch("backend.services.action_runner.update_run"), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
         ):
             run = asyncio.run(run_action_sync(action, ActionRunRequest()))

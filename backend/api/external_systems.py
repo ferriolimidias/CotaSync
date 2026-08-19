@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from backend.services.external_systems import (
@@ -12,6 +12,7 @@ from backend.services.external_systems import (
     load_current_external_system,
     save_current_external_system,
 )
+from backend.services.auth import require_admin
 
 
 router = APIRouter(prefix="/api/external-systems", tags=["external-systems"])
@@ -50,5 +51,10 @@ async def get_current_external_system() -> dict[str, Any]:
 
 
 @router.put("/current")
-async def put_current_external_system(payload: ExternalSystemRequest) -> dict[str, Any]:
+async def put_current_external_system(
+    payload: ExternalSystemRequest,
+    request: Request,
+    _admin=Depends(require_admin),
+) -> dict[str, Any]:
+    del request, _admin
     return _safe_call("save", payload.model_dump())

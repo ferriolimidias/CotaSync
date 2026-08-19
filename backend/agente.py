@@ -449,8 +449,8 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
         acoes = ui_map.get("acoes_conhecidas", {})
         mensagem_limpa = str(mensagem_usuario or "").strip()
         if isinstance(acoes, dict) and mensagem_limpa in acoes:
-            _LOGGER.info(f"[FAST-TRACK] Disparo direto da ação: {mensagem_limpa}")
-            resultado_execucao = await executar_acao_fast_track(mensagem_limpa)
+            _LOGGER.info(f"[DESKTOP-REPLAY] Disparo direto da ação: {mensagem_limpa}")
+            resultado_execucao = await executar_acao_desktop_replay(mensagem_limpa)
             return _montar_resposta(str(resultado_execucao.get("texto") or ""), resultado_execucao)
 
         if "ensinar" in mensagem_normalizada or "aprender" in mensagem_normalizada:
@@ -474,7 +474,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
     return _montar_resposta(str(resultado.get("output", "")).strip())
 
 
-async def executar_acao_fast_track(
+async def executar_acao_desktop_replay(
     nome_acao: str,
     dados_variaveis: dict | None = None,
     run_id: str = "",
@@ -486,12 +486,9 @@ async def executar_acao_fast_track(
 
     raw_acao = acoes.get(nome_acao, {})
     acao = enrich_action_access_profile(raw_acao) if isinstance(raw_acao, dict) else raw_acao
-    browser_mode = str(acao.get("browser_mode") or "browserless") if isinstance(acao, dict) else "browserless"
+    browser_mode = str(acao.get("browser_mode") or "desktop_browser") if isinstance(acao, dict) else "desktop_browser"
     ai_recovery_enabled = bool(acao.get("ai_recovery_enabled", True)) if isinstance(acao, dict) else False
-    if browser_mode == "desktop_browser" and isinstance(acao, dict):
-        passos_playwright = acao.get("robust_steps") or acao.get("passos_playwright", [])
-    else:
-        passos_playwright = acao.get("passos_playwright", []) if isinstance(acao, dict) else []
+    passos_playwright = acao.get("robust_steps") or acao.get("passos_playwright", []) if isinstance(acao, dict) else []
 
     try:
         resultado = await executar_acao_rapida(
@@ -503,7 +500,7 @@ async def executar_acao_fast_track(
         )
         if str(resultado.get("status", "")).lower() != "sucesso":
             motivo = str(resultado.get("motivo", "Falha não identificada."))
-            if browser_mode == "desktop_browser" or not ai_recovery_enabled:
+            if not ai_recovery_enabled or browser_mode == "desktop_browser":
                 diagnostics = resultado.get("page_diagnostics") if isinstance(resultado.get("page_diagnostics"), dict) else {}
                 result_payload = {
                     **diagnostics,
@@ -512,13 +509,10 @@ async def executar_acao_fast_track(
                     "browser_mode": str(diagnostics.get("browser_mode") or browser_mode),
                     "runner": str(
                         diagnostics.get("runner")
-                        or ("desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track")
-                    ),
-                    "whether_fast_track_used": bool(
-                        diagnostics.get("whether_fast_track_used", browser_mode != "desktop_browser")
+                        or ("desktop_browser_replay")
                     ),
                     "whether_desktop_browser_used": bool(
-                        diagnostics.get("whether_desktop_browser_used", browser_mode == "desktop_browser")
+                        diagnostics.get("whether_desktop_browser_used", True)
                     ),
                     "input_variables": dados_variaveis if isinstance(dados_variaveis, dict) else {},
                     "diagnostics": diagnostics,
@@ -569,12 +563,12 @@ async def executar_acao_fast_track(
             **result_payload,
         }
 
-    except Exception as erro_fast_track:
-        logging.warning("[AUTO-HEALING] Fast-Track falhou para a ação '%s' (%s).", nome_acao, type(erro_fast_track).__name__)
+    except Exception as erro_desktop_replay:
+        logging.warning("[AUTO-HEALING] Desktop replay falhou para a ação '%s' (%s).", nome_acao, type(erro_desktop_replay).__name__)
         logging.info("[AUTO-HEALING] Acionando a IA para Diagnóstico e Correção da tela...")
 
         instrucao_recuperacao = f"""
-        A rotina mapeada '{nome_acao}' falhou ao ser repetida com o erro: {str(erro_fast_track)}.
+        A rotina mapeada '{nome_acao}' falhou ao ser repetida com o erro: {str(erro_desktop_replay)}.
         DIAGNÓSTICO OBRIGATÓRIO:
         1. Olhe para a tela atual. O sistema alvo está apenas lento (ex: ícone a carregar, erro 504/503) ou apareceu um popup/aviso bloqueador normal do sistema?
         2. Se for um erro temporário ou popup, feche o aviso ou clique em atualizar e tente concluir a tarefa com os seletores originais.

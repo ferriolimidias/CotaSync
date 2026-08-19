@@ -1,9 +1,4 @@
-"""
-Motor físico de automação web: Playwright conectado ao Browserless via CDP.
-
-O Browserless expõe um endpoint WebSocket para Chromium remoto; aqui usamos
-`connect_over_cdp` para anexar uma sessão ao cluster sem gerenciar binários localmente.
-"""
+"""Motor físico de automação web via Playwright/CDP no Desktop Browser persistente."""
 
 from __future__ import annotations
 
@@ -236,35 +231,6 @@ def _raiz_projeto() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _ws_browserless() -> str:
-    """
-    URL WebSocket do Browserless.
-
-    O compose de teste usa `ws://cotasync_test_browserless:3000`.
-    O compose original sobrescreve a variável para `ws://browserless:3000`.
-    """
-    ws_url = os.getenv("BROWSERLESS_URL", "ws://cotasync_test_browserless:3000").strip()
-    if not ws_url.startswith("ws"):
-        ws_url = ws_url.replace("http://", "ws://").replace("https://", "wss://")
-    return ws_url
-
-
-def browserless_url_segura() -> str:
-    """Retorna BROWSERLESS_URL sem credenciais ou query string."""
-    ws_url = _ws_browserless()
-    try:
-        parsed = urlsplit(ws_url)
-        hostname = parsed.hostname or ""
-        if parsed.port:
-            hostname = f"{hostname}:{parsed.port}"
-        if parsed.username or parsed.password:
-            hostname = f"***:***@{hostname}"
-        query = "***" if parsed.query else ""
-        return urlunsplit((parsed.scheme, hostname, parsed.path, query, ""))
-    except Exception:
-        return "ws://***"
-
-
 def _safe_result_url(url: str) -> str:
     """Remove credenciais, query e fragmento antes de persistir a pagina final."""
     try:
@@ -275,56 +241,6 @@ def _safe_result_url(url: str) -> str:
         return urlunsplit((parsed.scheme, hostname, parsed.path, "", ""))
     except Exception:
         return ""
-
-
-async def verificar_browserless(screenshot_path: str | None = None) -> dict[str, Any]:
-    """Valida a conexão CDP com Browserless sem acessar sistemas externos."""
-    inicio = time.monotonic()
-    ws_url = _ws_browserless()
-    playwright = None
-    browser: Browser | None = None
-    context = None
-    try:
-        playwright = await async_playwright().start()
-        browser = await playwright.chromium.connect_over_cdp(ws_url)
-        context = await browser.new_context(viewport={"width": 1280, "height": 720})
-        page = await context.new_page()
-        await page.goto("about:blank")
-        if screenshot_path:
-            destino = Path(screenshot_path)
-            destino.parent.mkdir(parents=True, exist_ok=True)
-            await page.screenshot(path=str(destino), full_page=True)
-        elapsed_ms = int((time.monotonic() - inicio) * 1000)
-        return {
-            "status": "ok",
-            "browserless_url": browserless_url_segura(),
-            "elapsed_ms": elapsed_ms,
-            "screenshot": screenshot_path or "",
-        }
-    except Exception as exc:
-        elapsed_ms = int((time.monotonic() - inicio) * 1000)
-        return {
-            "status": "erro",
-            "browserless_url": browserless_url_segura(),
-            "elapsed_ms": elapsed_ms,
-            "erro": str(exc),
-        }
-    finally:
-        if context is not None:
-            try:
-                await context.close()
-            except Exception:
-                pass
-        if browser is not None:
-            try:
-                await browser.close()
-            except Exception:
-                pass
-        if playwright is not None:
-            try:
-                await playwright.stop()
-            except Exception:
-                pass
 
 
 def _carregar_ui_map() -> dict:
@@ -578,7 +494,7 @@ async def processar_lote_com_semaforo(
 ) -> list[dict]:
     """
     Processa uma lista de dados (linhas do Excel) de forma assíncrona e controlada.
-    Limita a abertura simultânea de abas no Browserless usando asyncio.Semaphore.
+    Limita a abertura simultânea de automações usando asyncio.Semaphore.
     """
     semaforo = asyncio.Semaphore(max_concorrencia)
     memoria = _carregar_ui_map()
@@ -634,15 +550,15 @@ async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
     """
     raiz = _raiz_projeto()
     caminho_imagem = _DATA_DIR / "print_teste.png"
-    ws_url = _ws_browserless()
     browser: Browser | None = None
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp(ws_url)
+            connection = await browser_provider("desktop_browser").connect(p, "consulta-erp-real")
+            browser = connection.browser
             try:
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
+                context = connection.context
+                page = connection.page if not connection.page.is_closed() else await context.new_page()
                 await page.set_default_timeout(90_000)
 
                 await page.goto(
@@ -679,51 +595,14 @@ async def consultar_erp_real(cnpj: str) -> dict[str, Any]:
         }
 
 
-async def obter_browser_browserless() -> tuple[Any, Browser]:
-    """
-    Inicia o Playwright e conecta ao Chromium remoto (Browserless).
-
-    Returns:
-        Tupla (playwright_instance, browser) para que o chamador possa fazer
-        `await playwright.stop()` após uso, se necessário.
-    """
-    ws_url = _ws_browserless()
-
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.connect_over_cdp(ws_url)
-    return playwright, browser
-
-
 async def exemplo_navegacao(url: str = "https://example.com") -> str:
-    """
-    Exemplo mínimo: abre uma página e retorna o título (útil para validar o pipeline).
-
-    Futuro: aqui entrará o fluxo guiado por `ui_map.json` na raiz do projeto.
-    ---------------------------------------------------------------------------
-    INTERPRETAÇÃO FUTURA DO ui_map.json
-    ---------------------------------------------------------------------------
-    O arquivo `ui_map.json` descreverá "ações conhecidas" (chaves em
-    `acoes_conhecidas`) mapeando cada operação de negócio para uma sequência
-    declarativa de passos de UI (seletores CSS/XPath, esperas, preenchimento de
-    campos, cliques e checkpoints). O motor em `motor_browser.py` deverá:
-
-    1. Carregar e validar o JSON (Pydantic ou schema leve) no startup ou sob cache.
-    2. Receber do agente LangChain ou do backend o *nome da ação* + parâmetros
-       (ex.: credenciais em cofre, CNPJ, datas).
-    3. Resolver a cadeia de passos da ação, instanciando `BrowserContext`/`Page`
-       reutilizando a sessão Browserless quando fizer sentido (pool de contextos).
-    4. Aplicar retries com backoff em falhas transitórias de rede/DOM e registrar
-       evidências (screenshots/HTML snippet) para auditoria operacional.
-
-    Enquanto isso não existe, mantemos apenas a conexão CDP e este comentário como
-    âncora de arquitetura para não acoplar scraping ad-hoc ao restante do sistema.
-    ---------------------------------------------------------------------------
-    """
-    pw, browser = await obter_browser_browserless()
+    """Exemplo mínimo: abre uma página no Desktop Browser e retorna o título."""
+    pw = await async_playwright().start()
+    connection = await browser_provider("desktop_browser").connect(pw, "exemplo-navegacao")
+    browser = connection.browser
     try:
-        contexts = browser.contexts
-        context = contexts[0] if contexts else await browser.new_context()
-        page = context.pages[0] if context.pages else await context.new_page()
+        context = connection.context
+        page = connection.page if not connection.page.is_closed() else await context.new_page()
         await page.goto(url, wait_until="domcontentloaded")
         return await page.title()
     finally:
@@ -778,9 +657,10 @@ async def acionar_ia_cartografa(
     _LOGGER.info(f"[CARTÓGRAFO] Acedendo a {url_sistema} para mapear a ação: {nome_acao}")
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.connect_over_cdp(_ws_browserless())
-            context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = await context.new_page()
+            connection = await browser_provider("desktop_browser").connect(p, f"learn-{nome_arquivo}")
+            browser = connection.browser
+            context = connection.context
+            page = connection.page if not connection.page.is_closed() else await context.new_page()
             try:
                 login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
             except Exception as exc:
@@ -1024,7 +904,7 @@ async def executar_acao_rapida(
     run_id: str = "",
 ) -> dict:
     """
-    Executa uma rotina aprendida sem uso de LLM (Fast-Track), repetindo os passos técnicos.
+    Executa uma rotina aprendida sem uso de LLM (Desktop replay), repetindo os passos técnicos.
     """
     if not isinstance(passos_playwright, list) or not passos_playwright:
         return {"status": "erro", "motivo": "A rotina não possui passos para execução."}
@@ -1057,13 +937,13 @@ async def executar_acao_rapida(
         }
 
     action_config = action_config if isinstance(action_config, dict) else {}
-    browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "browserless")
+    browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "desktop_browser")
     provider = browser_provider(browser_mode)
     browser: Browser | None = None
-    _LOGGER.info(f"[FAST-TRACK] Iniciando execução rápida da ação: {nome_acao}")
+    _LOGGER.info(f"[DESKTOP-REPLAY] Iniciando execução rápida da ação: {nome_acao}")
     try:
         async with async_playwright() as p:
-            guardian = SessionGuardian() if browser_mode == "desktop_browser" else None
+            guardian = SessionGuardian()
             recovery_attempted = False
             total_recovery_attempts = 0
             recovery_steps: list[dict[str, Any]] = []
@@ -1082,7 +962,7 @@ async def executar_acao_rapida(
                     return str(evidence_path.relative_to(_raiz_projeto()))
                 except Exception as exc:
                     _LOGGER.warning(
-                        "[FAST-TRACK] Falha ao salvar screenshot de erro no passo %s: %s",
+                        "[DESKTOP-REPLAY] Falha ao salvar screenshot de erro no passo %s: %s",
                         step_index,
                         type(exc).__name__,
                     )
@@ -1114,9 +994,8 @@ async def executar_acao_rapida(
                     "exception_type": type(exc).__name__,
                     "exception_message": str(exc)[:1000] or type(exc).__name__,
                     "browser_mode": browser_mode,
-                    "runner": "desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track",
-                    "whether_fast_track_used": browser_mode != "desktop_browser",
-                    "whether_desktop_browser_used": browser_mode == "desktop_browser",
+                    "runner": "desktop_browser_replay",
+                    "whether_desktop_browser_used": True,
                     "last_successful_step_index": last_successful_step_index,
                     "next_step_expected_selector": str(passo.get("expected_selector_after") or ""),
                     "next_step_expected_text": str(passo.get("target_text") or passo.get("target_label") or ""),
@@ -1397,35 +1276,21 @@ async def executar_acao_rapida(
                     enriched["__cotasync_step_index"] = index
                 return enriched
 
-            if browser_mode == "desktop_browser":
-                connection = await provider.connect(p, f"action-{nome_arquivo}")
-                browser = connection.browser
-                context = connection.context
-                try:
-                    page = await select_desktop_page_for_action(action_config, context, connection.page)
-                except ActionPageError as exc:
-                    if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
-                        raise
-                    page = connection.page
-                first_step = step_for_diagnostic(
-                    passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None,
-                    0,
-                )
-                await run_session_checkpoint(page, "before_action_auth_check", first_step)
-                _LOGGER.info("[FAST-TRACK] Pagina desktop do sistema alvo selecionada.")
-            else:
-                # Mantem o fluxo historico do Browserless: sessao isolada, nova
-                # pagina e login automatico baseado no ERP configurado.
-                browser = await p.chromium.connect_over_cdp(_ws_browserless())
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
-                try:
-                    login_ok, login_msg = await _login_automatico(page, url_sistema, usuario, senha)
-                except Exception as exc:
-                    return {"status": "erro", "motivo": str(exc)}
-                if not login_ok:
-                    return {"status": "erro", "motivo": login_msg}
-                _LOGGER.info(f"[FAST-TRACK] {login_msg}")
+            connection = await provider.connect(p, f"action-{nome_arquivo}")
+            browser = connection.browser
+            context = connection.context
+            try:
+                page = await select_desktop_page_for_action(action_config, context, connection.page)
+            except ActionPageError as exc:
+                if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
+                    raise
+                page = connection.page
+            first_step = step_for_diagnostic(
+                passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None,
+                0,
+            )
+            await run_session_checkpoint(page, "before_action_auth_check", first_step)
+            _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
             for step_index, passo in enumerate(passos_playwright):
                 if not isinstance(passo, dict):
@@ -1455,15 +1320,14 @@ async def executar_acao_rapida(
                 }
                 step_trace.append(trace_item)
 
-                logging.info(f"[FAST-TRACK] Executando passo: {tipo_acao} em {seletor}")
-                if browser_mode == "desktop_browser":
-                    await run_session_checkpoint(page, "before_step_auth_check", current_step_diagnostic)
+                logging.info(f"[DESKTOP-REPLAY] Executando passo: {tipo_acao} em {seletor}")
+                await run_session_checkpoint(page, "before_step_auth_check", current_step_diagnostic)
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
                     try:
                         await page.locator(seletor).first.wait_for(state="visible", timeout=15000)
                     except Exception:
-                        logging.debug(f"[FAST-TRACK] Timeout de visibilidade para {seletor}. Tentando fallback...")
+                        logging.debug(f"[DESKTOP-REPLAY] Timeout de visibilidade para {seletor}. Tentando fallback...")
 
                 try:
                     if tipo_acao == "clicar":
@@ -1486,8 +1350,7 @@ async def executar_acao_rapida(
                                 await nova_aba.wait_for_load_state("networkidle", timeout=5000)
                             except Exception:
                                 pass
-                            if browser_mode == "desktop_browser":
-                                await validate_or_allow_learned_microsoft_step(
+                            await validate_or_allow_learned_microsoft_step(
                                     nova_aba,
                                     next_step_diagnostic,
                                     "after_new_page_check",
@@ -1510,8 +1373,7 @@ async def executar_acao_rapida(
                                 pass
 
                         await asyncio.sleep(2)
-                        if browser_mode == "desktop_browser":
-                            await validate_or_allow_learned_microsoft_step(
+                        await validate_or_allow_learned_microsoft_step(
                                 page,
                                 next_step_diagnostic,
                                 "after_step_stability_check",
@@ -1638,9 +1500,8 @@ async def executar_acao_rapida(
                     raise wrapped from e
 
             await asyncio.sleep(1)
-            if browser_mode == "desktop_browser":
-                await run_session_checkpoint(page, "final_auth_check")
-                validate_action_page_url(action_config, page.url)
+            await run_session_checkpoint(page, "final_auth_check")
+            validate_action_page_url(action_config, page.url)
             screenshot_path_result = ""
             evidence_name = ""
             try:
@@ -1649,7 +1510,7 @@ async def executar_acao_rapida(
                 evidence_name = caminho_execucao.name
             except Exception as exc:
                 _LOGGER.warning(
-                    "[FAST-TRACK] Falha ao salvar screenshot final da execução '%s': %s",
+                    "[DESKTOP-REPLAY] Falha ao salvar screenshot final da execução '%s': %s",
                     nome_acao,
                     type(exc).__name__,
                 )
@@ -1657,7 +1518,7 @@ async def executar_acao_rapida(
                 await page.screenshot(path=str(caminho_evidencia_padrao), full_page=False)
             except Exception as exc:
                 _LOGGER.warning(
-                    "[FAST-TRACK] Falha ao salvar evidencia padrao da execução '%s': %s",
+                    "[DESKTOP-REPLAY] Falha ao salvar evidencia padrao da execução '%s': %s",
                     nome_acao,
                     type(exc).__name__,
                 )
@@ -1692,7 +1553,7 @@ async def executar_acao_rapida(
                         "validation": contract_result.get("validation", {}),
                         "candidate": contract_result.get("candidate", {}),
                     }
-            _LOGGER.info(f"[FAST-TRACK] Execução finalizada com evidência: {caminho_execucao.name}")
+            _LOGGER.info(f"[DESKTOP-REPLAY] Execução finalizada com evidência: {caminho_execucao.name}")
             result_payload = {
                 "status": "sucesso",
                 "evidencia": evidence_name,
@@ -1705,7 +1566,7 @@ async def executar_acao_rapida(
                 "final_page": {"title": final_title, "url": _safe_result_url(page.url)},
                 "final_page_text": final_page_text,
                 "final_page_dom": final_page_dom,
-                "session_state": last_session_state or ("authenticated_system" if browser_mode == "desktop_browser" else ""),
+                "session_state": last_session_state or "authenticated_system",
                 "recovery_attempts": total_recovery_attempts,
                 "recovery_steps": recovery_steps,
                 "recovery_attempted": recovery_attempted,
@@ -1716,9 +1577,8 @@ async def executar_acao_rapida(
                 "step_trace": step_trace,
                 "last_successful_step_index": last_successful_step_index,
                 "browser_mode": browser_mode,
-                "runner": "desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track",
-                "whether_fast_track_used": browser_mode != "desktop_browser",
-                "whether_desktop_browser_used": browser_mode == "desktop_browser",
+                "runner": "desktop_browser_replay",
+                "whether_desktop_browser_used": True,
             }
             if extraction_attention:
                 result_payload["extraction_attention"] = extraction_attention
@@ -1737,8 +1597,15 @@ async def executar_acao_rapida(
         _LOGGER.info(f"[ERRO] Falha na execução rápida '{nome_acao}': {exc}")
         diagnostics = getattr(exc, "diagnostics", None)
         if isinstance(diagnostics, dict):
+            diagnostics.setdefault("reason", str(exc)[:1000] or type(exc).__name__)
+            diagnostics.setdefault("exception_type", type(exc).__name__)
+            original_exc = exc.__cause__ if exc.__cause__ is not None else exc
+            diagnostics.setdefault("exception_message", str(original_exc)[:1000] or type(original_exc).__name__)
             diagnostics.setdefault("step_trace", step_trace)
             diagnostics.setdefault("last_successful_step_index", last_successful_step_index)
+            diagnostics.setdefault("browser_mode", browser_mode)
+            diagnostics.setdefault("runner", "desktop_browser_replay")
+            diagnostics.setdefault("whether_desktop_browser_used", True)
             return {"status": "erro", "motivo": str(exc), "page_diagnostics": diagnostics}
         state = {"current_url": "", "current_host": "", "page_title": ""}
         try:
@@ -1756,9 +1623,8 @@ async def executar_acao_rapida(
                 "step_trace": step_trace,
                 "last_successful_step_index": last_successful_step_index,
                 "browser_mode": browser_mode,
-                "runner": "desktop_browser_replay" if browser_mode == "desktop_browser" else "legacy_fast_track",
-                "whether_fast_track_used": browser_mode != "desktop_browser",
-                "whether_desktop_browser_used": browser_mode == "desktop_browser",
+                "runner": "desktop_browser_replay",
+                "whether_desktop_browser_used": True,
                 "retryable": False,
             },
         }

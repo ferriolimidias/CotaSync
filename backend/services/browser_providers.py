@@ -1,4 +1,4 @@
-"""Providers CDP para Browserless e para o navegador desktop persistente."""
+"""Provider CDP para o navegador desktop persistente."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
 
 
-BrowserMode = Literal["browserless", "desktop_browser"]
-VALID_BROWSER_MODES: tuple[BrowserMode, ...] = ("browserless", "desktop_browser")
+BrowserMode = Literal["desktop_browser"]
+VALID_BROWSER_MODES: tuple[BrowserMode, ...] = ("desktop_browser",)
 _ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_PATH = _ROOT / "data" / "browser_config.json"
 
@@ -37,9 +37,9 @@ class BrowserConnection:
 
 def normalize_browser_mode(value: Any) -> BrowserMode:
     mode = str(value or "").strip().lower()
-    if mode not in VALID_BROWSER_MODES:
-        raise BrowserProviderError("Modo de navegador invalido. Use browserless ou desktop_browser.")
-    return mode  # type: ignore[return-value]
+    if mode in {"", "desktop_browser"}:
+        return "desktop_browser"
+    raise BrowserProviderError("Modo de navegador invalido. Use desktop_browser.")
 
 
 def configured_browser_mode() -> BrowserMode:
@@ -52,11 +52,11 @@ def configured_browser_mode() -> BrowserMode:
                 return normalize_browser_mode(payload["browser_mode"])
         except (OSError, json.JSONDecodeError, BrowserProviderError):
             pass
-    raw = os.getenv("COTASYNC_BROWSER_MODE", "browserless")
+    raw = os.getenv("COTASYNC_BROWSER_MODE", "desktop_browser")
     try:
         return normalize_browser_mode(raw)
     except BrowserProviderError:
-        return "browserless"
+        return "desktop_browser"
 
 
 def save_browser_mode(mode: Any) -> BrowserMode:
@@ -174,34 +174,6 @@ class BrowserProvider:
         raise NotImplementedError
 
 
-class BrowserlessProvider(BrowserProvider):
-    mode: BrowserMode = "browserless"
-
-    @staticmethod
-    def websocket_url(session_id: str) -> str:
-        raw = os.getenv("BROWSERLESS_URL", "ws://cotasync_test_browserless:3000").strip()
-        parsed = urlsplit(raw)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        tracking_id = f"cotasync-{str(session_id).replace('-', '')[:16]}"
-        query.update({"trackingId": tracking_id, "timeout": "600000"})
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
-
-    async def connect(self, playwright: Playwright, session_id: str) -> BrowserConnection:
-        browser = await playwright.chromium.connect_over_cdp(self.websocket_url(session_id))
-        context = browser.contexts[0] if browser.contexts else await browser.new_context(
-            viewport={"width": 1280, "height": 800}
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
-        return BrowserConnection(browser=browser, context=context, page=page)
-
-    def live_url(self, target_id: str) -> str:
-        from backend.services.browserless_urls import public_devtools_url
-
-        public_base = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "http://localhost:3010").strip().rstrip("/")
-        internal_websocket = f"ws://0.0.0.0:3000/devtools/page/{target_id}"
-        return public_devtools_url(internal_websocket, public_base)
-
-
 class DesktopBrowserProvider(BrowserProvider):
     mode: BrowserMode = "desktop_browser"
     close_browser_on_session_end = False
@@ -236,7 +208,5 @@ class DesktopBrowserProvider(BrowserProvider):
 
 
 def browser_provider(mode: BrowserMode | str | None = None) -> BrowserProvider:
-    selected = normalize_browser_mode(mode) if mode is not None else configured_browser_mode()
-    if selected == "desktop_browser":
-        return DesktopBrowserProvider()
-    return BrowserlessProvider()
+    normalize_browser_mode(mode) if mode is not None else configured_browser_mode()
+    return DesktopBrowserProvider()

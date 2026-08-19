@@ -59,7 +59,7 @@ class ActionSummary(BaseModel):
     session_guardian_enabled: bool = True
     legacy_unconfigured: bool = False
     action_timeout_seconds: int | None = None
-    browser_mode: str = "browserless"
+    browser_mode: str = "desktop_browser"
     url_inicial: str | None = None
     source: str = "data/ui_map.json"
 

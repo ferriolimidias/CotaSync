@@ -119,7 +119,7 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         last_screenshot_path="",
         last_page_count=0,
         recorder_errors=[],
-        browser_mode="browserless",
+        browser_mode="desktop_browser",
         browser=FakeBrowser(),
         external_system_name="",
         external_login_url="",
@@ -1006,12 +1006,12 @@ class OutputResultTests(unittest.TestCase):
             "texto": "ok",
             "dados_extraidos": {"status": "Ativo"},
             "passos_executados": 1,
-            "final_page": {"title": "Consulta", "url": "https://example.test"},
+            "final_page": {"title": "Consulta", "url": "https://nwcweb.randonconsorcios.com.br/CONCP/consulta"},
         }
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=result),
         ):
             run = asyncio.run(run_action_sync(action, ActionRunRequest()))
@@ -1061,12 +1061,12 @@ class OutputResultTests(unittest.TestCase):
             "downloaded_files": [metadata],
             "main_file": metadata,
             "passos_executados": 1,
-            "final_page": {"title": "Relatório", "url": "https://example.test"},
+            "final_page": {"title": "Relatório", "url": "https://nwcweb.randonconsorcios.com.br/CONCP/relatorio"},
         }
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=result),
         ):
             run = asyncio.run(run_action_sync(action, ActionRunRequest()))

@@ -53,6 +53,9 @@ from frontend.api_client import (  # noqa: E402
     get_batch,
     get_batch_results_csv,
     get_clients_template_csv,
+    login_api,
+    logout_api,
+    me_api,
     get_actions_for_ui,
     import_clients_csv,
     list_batches,
@@ -86,6 +89,42 @@ QUICK_ACTION_START_TIMEOUT_SECONDS = 20
 QUICK_ACTION_POLL_TIMEOUT_SECONDS = 10
 QUICK_ACTION_MAX_WAIT_SECONDS = 300
 QUICK_ACTION_POLL_INTERVAL_SECONDS = 2
+
+
+def _require_cotasync_login() -> dict[str, object] | None:
+    if st.session_state.get("cotasync_user"):
+        return st.session_state["cotasync_user"]
+    try:
+        me = me_api(api_base_url=API_BASE_URL)
+        user = me.get("user") if isinstance(me, dict) else None
+        if isinstance(user, dict):
+            st.session_state.cotasync_user = user
+            return user
+    except Exception:
+        pass
+
+    st.title("CotaSync")
+    with st.form("cotasync_login_form"):
+        username = st.text_input("Usuario")
+        password = st.text_input("Senha", type="password")
+        submitted = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+    if submitted:
+        try:
+            auth = login_api(username, password, api_base_url=API_BASE_URL)
+            body = auth.get("body", {})
+            user = body.get("user") if isinstance(body, dict) else {}
+            st.session_state.cotasync_auth_cookies = auth.get("cookies", {})
+            st.session_state.cotasync_csrf_token = auth.get("csrf_token", "")
+            st.session_state.cotasync_user = user if isinstance(user, dict) else {}
+            st.rerun()
+        except DemoApiError as exc:
+            st.error(str(exc))
+    return None
+
+
+_cotasync_user = _require_cotasync_login()
+if _cotasync_user is None:
+    st.stop()
 
 
 def _run_to_resultado_direto(run: dict[str, object]) -> dict[str, object]:
@@ -1104,7 +1143,7 @@ def _render_demo_v01() -> None:
             ).get("browser", {})
         except DemoApiError:
             browser_status = {}
-        selected_browser_mode = str(browser_status.get("browser_mode") or "browserless")
+        selected_browser_mode = str(browser_status.get("browser_mode") or "desktop_browser")
         st.caption(f"Modo de navegador: `{selected_browser_mode}`")
 
         if not session_id:
@@ -2037,7 +2076,6 @@ def _render_session_diagnostics(payload: object, *, status: str = "") -> None:
                 "action_key": payload.get("action_key", ""),
                 "browser_mode": payload.get("browser_mode", ""),
                 "runner": payload.get("runner", ""),
-                "whether_fast_track_used": payload.get("whether_fast_track_used", ""),
                 "whether_desktop_browser_used": payload.get("whether_desktop_browser_used", ""),
                 "session_state": session_state,
                 "recovery_attempts": recovery_attempts,
@@ -2205,6 +2243,12 @@ elif acoes_ui_result.source == "fallback_local":
 
 with st.sidebar:
     st.title("CotaSync")
+    st.caption(f"{_cotasync_user.get('username', '')} · {_cotasync_user.get('role', '')}")
+    if st.button("Sair", use_container_width=True):
+        logout_api(api_base_url=API_BASE_URL)
+        for key in ("cotasync_user", "cotasync_auth_cookies", "cotasync_csrf_token"):
+            st.session_state.pop(key, None)
+        st.rerun()
     st.caption("Operacao inteligente em tempo real")
     st.caption("Status do sistema: 🟢 Online")
     menu_selecionado = option_menu(
@@ -2881,29 +2925,8 @@ elif menu_selecionado == "Configurações":
     except DemoApiError as exc:
         browser_payload = {}
         st.error(str(exc))
-    current_browser_mode = str(browser_payload.get("browser_mode") or "browserless")
-    available_browser_modes = browser_payload.get("available_modes") or ["browserless", "desktop_browser"]
-    if current_browser_mode not in available_browser_modes:
-        current_browser_mode = "browserless"
-    with st.form("browser_mode_config_form"):
-        selected_browser_mode = st.selectbox(
-            "browser_mode",
-            options=available_browser_modes,
-            index=available_browser_modes.index(current_browser_mode),
-            format_func=lambda value: "Browserless" if value == "browserless" else "Desktop Browser",
-        )
-        if st.form_submit_button("Salvar modo de navegador", type="primary", use_container_width=True):
-            try:
-                demo_api_request(
-                    "PUT",
-                    "/api/browser/config",
-                    {"browser_mode": selected_browser_mode},
-                    api_base_url=API_BASE_URL,
-                )
-                st.success("Modo salvo. Novas sessões usarão este provider.")
-                st.rerun()
-            except DemoApiError as exc:
-                st.error(str(exc))
+    current_browser_mode = str(browser_payload.get("browser_mode") or "desktop_browser")
+    st.write(f"Modo operacional: `{current_browser_mode}`")
 
     desktop_status = browser_payload.get("desktop_browser", {})
     if isinstance(desktop_status, dict):
@@ -3067,11 +3090,9 @@ elif menu_selecionado == "Configurações":
         st.divider()
         _render_login_operator_controls(settings_session_id)
     public_base_url = os.getenv("COTASYNC_PUBLIC_BASE_URL", "").strip()
-    browserless_public_url = os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()
     desktop_public_url = os.getenv("COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL", "").strip()
     desktop_browser_view_url = os.getenv("DESKTOP_BROWSER_VIEW_URL", "").strip()
     st.caption(f"URL pública do app: `{public_base_url or 'não configurada'}`")
-    st.caption(f"URL pública do navegador: `{browserless_public_url or 'não configurada'}`")
     st.caption(f"URL pública protegida do Desktop Browser: `{desktop_public_url or 'não configurada'}`")
     st.caption(f"Visualização local do Desktop Browser: `{desktop_browser_view_url or 'não configurada'}`")
     st.divider()

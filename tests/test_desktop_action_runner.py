@@ -24,6 +24,7 @@ from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
+from tests.auth_helpers import authenticated_client
 
 
 TARGET_URL = "https://nwcweb.randonconsorcios.com.br/CONCP/frmConCpRelResultadoAssembleia.aspx"
@@ -49,21 +50,22 @@ class VisualResultSelectionTests(unittest.TestCase):
             with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
                 "backend.api.actions.default_ui_map_path", return_value=ui_path, create=True
             ), patch("backend.services.result_selection.default_ui_map_path", return_value=ui_path):
-                response = TestClient(app).post(
-                    "/api/actions/porcentagem/result-selection/confirm",
-                    json={
-                        "target_name": "porcentagem a pagar",
-                        "screen_label": "% Pagar",
-                        "selection_type": "table_footer_total",
-                        "candidate": {
-                            "label": "% Pagar",
-                            "value": "0,0000",
-                            "type": "table_footer_total",
-                            "table_headers": ["Valor Pagar", "Ocorrência", "% Pagar"],
-                            "row_context": "Total | % Pagar | 0,0000",
+                with authenticated_client() as client:
+                    response = client.post(
+                        "/api/actions/porcentagem/result-selection/confirm",
+                        json={
+                            "target_name": "porcentagem a pagar",
+                            "screen_label": "% Pagar",
+                            "selection_type": "table_footer_total",
+                            "candidate": {
+                                "label": "% Pagar",
+                                "value": "0,0000",
+                                "type": "table_footer_total",
+                                "table_headers": ["Valor Pagar", "Ocorrência", "% Pagar"],
+                                "row_context": "Total | % Pagar | 0,0000",
+                            },
                         },
-                    },
-                )
+                    )
                 saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Porcentagem"]
 
         self.assertEqual(response.status_code, 200)
@@ -178,6 +180,9 @@ class FakeReplayLocator:
 class FakeReplayPage:
     url = TARGET_URL
 
+    def is_closed(self) -> bool:
+        return False
+
     def locator(self, _selector: str) -> FakeReplayLocator:
         return FakeReplayLocator()
 
@@ -199,6 +204,8 @@ class FakeReplayBrowser:
 
 
 class FakeReplayContext:
+    pages: list[FakeReplayPage] = []
+
     async def new_page(self) -> FakeReplayPage:
         return FakeReplayPage()
 
@@ -216,6 +223,19 @@ class FakeAsyncPlaywright:
 
     async def __aexit__(self, *_args: object) -> None:
         return None
+
+
+class FakeReplayConnection:
+    browser = FakeReplayBrowser()
+    context = FakeReplayContext()
+    page = FakeReplayPage()
+
+
+class FakeReplayProvider:
+    close_browser_on_session_end = False
+
+    async def connect(self, _playwright: object, _session_id: str) -> FakeReplayConnection:
+        return FakeReplayConnection()
 
 
 class FakeGuardianLocator:
@@ -762,7 +782,6 @@ class DesktopActionRunTests(unittest.TestCase):
             "final_page": {"title": "Pagina", "url": final_url},
             "browser_mode": "desktop_browser",
             "runner": "desktop_browser_replay",
-            "whether_fast_track_used": False,
             "whether_desktop_browser_used": True,
         }
         with patch("backend.services.action_runner.append_run"), patch(
@@ -773,7 +792,7 @@ class DesktopActionRunTests(unittest.TestCase):
         ):
             return asyncio.run(run_action_sync(desktop_action(), ActionRunRequest()))
 
-    def test_desktop_browser_action_uses_desktop_replay_not_legacy_fast_track(self) -> None:
+    def test_desktop_browser_action_uses_desktop_replay_not_desktop_browser_replay(self) -> None:
         execution = {
             "status": "success",
             "texto": "concluida",
@@ -781,23 +800,21 @@ class DesktopActionRunTests(unittest.TestCase):
             "final_page": {"title": "Pagina", "url": TARGET_URL},
             "browser_mode": "desktop_browser",
             "runner": "desktop_browser_replay",
-            "whether_fast_track_used": False,
             "whether_desktop_browser_used": True,
         }
         with patch("backend.services.action_runner.append_run"), patch(
             "backend.services.action_runner.update_run"
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(),
-        ) as legacy_fast_track, patch(
+        ) as desktop_browser_replay, patch(
             "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
         ) as desktop_replay:
             run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest(variables={"grupo": "935"})))
         desktop_replay.assert_awaited_once()
-        legacy_fast_track.assert_not_awaited()
+        desktop_browser_replay.assert_not_awaited()
         self.assertEqual(run.status, "success")
-        self.assertFalse(run.result_payload["whether_fast_track_used"])  # type: ignore[index]
         self.assertTrue(run.result_payload["whether_desktop_browser_used"])  # type: ignore[index]
 
     def test_desktop_action_never_succeeds_with_google_final_page(self) -> None:
@@ -813,26 +830,26 @@ class DesktopActionRunTests(unittest.TestCase):
 
     def test_run_endpoint_persists_new_run_visible_in_runs_api(self) -> None:
         action = desktop_action().model_copy(
-            update={"browser_mode": "browserless", "url_inicial": None, "has_url": False}
+            update={"browser_mode": "desktop_browser", "url_inicial": None, "has_url": False}
         )
         execution = {
             "status": "success",
             "texto": "concluida",
             "passos_executados": 1,
-            "final_page": {"title": "Demo", "url": "http://demo.local/resultado"},
+            "final_page": {"title": "Demo", "url": TARGET_URL},
         }
         with tempfile.TemporaryDirectory() as tmp, patch(
             "backend.services.runs_repository.default_runs_path",
             return_value=Path(tmp) / "runs.json",
         ), patch("backend.api.runs.find_action", return_value=action), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
         ):
-            client = TestClient(app)
-            response = client.post("/api/actions/teste2/run", json={"variables": {}})
-            self.assertEqual(response.status_code, 200)
-            created = response.json()["run"]
-            listed = client.get("/api/runs").json()["runs"]
+            with authenticated_client() as client:
+                response = client.post("/api/actions/teste2/run", json={"variables": {}})
+                self.assertEqual(response.status_code, 200)
+                created = response.json()["run"]
+                listed = client.get("/api/runs").json()["runs"]
         self.assertTrue(any(item["id"] == created["id"] for item in listed))
 
     def test_validate_review_endpoint_creates_validation_run_and_saves_overlay(self) -> None:
@@ -863,7 +880,6 @@ class DesktopActionRunTests(unittest.TestCase):
             "step_trace": [{"step_index": 0, "step_type": "clicar", "status": "success"}],
             "browser_mode": "desktop_browser",
             "runner": "desktop_browser_replay",
-            "whether_fast_track_used": False,
             "whether_desktop_browser_used": True,
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -898,8 +914,8 @@ class DesktopActionRunTests(unittest.TestCase):
                     }
                 ),
             ):
-                client = TestClient(app)
-                response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
+                with authenticated_client() as client:
+                    response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
                 self.assertEqual(response.status_code, 200)
                 created = response.json()["run"]
                 saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Teste2"]
@@ -941,7 +957,6 @@ class DesktopActionRunTests(unittest.TestCase):
             "step_trace": [{"step_index": 0, "step_type": "preencher", "status": "success"}],
             "browser_mode": "desktop_browser",
             "runner": "desktop_browser_replay",
-            "whether_fast_track_used": False,
             "whether_desktop_browser_used": True,
             "screenshot_path": "data/runs/review.png",
         }
@@ -957,14 +972,14 @@ class DesktopActionRunTests(unittest.TestCase):
                 "backend.services.action_runner._run_desktop_browser_replay",
                 new=AsyncMock(return_value=execution),
             ), patch("backend.services.action_validation_review._ai_review", new=AsyncMock(return_value=None)):
-                client = TestClient(app)
-                response = client.post(
-                    "/api/actions/numero-de-parcelas-pagas/validate-review",
-                    json={
-                        "variables": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
-                        "mode": "sync",
-                    },
-                )
+                with authenticated_client() as client:
+                    response = client.post(
+                        "/api/actions/numero-de-parcelas-pagas/validate-review",
+                        json={
+                            "variables": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
+                            "mode": "sync",
+                        },
+                    )
                 self.assertEqual(response.status_code, 200)
                 created = response.json()["run"]
                 saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["NumeroParcelas"]
@@ -980,15 +995,21 @@ class DesktopActionRunTests(unittest.TestCase):
     def test_validation_replay_screenshot_failure_keeps_original_diagnostics(self) -> None:
         from backend.motor_browser import executar_acao_rapida
 
+        FakeReplayContext.pages = []
+        FakeReplayBrowser.contexts = []
         with patch("backend.motor_browser.async_playwright", return_value=FakeAsyncPlaywright()), patch(
-            "backend.motor_browser._login_automatico", new=AsyncMock(return_value=(True, "ok"))
-        ), patch("backend.motor_browser._ws_browserless", return_value="ws://browserless"):
+            "backend.motor_browser.browser_provider", return_value=FakeReplayProvider()
+        ):
             result = asyncio.run(
                 executar_acao_rapida(
                     "número de parcelas pagas",
                     [{"tipo": "preencher", "seletor": "#grupo", "variavel": "grupo"}],
                     {"grupo": "935"},
-                    action_config={"browser_mode": "browserless"},
+                    action_config={
+                        "browser_mode": "desktop_browser",
+                        "url_inicial": TARGET_URL,
+                        "expected_system_host": "nwcweb.randonconsorcios.com.br",
+                    },
                     run_id="run-acento",
                 )
             )
@@ -1020,7 +1041,6 @@ class DesktopActionRunTests(unittest.TestCase):
                 "step_trace": [{"step_index": 0, "status": "error"}],
                 "browser_mode": "desktop_browser",
                 "runner": "desktop_browser_replay",
-                "whether_fast_track_used": False,
                 "whether_desktop_browser_used": True,
             },
         }
@@ -1036,8 +1056,8 @@ class DesktopActionRunTests(unittest.TestCase):
                 "backend.services.action_runner._run_desktop_browser_replay",
                 new=AsyncMock(return_value=execution),
             ):
-                client = TestClient(app)
-                response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
+                with authenticated_client() as client:
+                    response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
                 self.assertEqual(response.status_code, 200)
                 saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Teste2"]
 
@@ -1048,19 +1068,19 @@ class DesktopActionRunTests(unittest.TestCase):
 
     def test_async_run_persists_running_then_latest_result(self) -> None:
         action = desktop_action().model_copy(
-            update={"browser_mode": "browserless", "url_inicial": None, "has_url": False}
+            update={"browser_mode": "desktop_browser", "url_inicial": None, "has_url": False}
         )
         execution = {
             "status": "success",
             "texto": "concluida",
             "passos_executados": 1,
-            "final_page": {"title": "Demo", "url": "http://demo.local/resultado"},
+            "final_page": {"title": "Demo", "url": TARGET_URL},
         }
         with tempfile.TemporaryDirectory() as tmp, patch(
             "backend.services.runs_repository.default_runs_path",
             return_value=Path(tmp) / "runs.json",
         ), patch(
-            "backend.services.action_runner.executar_acao_fast_track",
+            "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
         ):
             request = ActionRunRequest(mode="async", variables={"grupo": "123"})
@@ -1071,8 +1091,8 @@ class DesktopActionRunTests(unittest.TestCase):
 
             finished = asyncio.run(finish_action_run(action, request, run))
             persisted_finished = get_run(run.id)
-            client = TestClient(app)
-            latest = client.get("/api/runs?limit=1").json()["runs"][0]
+            with authenticated_client() as client:
+                latest = client.get("/api/runs?limit=1").json()["runs"][0]
 
         self.assertEqual(finished.status, "success")
         self.assertIsNotNone(persisted_finished)
@@ -1126,7 +1146,6 @@ class DesktopActionRunTests(unittest.TestCase):
             "reason": "Seletor nao ficou visivel",
             "browser_mode": "desktop_browser",
             "runner": "desktop_browser_replay",
-            "whether_fast_track_used": False,
             "whether_desktop_browser_used": True,
             "last_successful_step_index": 2,
             "next_step_expected_selector": "#resultado",
@@ -1174,7 +1193,6 @@ class DesktopActionRunTests(unittest.TestCase):
             "exception_message",
             "browser_mode",
             "runner",
-            "whether_fast_track_used",
             "whether_desktop_browser_used",
             "last_successful_step_index",
             "next_step_expected_selector",
@@ -1188,7 +1206,6 @@ class DesktopActionRunTests(unittest.TestCase):
         self.assertEqual(payload["exception_message"], "Erro real do Playwright")
         self.assertEqual(payload["input_variables"]["grupo"], "935")
         self.assertEqual(payload["screenshot_path"], "data/runs/run_step_3_error.png")
-        self.assertFalse(payload["whether_fast_track_used"])
         self.assertTrue(payload["whether_desktop_browser_used"])
         self.assertIn("Parei no passo 3", run.operational_summary or "")
 

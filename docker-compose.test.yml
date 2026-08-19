@@ -1,17 +1,6 @@
 name: cotasync_test
 
 services:
-  cotasync_test_browserless:
-    image: ghcr.io/browserless/chromium@sha256:18d3e547a04941e57665b8f38a695177c4ddc89aad8d62483341643b59032e0a
-    container_name: cotasync_test_browserless
-    ports:
-      - "${BROWSERLESS_PORT:-3010}:3000"
-    environment:
-      TIMEOUT: "600000"
-    networks:
-      - cotasync_test_net
-    restart: unless-stopped
-
   cotasync_test_desktop_browser:
     build:
       context: .
@@ -53,15 +42,6 @@ services:
       - cotasync_test_net
     restart: unless-stopped
 
-  cotasync_test_redis:
-    image: redis:7-alpine
-    container_name: cotasync_test_redis
-    volumes:
-      - cotasync_test_redis_data:/data
-    networks:
-      - cotasync_test_net
-    restart: unless-stopped
-
   cotasync_test_backend:
     build:
       context: .
@@ -69,29 +49,28 @@ services:
     container_name: cotasync_test_backend
     command: backend
     depends_on:
-      cotasync_test_browserless:
-        condition: service_started
       cotasync_test_desktop_browser:
         condition: service_healthy
       cotasync_test_postgres:
         condition: service_healthy
-      cotasync_test_redis:
-        condition: service_started
     env_file:
       - .env.test
     environment:
-      BROWSERLESS_URL: ws://cotasync_test_browserless:3000
-      COTASYNC_BROWSER_MODE: ${COTASYNC_BROWSER_MODE:-browserless}
+      COTASYNC_BROWSER_MODE: desktop_browser
       DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://cotasync_test_desktop_browser:9222}
       DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
       DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
-      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
       COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-}
       COTASYNC_DESKTOP_VIEW_TOKEN_TTL_SECONDS: ${COTASYNC_DESKTOP_VIEW_TOKEN_TTL_SECONDS:-1800}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
-      REDIS_URL: redis://cotasync_test_redis:6379/0
+      COTASYNC_COOKIE_SECURE: ${COTASYNC_COOKIE_SECURE:-false}
+      COTASYNC_SESSION_SECRET: ${COTASYNC_SESSION_SECRET:-cotasync-test-session-secret-change-me}
+      COTASYNC_ADMIN_USERNAME: ${COTASYNC_ADMIN_USERNAME:-admin}
+      COTASYNC_ADMIN_PASSWORD: ${COTASYNC_ADMIN_PASSWORD:-admin-test-password}
+      COTASYNC_OPERATOR_USERNAME: ${COTASYNC_OPERATOR_USERNAME:-operator}
+      COTASYNC_OPERATOR_PASSWORD: ${COTASYNC_OPERATOR_PASSWORD:-operator-test-password}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8100}:8000"
     volumes:
@@ -112,20 +91,22 @@ services:
     env_file:
       - .env.test
     environment:
-      BROWSERLESS_URL: ws://cotasync_test_browserless:3000
-      COTASYNC_BROWSER_MODE: ${COTASYNC_BROWSER_MODE:-browserless}
+      COTASYNC_BROWSER_MODE: desktop_browser
       DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://cotasync_test_desktop_browser:9222}
       DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
       DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
       BACKEND_URL: http://cotasync_test_backend:8000
       COTASYNC_API_BASE_URL: http://cotasync_test_backend:8000
       COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
-      COTASYNC_BROWSERLESS_PUBLIC_URL: ${COTASYNC_BROWSERLESS_PUBLIC_URL:-http://localhost:3010}
       COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-}
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
-      REDIS_URL: redis://cotasync_test_redis:6379/0
+      COTASYNC_COOKIE_SECURE: ${COTASYNC_COOKIE_SECURE:-false}
+      COTASYNC_ADMIN_USERNAME: ${COTASYNC_ADMIN_USERNAME:-admin}
+      COTASYNC_ADMIN_PASSWORD: ${COTASYNC_ADMIN_PASSWORD:-admin-test-password}
+      COTASYNC_OPERATOR_USERNAME: ${COTASYNC_OPERATOR_USERNAME:-operator}
+      COTASYNC_OPERATOR_PASSWORD: ${COTASYNC_OPERATOR_PASSWORD:-operator-test-password}
     ports:
-      - "${FRONTEND_PORT:-3100}:8501"
+      - "127.0.0.1:${FRONTEND_PORT:-3100}:8501"
     volumes:
       - .:/app
     networks:
@@ -139,7 +120,5 @@ networks:
 volumes:
   cotasync_test_postgres_data:
     name: cotasync_test_postgres_data
-  cotasync_test_redis_data:
-    name: cotasync_test_redis_data
   cotasync_test_desktop_browser_profile:
     name: cotasync_test_desktop_browser_profile

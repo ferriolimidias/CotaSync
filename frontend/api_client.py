@@ -36,6 +36,35 @@ DEMO_API_TIMEOUT_MESSAGE = (
 )
 
 
+def login_api(username: str, password: str, *, api_base_url: str | None = None, timeout: float = 10.0) -> dict[str, Any]:
+    url = f"{_api_base_url(api_base_url)}/api/v1/auth/login"
+    try:
+        response = requests.post(url, json={"username": username, "password": password}, timeout=timeout)
+        body = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise DemoApiError("Login indisponivel.") from exc
+    if not response.ok or not isinstance(body, dict):
+        detail = body.get("detail") if isinstance(body, dict) else None
+        raise DemoApiError(str(detail or "Credenciais invalidas."))
+    return {
+        "body": body,
+        "cookies": response.cookies.get_dict(),
+        "csrf_token": str(body.get("csrf_token") or ""),
+    }
+
+
+def logout_api(*, api_base_url: str | None = None, timeout: float = 10.0) -> None:
+    url = f"{_api_base_url(api_base_url)}/api/v1/auth/logout"
+    try:
+        requests.post(url, timeout=timeout, **_auth_kwargs())
+    except requests.RequestException:
+        return
+
+
+def me_api(*, api_base_url: str | None = None, timeout: float = 5.0) -> dict[str, Any]:
+    return demo_api_request("GET", "/api/v1/auth/me", api_base_url=api_base_url, timeout=timeout)
+
+
 def parse_batch_csv_text(csv_text: str) -> list[dict[str, str]]:
     """Parseia CSV simples preservando valores como texto, inclusive zeros a esquerda."""
 
@@ -100,6 +129,23 @@ class ActionsUiResult:
 def _api_base_url(explicit_url: str | None = None) -> str:
     configured = explicit_url or os.getenv("COTASYNC_API_BASE_URL") or DEFAULT_API_BASE_URL
     return configured.strip().rstrip("/")
+
+
+def _auth_kwargs() -> dict[str, Any]:
+    try:
+        import streamlit as st  # type: ignore
+
+        cookies = st.session_state.get("cotasync_auth_cookies")
+        csrf_token = str(st.session_state.get("cotasync_csrf_token") or "")
+    except Exception:
+        cookies = None
+        csrf_token = ""
+    kwargs: dict[str, Any] = {}
+    if isinstance(cookies, dict) and cookies:
+        kwargs["cookies"] = cookies
+    if csrf_token:
+        kwargs["headers"] = {"X-CSRF-Token": csrf_token}
+    return kwargs
 
 
 def _normalize_variable(raw: Any) -> dict[str, Any] | None:
@@ -282,7 +328,7 @@ def get_actions_from_api(
 
     url = f"{_api_base_url(api_base_url)}/api/actions"
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, timeout=timeout, **_auth_kwargs())
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
@@ -364,6 +410,7 @@ def demo_api_request(
             url,
             json=payload,
             timeout=timeout,
+            **_auth_kwargs(),
         )
         try:
             body = response.json()
@@ -427,7 +474,7 @@ def get_batch_results_csv(
 ) -> str:
     url = f"{_api_base_url(api_base_url)}/api/batches/{str(batch_id).strip()}/results.csv"
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, timeout=timeout, **_auth_kwargs())
         response.raise_for_status()
     except requests.Timeout as exc:
         raise DemoApiTimeout(DEMO_API_TIMEOUT_MESSAGE) from exc
@@ -532,7 +579,7 @@ def validate_clients_for_action(
 def get_clients_template_csv(*, api_base_url: str | None = None, timeout: float = 10.0) -> str:
     url = f"{_api_base_url(api_base_url)}/api/clients/template.csv"
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, timeout=timeout, **_auth_kwargs())
         response.raise_for_status()
     except requests.Timeout as exc:
         raise DemoApiTimeout(DEMO_API_TIMEOUT_MESSAGE) from exc

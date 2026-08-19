@@ -300,7 +300,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
             if str(data.get("action_timeout_seconds") or "").strip().isdigit()
             else None
         ),
-        browser_mode=str(data.get("browser_mode") or "browserless").strip() or "browserless",
+        browser_mode=str(data.get("browser_mode") or "desktop_browser").strip() or "desktop_browser",
         url_inicial=str(data.get("url_inicial") or data.get("url") or "").strip() or None,
         source=SOURCE_LABEL,
     )

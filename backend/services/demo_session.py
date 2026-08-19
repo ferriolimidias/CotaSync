@@ -28,7 +28,6 @@ from playwright.async_api import (
     async_playwright,
 )
 
-from backend.services.browserless_urls import public_devtools_host
 from backend.services.action_pages import (
     ActionPageError,
     select_desktop_page_for_action,
@@ -725,7 +724,7 @@ class DemoBrowserSession:
     live_url: str
     created_at: str
     tracking_id: str
-    browser_mode: BrowserMode = "browserless"
+    browser_mode: BrowserMode = "desktop_browser"
     external_system_name: str = ""
     external_login_url: str = ""
     auth_validation_mode: str = ""
@@ -1583,9 +1582,7 @@ class DemoSessionManager:
             "tracking_id": session.tracking_id,
             "browser_mode": session.browser_mode,
             "live_url": session.live_url,
-            "public_devtools_host": (
-                public_devtools_host(session.live_url) if session.browser_mode == "browserless" else ""
-            ),
+            "public_devtools_host": "",
             "page_url": page_url,
             "page_title": title,
             "recording": session.recording,
@@ -1627,10 +1624,7 @@ class DemoSessionManager:
             "learning_events_count": len(session.learning_events),
             "live_url": session.live_url,
             "live_url_kind": _live_url_kind(session.live_url),
-            "public_devtools_host": (
-                public_devtools_host(session.live_url) if session.browser_mode == "browserless" else ""
-            ),
-            "browserless_public_url_set": bool(os.getenv("COTASYNC_BROWSERLESS_PUBLIC_URL", "").strip()),
+            "public_devtools_host": "",
         }
 
     async def recording_diagnostics(self, session_id: str) -> dict[str, Any]:
@@ -2852,7 +2846,7 @@ class DemoSessionManager:
         if not isinstance(steps, list) or not steps:
             raise DemoSessionError("A acao aprendida nao possui passos executaveis.")
 
-        action_browser_mode = str(action.get("browser_mode") or "browserless").strip()
+        action_browser_mode = str(action.get("browser_mode") or "desktop_browser").strip()
         if action_browser_mode != session.browser_mode:
             raise DemoSessionError("A acao deve ser executada no modo de navegador em que foi gravada.")
 
@@ -3536,7 +3530,6 @@ class DemoSessionManager:
             "last_successful_step_index": last_successful_step_index,
             "browser_mode": action_browser_mode,
             "runner": "demo_session_replay",
-            "whether_fast_track_used": False,
             "whether_desktop_browser_used": action_browser_mode == "desktop_browser",
             "retryable": False,
             "evidence": str(evidence_path.relative_to(_ROOT)),

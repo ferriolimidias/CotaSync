@@ -23,7 +23,7 @@ _SENSITIVE_PARTS = (
     "senha", "storage_state", "token",
 )
 _TECHNICAL_TERMS = (
-    "desktop_browser", "browserless", "run id", "seletor", "selector",
+    "desktop_browser", "desktop_browser", "run id", "seletor", "selector",
     "playwright", "storage_state",
 )
 _MAX_SUMMARY_LENGTH = 500

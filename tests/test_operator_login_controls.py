@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.services.demo_session import demo_session_manager
 from frontend.api_client import operator_clear_active, operator_press_key, operator_type_active
+from tests.auth_helpers import authenticated_client
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,10 +23,11 @@ class OperatorLoginControlsTests(unittest.TestCase):
             "operator_insert_active",
             new=AsyncMock(return_value={"operation": "insert_active_text", "typed_chars": len(value), "sensitive": False}),
         ) as mocked:
-            response = TestClient(app).post(
-                "/api/demo/sessions/session-1/operator/insert-active",
-                json={"value": value, "sensitive": False},
-            )
+            with authenticated_client() as client:
+                response = client.post(
+                    "/api/demo/sessions/session-1/operator/insert-active",
+                    json={"value": value, "sensitive": False},
+                )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["operator"]["typed_chars"], len(value))
@@ -38,10 +40,11 @@ class OperatorLoginControlsTests(unittest.TestCase):
             "operator_insert_active",
             new=AsyncMock(return_value={"operation": "insert_active_text", "typed_chars": len(secret), "sensitive": True}),
         ) as mocked:
-            response = TestClient(app).post(
-                "/api/demo/sessions/session-1/operator/insert-active",
-                json={"value": secret, "sensitive": True},
-            )
+            with authenticated_client() as client:
+                response = client.post(
+                    "/api/demo/sessions/session-1/operator/insert-active",
+                    json={"value": secret, "sensitive": True},
+                )
 
         body = response.json()
         self.assertEqual(response.status_code, 200)
@@ -56,8 +59,9 @@ class OperatorLoginControlsTests(unittest.TestCase):
             "operator_press",
             new=AsyncMock(return_value={"operation": "press_key", "key": "Enter"}),
         ) as mocked:
-            enter = TestClient(app).post("/api/demo/sessions/session-1/operator/press", json={"key": "Enter"})
-            tab = TestClient(app).post("/api/demo/sessions/session-1/operator/press", json={"key": "Tab"})
+            with authenticated_client() as client:
+                enter = client.post("/api/demo/sessions/session-1/operator/press", json={"key": "Enter"})
+                tab = client.post("/api/demo/sessions/session-1/operator/press", json={"key": "Tab"})
 
         self.assertEqual(enter.status_code, 200)
         self.assertEqual(tab.status_code, 200)
@@ -70,7 +74,8 @@ class OperatorLoginControlsTests(unittest.TestCase):
             "operator_clear_active",
             new=AsyncMock(return_value={"operation": "clear_active"}),
         ) as mocked:
-            response = TestClient(app).post("/api/demo/sessions/session-1/operator/clear-active")
+            with authenticated_client() as client:
+                response = client.post("/api/demo/sessions/session-1/operator/clear-active")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["operator"]["operation"], "clear_active")

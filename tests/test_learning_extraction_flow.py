@@ -13,6 +13,7 @@ from backend.services.result_selection import (
     detect_extraction_candidates,
     validate_candidate_value,
 )
+from tests.auth_helpers import authenticated_client
 
 
 def _run_payload() -> dict[str, object]:
@@ -60,10 +61,11 @@ class LearningExtractionFlowTests(unittest.TestCase):
             ), patch("backend.services.result_selection.default_ui_map_path", return_value=ui_path), patch(
                 "backend.services.runs_repository.default_runs_path", return_value=runs_path
             ), patch("backend.api.actions.default_runs_path", return_value=runs_path, create=True):
-                response = TestClient(app).post(
-                    "/api/actions/quantidade-de-parcelas/extraction/confirm-last-result",
-                    json={"target_name": "Quantidade de parcelas", "screen_label": "Qtd. Pcls. Pagas"},
-                )
+                with authenticated_client() as client:
+                    response = client.post(
+                        "/api/actions/quantidade-de-parcelas/extraction/confirm-last-result",
+                        json={"target_name": "Quantidade de parcelas", "screen_label": "Qtd. Pcls. Pagas"},
+                    )
                 saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Quantidade de parcelas"]
 
         self.assertEqual(response.status_code, 200)
@@ -98,7 +100,8 @@ class LearningExtractionFlowTests(unittest.TestCase):
             with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
                 "backend.services.runs_repository.default_runs_path", return_value=runs_path
             ):
-                response = TestClient(app).post("/api/actions/quantidade-de-parcelas/extraction/test")
+                with authenticated_client() as client:
+                    response = client.post("/api/actions/quantidade-de-parcelas/extraction/test")
 
         self.assertEqual(response.status_code, 200)
         extraction_test = response.json()["extraction_test"]

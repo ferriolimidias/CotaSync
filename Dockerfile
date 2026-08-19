@@ -1,5 +1,5 @@
-# Imagem única do CotaSync: FastAPI (8000) + Streamlit (8501).
-# O Playwright aqui é apenas cliente CDP; o Chromium roda no serviço Browserless.
+# Imagem unica do CotaSync: FastAPI (8000) + Streamlit (8501).
+# O Playwright aqui e cliente CDP; o Chromium persistente roda no Desktop Browser.
 
 FROM python:3.12-slim
 
@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Não instalamos browsers locais: `connect_over_cdp` usa o Browserless.
+# Nao instalamos browsers locais: `connect_over_cdp` usa o Desktop Browser.
 COPY backend ./backend
 COPY frontend ./frontend
 COPY ui_map.json usuarios_autorizados.json ./
