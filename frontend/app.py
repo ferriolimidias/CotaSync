@@ -904,7 +904,11 @@ def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
         if isinstance(batch, dict) and batch:
             status = str(batch.get("status") or "")
             batch_rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
-            completed = sum(1 for row in batch_rows if isinstance(row, dict) and row.get("status") in {"success", "error", "skipped"})
+            completed = sum(
+                1
+                for row in batch_rows
+                if isinstance(row, dict) and row.get("status") in {"success", "error", "cancelled", "interrupted"}
+            )
             total = len(batch_rows)
             st.markdown("### Lote atual")
             st.write(f"**Batch:** `{batch.get('batch_id')}` · **Status:** `{status}`")
@@ -912,7 +916,7 @@ def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
             table = _batch_rows_table(batch)
             if table:
                 st.dataframe(pd.DataFrame(table), use_container_width=True)
-            if status in {"pending", "running"}:
+            if status in {"pending", "queued", "running", "cancel_requested"}:
                 st.info("Executando em fila sequencial. A próxima linha só começa após a anterior terminar e aguardar o delay.")
                 sleep(2)
                 st.rerun()

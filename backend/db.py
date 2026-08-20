@@ -141,11 +141,14 @@ class Batch(Base):
     action_version_id: Mapped[str | None] = mapped_column(ForeignKey("action_versions.id", ondelete="SET NULL"), index=True)
     client_group: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(64), index=True)
+    worker_id: Mapped[str | None] = mapped_column(String(128), index=True)
     delay_seconds: Mapped[float] = mapped_column(default=0)
     total_items: Mapped[int] = mapped_column(Integer, default=0)
     processed_items: Mapped[int] = mapped_column(Integer, default=0)
     success_items: Mapped[int] = mapped_column(Integer, default=0)
     error_items: Mapped[int] = mapped_column(Integer, default=0)
+    interrupted_items: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled_items: Mapped[int] = mapped_column(Integer, default=0)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
     created_by: Mapped[str | None] = mapped_column(String(255))
@@ -172,6 +175,20 @@ class BatchItem(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkerInstance(Base):
+    __tablename__ = "worker_instances"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id", ondelete="SET NULL"), index=True)
+    current_batch_item_id: Mapped[str | None] = mapped_column(ForeignKey("batch_items.id", ondelete="SET NULL"), index=True)
+    hostname: Mapped[str | None] = mapped_column(String(255))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
 
 
 class Schedule(Base):

@@ -79,6 +79,34 @@ services:
       - cotasync_test_net
     restart: unless-stopped
 
+  cotasync_test_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cotasync_test_worker
+    command: worker
+    depends_on:
+      cotasync_test_desktop_browser:
+        condition: service_healthy
+      cotasync_test_postgres:
+        condition: service_healthy
+    env_file:
+      - .env.test
+    environment:
+      COTASYNC_BROWSER_MODE: desktop_browser
+      DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://cotasync_test_desktop_browser:9222}
+      DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
+      DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
+      COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
+      DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
+      COTASYNC_WORKER_HEARTBEAT_SECONDS: ${COTASYNC_WORKER_HEARTBEAT_SECONDS:-10}
+      COTASYNC_WORKER_STALE_SECONDS: ${COTASYNC_WORKER_STALE_SECONDS:-60}
+    volumes:
+      - .:/app
+    networks:
+      - cotasync_test_net
+    restart: unless-stopped
+
   cotasync_test_frontend:
     build:
       context: .

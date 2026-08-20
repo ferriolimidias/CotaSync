@@ -37,10 +37,11 @@ services:
       retries: 10
     restart: unless-stopped
 
-  cotasync_app:
+  cotasync_backend:
     build:
       context: .
       dockerfile: Dockerfile
+    command: backend
     depends_on:
       desktop_browser:
         condition: service_healthy
@@ -48,7 +49,6 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
-      - "127.0.0.1:${FRONTEND_PORT:-8501}:8501"
     volumes:
       - .:/app
     env_file:
@@ -57,7 +57,50 @@ services:
       COTASYNC_BROWSER_MODE: desktop_browser
       DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://desktop_browser:9222}
       DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
-      COTASYNC_DEMO_TARGET_URL: http://cotasync_app:8000/demo/alvo
+      COTASYNC_DEMO_TARGET_URL: http://cotasync_backend:8000/demo/alvo
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cotasync}:${POSTGRES_PASSWORD:-cotasync_password}@postgres:5432/${POSTGRES_DB:-cotasync}
+    restart: unless-stopped
+
+  cotasync_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: worker
+    depends_on:
+      desktop_browser:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      COTASYNC_BROWSER_MODE: desktop_browser
+      DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://desktop_browser:9222}
+      DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
+      COTASYNC_DEMO_TARGET_URL: http://cotasync_backend:8000/demo/alvo
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cotasync}:${POSTGRES_PASSWORD:-cotasync_password}@postgres:5432/${POSTGRES_DB:-cotasync}
+      COTASYNC_WORKER_HEARTBEAT_SECONDS: ${COTASYNC_WORKER_HEARTBEAT_SECONDS:-10}
+      COTASYNC_WORKER_STALE_SECONDS: ${COTASYNC_WORKER_STALE_SECONDS:-60}
+    restart: unless-stopped
+
+  cotasync_frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: frontend
+    depends_on:
+      cotasync_backend:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8501}:8501"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      COTASYNC_API_BASE_URL: http://cotasync_backend:8000
       DATABASE_URL: postgresql://${POSTGRES_USER:-cotasync}:${POSTGRES_PASSWORD:-cotasync_password}@postgres:5432/${POSTGRES_DB:-cotasync}
     restart: unless-stopped
 

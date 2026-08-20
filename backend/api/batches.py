@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,7 @@ from backend.services.batch_runner import (
     list_batches,
     load_batch,
 )
+from backend.worker import latest_worker_status
 
 router = APIRouter(prefix="/api/batches", tags=["batches"])
 
@@ -28,7 +29,10 @@ class BatchCreateRequest(BaseModel):
 
 
 @router.post("")
-async def create_batch_endpoint(payload: BatchCreateRequest) -> dict[str, Any]:
+async def create_batch_endpoint(
+    payload: BatchCreateRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
     try:
         batch = create_batch(
             action_id=payload.action_id,
@@ -37,13 +41,19 @@ async def create_batch_endpoint(payload: BatchCreateRequest) -> dict[str, Any]:
             client_ids=payload.client_ids,
             requested_by=payload.requested_by,
             delay_between_rows_seconds=payload.delay_between_rows_seconds,
-            auto_start=True,
+            auto_start=False,
+            idempotency_key=idempotency_key,
         )
     except BatchRunnerError as exc:
         message = str(exc)
         status_code = 409 if "Ja existe um lote" in message else 422
         raise HTTPException(status_code=status_code, detail=message) from exc
     return {"status": "ok", "batch": batch}
+
+
+@router.get("/worker/status")
+async def get_worker_status_endpoint() -> dict[str, Any]:
+    return {"status": "ok", "worker": latest_worker_status()}
 
 
 @router.get("")

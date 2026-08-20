@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import asyncio
 import csv
 import io
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from backend.schemas.runs import ActionRunRequest, RunRecord
-from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, SessionLocal
-from backend.services.action_runner import missing_required_variables, run_action_sync
-from backend.services.actions_repository import find_action, project_root
+from sqlalchemy import text
+
+from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal
+from backend.services.actions_repository import find_action
 from backend.services.clients_repository import validate_clients_for_action
 
 logger = logging.getLogger("cotasync.batch_runner")
@@ -21,20 +20,49 @@ logger = logging.getLogger("cotasync.batch_runner")
 BatchStatus = str
 RowStatus = str
 
-FINAL_BATCH_STATUSES = {"success", "partial_success", "error", "canceled"}
-RUNNING_BATCH_STATUSES = {"pending", "running"}
-DEFAULT_DELAY_BETWEEN_ROWS_SECONDS = 3
+BATCH_STATUS_QUEUED = "queued"
+BATCH_STATUS_RUNNING = "running"
+BATCH_STATUS_CANCEL_REQUESTED = "cancel_requested"
+BATCH_STATUS_CANCELLED = "cancelled"
+BATCH_STATUS_COMPLETED = "completed"
+BATCH_STATUS_COMPLETED_WITH_ERRORS = "completed_with_errors"
+BATCH_STATUS_INTERRUPTED = "interrupted"
+BATCH_STATUS_FAILED = "failed"
 
-_desktop_batch_lock = asyncio.Lock()
-_worker_tasks: set[asyncio.Task] = set()
+ITEM_STATUS_PENDING = "pending"
+ITEM_STATUS_RUNNING = "running"
+ITEM_STATUS_SUCCESS = "success"
+ITEM_STATUS_ERROR = "error"
+ITEM_STATUS_INTERRUPTED = "interrupted"
+ITEM_STATUS_CANCELLED = "cancelled"
+
+FINAL_BATCH_STATUSES = {
+    BATCH_STATUS_CANCELLED,
+    BATCH_STATUS_COMPLETED,
+    BATCH_STATUS_COMPLETED_WITH_ERRORS,
+    BATCH_STATUS_INTERRUPTED,
+    BATCH_STATUS_FAILED,
+    "success",
+    "partial_success",
+    "error",
+    "canceled",
+}
+RUNNING_BATCH_STATUSES = {BATCH_STATUS_QUEUED, BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED, "pending"}
+PROCESSED_ITEM_STATUSES = {ITEM_STATUS_SUCCESS, ITEM_STATUS_ERROR, ITEM_STATUS_INTERRUPTED, ITEM_STATUS_CANCELLED}
+DEFAULT_DELAY_BETWEEN_ROWS_SECONDS = 3
 
 
 class BatchRunnerError(Exception):
     """Erro controlado no gerenciamento da fila sequencial de batches."""
 
 
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 def utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+    return utc_now().isoformat()
+
 
 def _parse_batch_dt(value: Any) -> datetime | None:
     if not value:
@@ -46,15 +74,28 @@ def _parse_batch_dt(value: Any) -> datetime | None:
         return None
 
 
+def _normalize_batch_status(status: str) -> str:
+    return {
+        "pending": BATCH_STATUS_QUEUED,
+        "success": BATCH_STATUS_COMPLETED,
+        "partial_success": BATCH_STATUS_COMPLETED_WITH_ERRORS,
+        "error": BATCH_STATUS_FAILED,
+        "canceled": BATCH_STATUS_CANCELLED,
+    }.get(str(status or "").strip(), str(status or "").strip() or BATCH_STATUS_QUEUED)
+
+
+def _normalize_item_status(status: str) -> str:
+    return {"skipped": ITEM_STATUS_CANCELLED}.get(str(status or "").strip(), str(status or "").strip() or ITEM_STATUS_PENDING)
+
+
 def parse_csv_rows(csv_text: str) -> list[dict[str, str]]:
-    text = str(csv_text or "")
-    if text.startswith("\ufeff"):
-        text = text.lstrip("\ufeff")
-    if not text.strip():
+    text_value = str(csv_text or "")
+    if text_value.startswith("\ufeff"):
+        text_value = text_value.lstrip("\ufeff")
+    if not text_value.strip():
         return []
 
-    stream = io.StringIO(text)
-    reader = csv.DictReader(stream)
+    reader = csv.DictReader(io.StringIO(text_value))
     if not reader.fieldnames:
         return []
 
@@ -92,15 +133,11 @@ def validate_batch_rows(action: Any, rows: list[dict[str, Any]]) -> None:
         columns.update(str(key) for key in row.keys())
     missing_columns = [key for key in required if key not in columns]
     if missing_columns:
-        raise BatchRunnerError(
-            "CSV sem colunas obrigatorias: " + ", ".join(missing_columns)
-        )
+        raise BatchRunnerError("CSV sem colunas obrigatorias: " + ", ".join(missing_columns))
 
     row_errors: list[str] = []
     for index, row in enumerate(rows, start=1):
-        missing_values = [
-            key for key in required if row.get(key) is None or not str(row.get(key)).strip()
-        ]
+        missing_values = [key for key in required if row.get(key) is None or not str(row.get(key)).strip()]
         if missing_values:
             row_errors.append(f"linha {index}: {', '.join(missing_values)}")
     if row_errors:
@@ -140,170 +177,115 @@ def _rows_from_clients(
     return rows
 
 
-def _write_batch(batch: dict[str, Any], batches_dir: Path | None = None) -> dict[str, Any]:
-    with SessionLocal.begin() as session:
-        action = session.get(DbAction, str(batch.get("action_id") or ""))
-        db_batch = session.get(DbBatch, str(batch["batch_id"]))
-        rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
-        if db_batch is None:
-            db_batch = DbBatch(id=str(batch["batch_id"]), action_id=action.id if action else None, client_group=str(batch.get("client_group") or "") or None, status=str(batch.get("status") or "pending"), delay_seconds=float(batch.get("delay_between_rows_seconds") or 0), total_items=len(rows), created_by=str(batch.get("requested_by") or "") or None, metadata_json={"source": batch.get("source"), "action_key": batch.get("action_key")})
-            session.add(db_batch)
-        db_batch.status = str(batch.get("status") or db_batch.status)
-        db_batch.cancel_requested = bool(batch.get("cancel_requested", False))
-        db_batch.started_at = _parse_batch_dt(batch.get("started_at"))
-        db_batch.finished_at = _parse_batch_dt(batch.get("finished_at"))
-        db_batch.processed_items = sum(1 for row in rows if isinstance(row, dict) and row.get("status") in {"success", "error"})
-        db_batch.success_items = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "success")
-        db_batch.error_items = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "error")
-        session.flush()
-        for index, row in enumerate(rows, start=1):
-            if not isinstance(row, dict):
-                continue
-            item_id = f"{db_batch.id}-item-{index-1}"
-            item = session.get(BatchItem, item_id)
-            if item is None:
-                item = BatchItem(id=item_id, batch_id=db_batch.id, position=index)
-                session.add(item)
-            client_id = str(row.get("client_id") or "") or None
-            item.client_id = client_id if client_id and session.get(DbClient, client_id) is not None else None
-            item.status = str(row.get("status") or "pending")
-            run_id = str(row.get("run_id") or "") or None
-            from backend.db import Run as DbRun
-            item.run_id = run_id if run_id and session.get(DbRun, run_id) is not None else None
-            item.input_variables = _prepared_variables(row)
-            item.result_data = row.get("result_payload") if isinstance(row.get("result_payload"), dict) else {}
-            item.error_data = {"message": row.get("error_message")} if row.get("error_message") else {}
-            item.started_at = _parse_batch_dt(row.get("started_at"))
-            item.finished_at = _parse_batch_dt(row.get("finished_at"))
-    return batch
+def _item_id(batch_id: str, position: int) -> str:
+    return f"{batch_id}-item-{position - 1}"
+
+
+def _recount_batch(session: Any, batch_id: str) -> None:
+    batch = session.get(DbBatch, batch_id)
+    if batch is None:
+        return
+    items = session.query(BatchItem).filter(BatchItem.batch_id == batch_id).all()
+    batch.total_items = len(items)
+    batch.processed_items = sum(1 for item in items if item.status in PROCESSED_ITEM_STATUSES)
+    batch.success_items = sum(1 for item in items if item.status == ITEM_STATUS_SUCCESS)
+    batch.error_items = sum(1 for item in items if item.status == ITEM_STATUS_ERROR)
+    batch.interrupted_items = sum(1 for item in items if item.status == ITEM_STATUS_INTERRUPTED)
+    batch.cancelled_items = sum(1 for item in items if item.status == ITEM_STATUS_CANCELLED)
+
+
+def _batch_final_status(items: list[BatchItem], *, cancel_requested: bool = False) -> str:
+    if cancel_requested:
+        return BATCH_STATUS_CANCELLED
+    statuses = [item.status for item in items]
+    if statuses and all(status == ITEM_STATUS_SUCCESS for status in statuses):
+        return BATCH_STATUS_COMPLETED
+    if any(status in {ITEM_STATUS_SUCCESS, ITEM_STATUS_ERROR, ITEM_STATUS_INTERRUPTED, ITEM_STATUS_CANCELLED} for status in statuses):
+        return BATCH_STATUS_COMPLETED_WITH_ERRORS
+    return BATCH_STATUS_FAILED
+
+
+def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem]) -> dict[str, Any]:
+    current = next((item for item in items if item.status == ITEM_STATUS_RUNNING), None)
+    return {
+        "batch_id": db_batch.id,
+        "action_id": db_batch.action_id or "",
+        "action_version_id": db_batch.action_version_id or "",
+        "status": _normalize_batch_status(db_batch.status),
+        "requested_by": db_batch.created_by or "api",
+        "client_group": db_batch.client_group or "",
+        "delay_between_rows_seconds": db_batch.delay_seconds,
+        "created_at": db_batch.created_at.isoformat() if db_batch.created_at else None,
+        "started_at": db_batch.started_at.isoformat() if db_batch.started_at else None,
+        "finished_at": db_batch.finished_at.isoformat() if db_batch.finished_at else None,
+        "heartbeat_at": db_batch.heartbeat_at.isoformat() if db_batch.heartbeat_at else None,
+        "worker_id": db_batch.worker_id or "",
+        "cancel_requested": db_batch.cancel_requested,
+        "idempotency_key": db_batch.idempotency_key or "",
+        "total_items": db_batch.total_items,
+        "processed_items": db_batch.processed_items,
+        "success_items": db_batch.success_items,
+        "error_items": db_batch.error_items,
+        "interrupted_items": db_batch.interrupted_items,
+        "cancelled_items": db_batch.cancelled_items,
+        "current_position": current.position if current else None,
+        "current_client_id": current.client_id if current else None,
+        "metadata": db_batch.metadata_json or {},
+        "source": (db_batch.metadata_json or {}).get("source", ""),
+        "client_ids": (db_batch.metadata_json or {}).get("client_ids", []),
+        "rows": [
+            {
+                "index": item.position,
+                "client_id": item.client_id or "",
+                "client_name": "",
+                "client_group": "",
+                "status": _normalize_item_status(item.status),
+                "run_id": item.run_id or "",
+                "variables": item.input_variables or {},
+                "result_payload": item.result_data or {},
+                "dados_extraidos": (item.result_data or {}).get("dados_extraidos", {}) if isinstance(item.result_data, dict) else {},
+                "error_message": (item.error_data or {}).get("message", ""),
+                "error_data": item.error_data or {},
+                "started_at": item.started_at.isoformat() if item.started_at else None,
+                "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+                "retry_count": item.retry_count,
+            }
+            for item in items
+        ],
+    }
 
 
 def load_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, Any] | None:
-    with SessionLocal() as session:
+    with SessionLocal.begin() as session:
         db_batch = session.get(DbBatch, str(batch_id))
         if db_batch is None:
             return None
         items = session.query(BatchItem).filter(BatchItem.batch_id == db_batch.id).order_by(BatchItem.position).all()
-        return {"batch_id": db_batch.id, "action_id": db_batch.action_id or "", "status": db_batch.status, "requested_by": db_batch.created_by or "api", "client_group": db_batch.client_group or "", "delay_between_rows_seconds": db_batch.delay_seconds, "created_at": db_batch.created_at.isoformat() if db_batch.created_at else None, "started_at": db_batch.started_at.isoformat() if db_batch.started_at else None, "finished_at": db_batch.finished_at.isoformat() if db_batch.finished_at else None, "cancel_requested": db_batch.cancel_requested, "rows": [{"index": item.position, "client_id": item.client_id or "", "status": item.status, "run_id": item.run_id or "", "variables": item.input_variables or {}, "result_payload": item.result_data or {}, "error_message": (item.error_data or {}).get("message", ""), "started_at": item.started_at.isoformat() if item.started_at else None, "finished_at": item.finished_at.isoformat() if item.finished_at else None} for item in items]}
+        _recount_batch(session, db_batch.id)
+        return _batch_to_dict(db_batch, items)
 
 
 def list_batches(*, limit: int = 20, batches_dir: Path | None = None) -> list[dict[str, Any]]:
     with SessionLocal() as session:
         rows = session.query(DbBatch).order_by(DbBatch.created_at.desc()).limit(max(0, min(int(limit), 200))).all()
-        return [loaded for row in rows if (loaded := load_batch(row.id, None)) is not None]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            items = session.query(BatchItem).filter(BatchItem.batch_id == row.id).order_by(BatchItem.position).all()
+            result.append(_batch_to_dict(row, items))
+        return result
 
 
 def find_running_batch(batches_dir: Path | None = None) -> dict[str, Any] | None:
-    for batch in list_batches(limit=200, batches_dir=batches_dir):
-        if str(batch.get("status") or "") in RUNNING_BATCH_STATUSES:
-            return batch
-    return None
-
-
-def _row_result_from_run(row: dict[str, Any], run: RunRecord) -> dict[str, Any]:
-    payload = run.result_payload if isinstance(run.result_payload, dict) else {}
-    dados_extraidos = payload.get("dados_extraidos") if isinstance(payload, dict) else {}
-    return {
-        **row,
-        "status": run.status,
-        "run_id": run.id,
-        "operational_summary": run.operational_summary or run.result_summary or "",
-        "result_payload": payload,
-        "dados_extraidos": dados_extraidos if isinstance(dados_extraidos, dict) else {},
-        "error_message": run.error_message or "",
-        "finished_at": run.finished_at,
-    }
-
-
-def _final_status(rows: list[dict[str, Any]], cancel_requested: bool) -> BatchStatus:
-    if cancel_requested:
-        return "canceled"
-    success_count = sum(1 for row in rows if row.get("status") == "success")
-    error_count = sum(1 for row in rows if row.get("status") == "error")
-    if success_count and error_count:
-        return "partial_success"
-    if success_count and not error_count:
-        return "success"
-    return "error"
-
-
-async def _run_batch_worker(batch_id: str, *, batches_dir: Path | None = None) -> None:
-    async with _desktop_batch_lock:
-        batch = load_batch(batch_id, batches_dir)
-        if batch is None:
-            return
-        if str(batch.get("status") or "") not in RUNNING_BATCH_STATUSES:
-            return
-
-        try:
-            action = find_action(str(batch.get("action_id") or ""))
-            if action is None:
-                raise BatchRunnerError("Acao nao encontrada para executar o batch.")
-
-            batch["status"] = "running"
-            batch["started_at"] = batch.get("started_at") or utc_now_iso()
-            _write_batch(batch, batches_dir)
-
-            rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
-            delay_seconds = max(0, float(batch.get("delay_between_rows_seconds") or 0))
-            for index, row in enumerate(rows):
-                batch = load_batch(batch_id, batches_dir) or batch
-                rows = batch.get("rows") if isinstance(batch.get("rows"), list) else rows
-                if bool(batch.get("cancel_requested")):
-                    for pending_row in rows[index:]:
-                        if pending_row.get("status") == "pending":
-                            pending_row["status"] = "skipped"
-                            pending_row["finished_at"] = utc_now_iso()
-                    break
-
-                row = rows[index]
-                row["status"] = "running"
-                row["started_at"] = utc_now_iso()
-                _write_batch(batch, batches_dir)
-
-                variables = row.get("variables") if isinstance(row.get("variables"), dict) else {}
-                request = ActionRunRequest(
-                    variables=variables,
-                    mode="sync",
-                    requested_by=str(batch.get("requested_by") or "batch"),
-                )
-                try:
-                    missing = missing_required_variables(action, request.variables)
-                    if missing:
-                        raise BatchRunnerError("Variaveis obrigatorias ausentes: " + ", ".join(missing))
-                    run = await run_action_sync(action, request)
-                    rows[index] = _row_result_from_run(row, run)
-                except Exception as exc:
-                    rows[index] = {
-                        **row,
-                        "status": "error",
-                        "error_message": str(exc)[:1000] or type(exc).__name__,
-                        "finished_at": utc_now_iso(),
-                    }
-                batch["rows"] = rows
-                _write_batch(batch, batches_dir)
-
-                if index < len(rows) - 1 and not bool(batch.get("cancel_requested")) and delay_seconds > 0:
-                    await asyncio.sleep(delay_seconds)
-
-            batch = load_batch(batch_id, batches_dir) or batch
-            rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
-            batch["status"] = _final_status(rows, bool(batch.get("cancel_requested")))
-            batch["finished_at"] = utc_now_iso()
-            _write_batch(batch, batches_dir)
-        except Exception as exc:
-            logger.exception("Falha critica no batch %s", batch_id)
-            batch = load_batch(batch_id, batches_dir) or {"batch_id": batch_id, "rows": []}
-            batch["status"] = "error"
-            batch["error_message"] = str(exc)[:1000] or type(exc).__name__
-            batch["finished_at"] = utc_now_iso()
-            _write_batch(batch, batches_dir)
-
-
-def schedule_batch_worker(batch_id: str, *, batches_dir: Path | None = None) -> None:
-    task = asyncio.create_task(_run_batch_worker(batch_id, batches_dir=batches_dir))
-    _worker_tasks.add(task)
-    task.add_done_callback(_worker_tasks.discard)
+    with SessionLocal() as session:
+        row = (
+            session.query(DbBatch)
+            .filter(DbBatch.status.in_([BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED]))
+            .order_by(DbBatch.created_at)
+            .first()
+        )
+        if row is None:
+            return None
+    return load_batch(row.id)
 
 
 def create_batch(
@@ -315,14 +297,9 @@ def create_batch(
     requested_by: str = "api",
     delay_between_rows_seconds: int | float = DEFAULT_DELAY_BETWEEN_ROWS_SECONDS,
     batches_dir: Path | None = None,
-    auto_start: bool = True,
+    auto_start: bool = False,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    active = find_running_batch(batches_dir)
-    if active is not None:
-        raise BatchRunnerError(
-            f"Ja existe um lote em execucao no desktop/session: {active.get('batch_id')}"
-        )
-
     action = find_action(action_id)
     if action is None:
         raise BatchRunnerError("Acao nao encontrada.")
@@ -335,13 +312,22 @@ def create_batch(
             raise BatchRunnerError("Nenhum cliente ativo com dados completos para esta acao.")
     _validate_prepared_rows(action, prepared_rows)
 
+    normalized_key = str(idempotency_key or "").strip() or None
+    if normalized_key:
+        with SessionLocal() as session:
+            existing = session.query(DbBatch).filter(DbBatch.idempotency_key == normalized_key).first()
+            if existing is not None:
+                loaded = load_batch(existing.id)
+                if loaded is not None:
+                    return loaded
+
     batch_id = str(uuid4())
     created_at = utc_now_iso()
     batch = {
         "batch_id": batch_id,
         "action_id": action.id,
         "action_key": action.key,
-        "status": "pending",
+        "status": BATCH_STATUS_QUEUED,
         "requested_by": str(requested_by or "api"),
         "source": source,
         "client_group": str(client_group or ""),
@@ -351,6 +337,7 @@ def create_batch(
         "started_at": None,
         "finished_at": None,
         "cancel_requested": False,
+        "idempotency_key": normalized_key,
         "rows": [
             {
                 "index": index,
@@ -358,7 +345,7 @@ def create_batch(
                 "client_name": str(row.get("client_name") or ""),
                 "client_group": str(row.get("client_group") or ""),
                 "variables": {str(key): str(value) for key, value in _prepared_variables(row).items()},
-                "status": "pending",
+                "status": ITEM_STATUS_PENDING,
                 "run_id": "",
                 "operational_summary": "",
                 "result_payload": {},
@@ -370,21 +357,276 @@ def create_batch(
             for index, row in enumerate(prepared_rows, start=1)
         ],
     }
-    _write_batch(batch, batches_dir)
-    if auto_start:
-        schedule_batch_worker(batch_id, batches_dir=batches_dir)
-    return batch
+    with SessionLocal.begin() as session:
+        db_batch = DbBatch(
+            id=batch_id,
+            action_id=action.id,
+            action_version_id=getattr(action, "published_version_id", None),
+            client_group=str(client_group or "") or None,
+            status=BATCH_STATUS_QUEUED,
+            delay_seconds=max(0, float(delay_between_rows_seconds)),
+            total_items=len(batch["rows"]),
+            created_by=str(requested_by or "") or None,
+            idempotency_key=normalized_key,
+            metadata_json={"source": source, "action_key": action.key, "client_ids": batch["client_ids"]},
+        )
+        session.add(db_batch)
+        session.flush()
+        for row in batch["rows"]:
+            position = int(row["index"])
+            client_id = str(row.get("client_id") or "") or None
+            item = BatchItem(
+                id=_item_id(batch_id, position),
+                batch_id=batch_id,
+                client_id=client_id if client_id and session.get(DbClient, client_id) is not None else None,
+                position=position,
+                status=ITEM_STATUS_PENDING,
+                input_variables=row["variables"],
+                result_data={},
+                error_data={},
+            )
+            session.add(item)
+    loaded = load_batch(batch_id)
+    if loaded is None:
+        return batch
+    loaded["source"] = source
+    loaded["client_ids"] = batch["client_ids"]
+    loaded_rows = loaded.get("rows") if isinstance(loaded.get("rows"), list) else []
+    for index, original in enumerate(batch["rows"]):
+        if index < len(loaded_rows) and isinstance(loaded_rows[index], dict):
+            loaded_rows[index]["client_name"] = original.get("client_name", "")
+            loaded_rows[index]["client_group"] = original.get("client_group", "")
+            if original.get("client_id"):
+                loaded_rows[index]["client_id"] = original.get("client_id", "")
+    return loaded
 
 
 def cancel_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, Any]:
-    batch = load_batch(batch_id, batches_dir)
-    if batch is None:
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, str(batch_id))
+        if batch is None:
+            raise BatchRunnerError("Batch nao encontrado.")
+        batch.status = _normalize_batch_status(batch.status)
+        if batch.status in FINAL_BATCH_STATUSES:
+            pass
+        else:
+            running = (
+                session.query(BatchItem)
+                .filter(BatchItem.batch_id == batch.id, BatchItem.status == ITEM_STATUS_RUNNING)
+                .first()
+            )
+            batch.cancel_requested = True
+            if running is None:
+                now = utc_now()
+                (
+                    session.query(BatchItem)
+                    .filter(BatchItem.batch_id == batch.id, BatchItem.status == ITEM_STATUS_PENDING)
+                    .update({BatchItem.status: ITEM_STATUS_CANCELLED, BatchItem.finished_at: now}, synchronize_session=False)
+                )
+                batch.status = BATCH_STATUS_CANCELLED
+                batch.finished_at = now
+            else:
+                batch.status = BATCH_STATUS_CANCEL_REQUESTED
+            _recount_batch(session, batch.id)
+    loaded = load_batch(batch_id)
+    if loaded is None:
         raise BatchRunnerError("Batch nao encontrado.")
-    if str(batch.get("status") or "") in FINAL_BATCH_STATUSES:
-        return batch
-    batch["cancel_requested"] = True
-    _write_batch(batch, batches_dir)
-    return batch
+    return loaded
+
+
+def claim_next_batch(worker_id: str) -> str | None:
+    now = utc_now()
+    with SessionLocal.begin() as session:
+        row = session.execute(
+            text(
+                """
+                select id
+                  from batches
+                 where status = :queued
+                 order by created_at asc, id asc
+                 for update skip locked
+                 limit 1
+                """
+            ),
+            {"queued": BATCH_STATUS_QUEUED},
+        ).first()
+        if row is None:
+            return None
+        batch = session.get(DbBatch, row.id)
+        if batch is None:
+            return None
+        batch.status = BATCH_STATUS_RUNNING
+        batch.worker_id = worker_id
+        batch.started_at = batch.started_at or now
+        batch.heartbeat_at = now
+        return batch.id
+
+
+def claim_next_item(batch_id: str) -> str | None:
+    now = utc_now()
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, batch_id)
+        if batch is None or batch.status not in {BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED}:
+            return None
+        if batch.cancel_requested or batch.status == BATCH_STATUS_CANCEL_REQUESTED:
+            cancel_pending_items(session, batch_id)
+            batch.status = BATCH_STATUS_CANCELLED
+            batch.finished_at = now
+            _recount_batch(session, batch_id)
+            return None
+        running_count = (
+            session.query(BatchItem)
+            .filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_RUNNING)
+            .count()
+        )
+        if running_count:
+            return None
+        row = session.execute(
+            text(
+                """
+                select id
+                  from batch_items
+                 where batch_id = :batch_id and status = :pending
+                 order by position asc
+                 for update skip locked
+                 limit 1
+                """
+            ),
+            {"batch_id": batch_id, "pending": ITEM_STATUS_PENDING},
+        ).first()
+        if row is None:
+            items = session.query(BatchItem).filter(BatchItem.batch_id == batch_id).order_by(BatchItem.position).all()
+            batch.status = _batch_final_status(items, cancel_requested=batch.cancel_requested)
+            batch.finished_at = now
+            batch.worker_id = None
+            _recount_batch(session, batch_id)
+            return None
+        item = session.get(BatchItem, row.id)
+        if item is None:
+            return None
+        item.status = ITEM_STATUS_RUNNING
+        item.started_at = now
+        batch.heartbeat_at = now
+        return item.id
+
+
+def complete_item_success(item_id: str, run_id: str, result_data: dict[str, Any]) -> None:
+    with SessionLocal.begin() as session:
+        item = session.get(BatchItem, item_id)
+        if item is None:
+            return
+        item.status = ITEM_STATUS_SUCCESS
+        item.run_id = run_id if run_id and session.get(DbRun, run_id) is not None else None
+        item.result_data = result_data
+        item.error_data = {}
+        item.finished_at = utc_now()
+        batch = session.get(DbBatch, item.batch_id)
+        if batch is not None:
+            batch.heartbeat_at = utc_now()
+            _recount_batch(session, batch.id)
+
+
+def complete_item_error(item_id: str, run_id: str | None, message: str, error_data: dict[str, Any] | None = None) -> None:
+    with SessionLocal.begin() as session:
+        item = session.get(BatchItem, item_id)
+        if item is None:
+            return
+        item.status = ITEM_STATUS_ERROR
+        item.run_id = run_id if run_id and session.get(DbRun, run_id) is not None else None
+        payload = dict(error_data or {})
+        payload.setdefault("message", str(message or "Erro na execucao do cliente.")[:1000])
+        item.error_data = payload
+        item.finished_at = utc_now()
+        batch = session.get(DbBatch, item.batch_id)
+        if batch is not None:
+            batch.heartbeat_at = utc_now()
+            _recount_batch(session, batch.id)
+
+
+def cancel_pending_items(session: Any, batch_id: str) -> None:
+    now = utc_now()
+    (
+        session.query(BatchItem)
+        .filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_PENDING)
+        .update({BatchItem.status: ITEM_STATUS_CANCELLED, BatchItem.finished_at: now}, synchronize_session=False)
+    )
+
+
+def finish_batch_if_done(batch_id: str) -> str | None:
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, batch_id)
+        if batch is None:
+            return None
+        pending = session.query(BatchItem).filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_PENDING).count()
+        running = session.query(BatchItem).filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_RUNNING).count()
+        if pending or running:
+            _recount_batch(session, batch_id)
+            return batch.status
+        items = session.query(BatchItem).filter(BatchItem.batch_id == batch_id).order_by(BatchItem.position).all()
+        batch.status = _batch_final_status(items, cancel_requested=batch.cancel_requested)
+        batch.finished_at = batch.finished_at or utc_now()
+        batch.worker_id = None
+        _recount_batch(session, batch_id)
+        return batch.status
+
+
+def mark_batch_interrupted(batch_id: str, reason: str, metadata: dict[str, Any] | None = None) -> None:
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, batch_id)
+        if batch is None:
+            return
+        current = dict(batch.metadata_json or {})
+        current["interrupted_reason"] = reason
+        current["interrupted_at"] = utc_now_iso()
+        if metadata:
+            current["interrupted_metadata"] = metadata
+        batch.metadata_json = current
+        batch.status = BATCH_STATUS_INTERRUPTED
+        batch.finished_at = utc_now()
+        batch.worker_id = None
+
+
+def recover_stale_batches(stale_seconds: int) -> int:
+    threshold = utc_now() - timedelta(seconds=max(1, int(stale_seconds)))
+    recovered = 0
+    with SessionLocal.begin() as session:
+        batches = (
+            session.query(DbBatch)
+            .filter(DbBatch.status.in_([BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED]))
+            .filter(DbBatch.heartbeat_at.is_not(None), DbBatch.heartbeat_at < threshold)
+            .order_by(DbBatch.created_at)
+            .all()
+        )
+        for batch in batches:
+            running_items = (
+                session.query(BatchItem)
+                .filter(BatchItem.batch_id == batch.id, BatchItem.status == ITEM_STATUS_RUNNING)
+                .order_by(BatchItem.position)
+                .all()
+            )
+            for item in running_items:
+                item.status = ITEM_STATUS_INTERRUPTED
+                item.finished_at = utc_now()
+                item.error_data = {
+                    "message": "Item interrompido por recovery: worker/batch stale.",
+                    "reason": "stale_running_item",
+                    "previous_worker_id": batch.worker_id,
+                    "last_heartbeat_at": batch.heartbeat_at.isoformat() if batch.heartbeat_at else None,
+                    "recovered_at": utc_now_iso(),
+                }
+                recovered += 1
+            pending_count = session.query(BatchItem).filter(BatchItem.batch_id == batch.id, BatchItem.status == ITEM_STATUS_PENDING).count()
+            batch.worker_id = None
+            batch.heartbeat_at = utc_now()
+            if pending_count:
+                batch.status = BATCH_STATUS_QUEUED
+                batch.started_at = None
+            else:
+                items = session.query(BatchItem).filter(BatchItem.batch_id == batch.id).order_by(BatchItem.position).all()
+                batch.status = _batch_final_status(items, cancel_requested=batch.cancel_requested)
+                batch.finished_at = utc_now()
+            _recount_batch(session, batch.id)
+    return recovered
 
 
 def batch_results_csv(batch: dict[str, Any]) -> str:
