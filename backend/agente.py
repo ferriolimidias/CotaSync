@@ -29,6 +29,7 @@ from backend.motor_browser import (
     executar_acao_rapida,
     gerar_plano_acao,
 )
+from backend.services.actions_repository import save_learned_action
 from backend.services.operational_summary import build_operational_summary, build_operational_summary_result
 from backend.services.actions_repository import enrich_action_access_profile
 
@@ -58,29 +59,43 @@ sessoes_usuarios = {
 
 
 def carregar_ui_map() -> dict:
-    if not _UI_MAP_PATH.is_file():
-        return {"acoes_conhecidas": {}}
-    try:
-        dados = json.loads(_UI_MAP_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"acoes_conhecidas": {}}
+    if os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"} and _UI_MAP_PATH.is_file():
+        try:
+            dados = json.loads(_UI_MAP_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"acoes_conhecidas": {}}
+        if not isinstance(dados, dict):
+            return {"acoes_conhecidas": {}}
+        acoes = dados.get("acoes_conhecidas")
+        if not isinstance(acoes, dict):
+            dados["acoes_conhecidas"] = {}
+        return dados
+    from backend.db import Action as DbAction, ActionVersion, SessionLocal
 
-    if not isinstance(dados, dict):
-        return {"acoes_conhecidas": {}}
-    acoes = dados.get("acoes_conhecidas")
-    if not isinstance(acoes, dict):
-        dados["acoes_conhecidas"] = {}
-    return dados
+    catalog: dict[str, Any] = {"acoes_conhecidas": {}}
+    with SessionLocal() as session:
+        rows = session.query(DbAction, ActionVersion).join(ActionVersion, ActionVersion.id == DbAction.published_version_id).order_by(DbAction.name).all()
+        for action, version in rows:
+            raw = dict(version.definition or {})
+            raw.setdefault("nome_amigavel", action.name)
+            raw.setdefault("descricao", action.description)
+            catalog["acoes_conhecidas"][action.key] = raw
+    return catalog
 
 
 def salvar_ui_map(dados: dict) -> None:
     payload = dados if isinstance(dados, dict) else {"acoes_conhecidas": {}}
     if not isinstance(payload.get("acoes_conhecidas"), dict):
         payload["acoes_conhecidas"] = {}
-    _UI_MAP_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    if os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}:
+        _UI_MAP_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return
+    for action_key, raw_action in payload["acoes_conhecidas"].items():
+        if isinstance(raw_action, dict):
+            save_learned_action(action_key, raw_action)
 
 
 async def gerar_nome_acao(instrucao: str) -> str:
@@ -360,17 +375,7 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
                 else []
             ),
         }
-        try:
-            salvar_ui_map(ui_map)
-        except OSError:
-            sessao_atual["estado"] = "NORMAL"
-            sessao_atual["acao_pendente"] = None
-            sessao_atual["checklist_pendente"] = []
-            sessao_atual["instrucao_original"] = ""
-            return _montar_resposta(
-                "Entendi o passo a passo, mas nao consegui salvar no ui_map.json agora. "
-                "Pode tentar novamente em instantes?"
-            )
+        salvar_ui_map(ui_map)
 
         sessao_atual["estado"] = "NORMAL"
         sessao_atual["acao_pendente"] = None

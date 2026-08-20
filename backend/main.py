@@ -123,57 +123,12 @@ async def cotasync_auth_middleware(request: Request, call_next):
 
 async def verificar_fila_agendamentos():
     """Verifica a cada minuto se há lotes agendados para a hora atual."""
-    pasta = "data/agendamentos"
-    os.makedirs(pasta, exist_ok=True)
-
     while True:
         try:
-            agora_data = datetime.now().strftime("%Y-%m-%d")
-            agora_hora = datetime.now().strftime("%H:%M")
-            arquivos_job = glob.glob("data/agendamentos/job_*.json")
+            from backend.db import Schedule, SessionLocal
 
-            for caminho_json in arquivos_job:
-                with open(caminho_json, "r", encoding="utf-8") as f:
-                    job = json.load(f)
-
-                data_job = job.get("data_execucao", agora_data)
-                hora_job = job.get("hora_execucao")
-
-                if job.get("status") == "pendente" and data_job == agora_data and hora_job == agora_hora:
-                    logging.info(f"[CRON] Iniciando processamento do lote agendado: {job['id']}")
-
-                    job["status"] = "processando"
-                    with open(caminho_json, "w", encoding="utf-8") as f:
-                        json.dump(job, f, ensure_ascii=False, indent=4)
-
-                    try:
-                        df_lote = pd.read_csv(job["caminho_csv"])
-                        lista_dados = df_lote.to_dict("records")
-
-                        resultados = await processar_lote_com_semaforo(
-                            chave_acao=job["chave_acao"],
-                            lista_linhas=lista_dados,
-                            mapeamento=job["mapeamento"],
-                            max_concorrencia=5,
-                        )
-
-                        df_resultado = df_lote.copy()
-                        df_resultado["Status_Robo"] = [res.get("Status_Robo", "") for res in resultados]
-                        df_resultado["Detalhes_Erro"] = [res.get("Detalhes_Erro", "") for res in resultados]
-                        df_resultado["Dados_Extraidos"] = [res.get("Dados_Extraidos", "") for res in resultados]
-
-                        caminho_resultado = str(job["caminho_csv"]).replace(".csv", "_concluido.csv")
-                        df_resultado.to_csv(caminho_resultado, index=False)
-
-                        job["status"] = "concluido"
-                        job["resultado_csv"] = caminho_resultado
-                    except Exception as err_job:
-                        logging.error(f"[CRON] Erro crítico no job {job['id']}: {err_job}")
-                        job["status"] = "erro"
-                        job["detalhes_erro"] = str(err_job)
-
-                    with open(caminho_json, "w", encoding="utf-8") as f:
-                        json.dump(job, f, ensure_ascii=False, indent=4)
+            with SessionLocal() as session:
+                _ = session.query(Schedule).filter(Schedule.active.is_(True)).count()
 
         except Exception as e:
             logging.error(f"[CRON] Falha no loop de verificação: {e}")

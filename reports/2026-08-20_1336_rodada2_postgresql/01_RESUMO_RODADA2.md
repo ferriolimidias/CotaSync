@@ -1,7 +1,7 @@
 # Resumo Rodada 2
 
 Conclusão: PostgreSQL virou a fonte operacional do CotaSync para `users`, `clients`, `actions`, `action_versions`, `action_steps`, `extraction_contracts`, `runs`, `batches` e `batch_items`.
-Evidência: `alembic current` em `0001_operational_schema`; `python -m unittest discover` com `168 OK`; `scripts/migrate_json_to_postgres.py --apply` sem erro e idempotente.
+Evidência: `alembic current` em `0001_operational_schema`; `python -m unittest discover` com `168 OK` em banco isolado; `scripts/migrate_json_to_postgres.py --apply` sem erro e idempotente.
 Estado: validado localmente.
 Impacto: a persistência principal saiu do JSON e passou para o banco.
 

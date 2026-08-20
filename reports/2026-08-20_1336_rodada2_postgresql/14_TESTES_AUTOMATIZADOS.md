@@ -13,6 +13,6 @@ Cobertura adicional da Rodada 2:
 - preservação literal de contrato com `"032"`
 
 Conclusão: a suíte fechou verde depois da migração.
-Evidência: `python -m unittest discover -s tests -p 'test_*.py'`.
+Evidência: `python -m unittest discover -s tests -p 'test_*.py'` contra o banco isolado `cotasync_pytest`.
 Estado: aprovado.
 Impacto: a rodada ficou coberta por regressão mínima e testes novos.

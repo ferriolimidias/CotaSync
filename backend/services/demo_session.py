@@ -46,7 +46,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
-from backend.services.actions_repository import enrich_action_access_profile
+from backend.services.actions_repository import enrich_action_access_profile, save_learned_action
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
 from backend.services.result_selection import (
@@ -2776,11 +2776,14 @@ class DemoSessionManager:
             if event.get("opened_new_page") or event.get("event_type") in {"popup", "new_tab"}
         ] or ["Nenhuma nova aba ou popup foi detectado durante esta demonstração."]
 
-        payload = _load_ui_map()
-        payload["acoes_conhecidas"][action_name] = learned_action
         screenshot_path = _DATA_DIR / f"mapeamento_{_safe_file_name(action_name)}.png"
         await session.page.screenshot(path=str(screenshot_path), full_page=False)
-        _save_ui_map(payload)
+        if os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}:
+            payload = _load_ui_map()
+            payload["acoes_conhecidas"][action_name] = learned_action
+            _save_ui_map(payload)
+        else:
+            save_learned_action(action_name, learned_action)
 
         from backend.services.actions_repository import slugify_action_id
 

@@ -1,7 +1,7 @@
 # Smoke do Desktop Browser
 
 Resultado:
-- run_id: `9848e691-b7b9-4606-9561-4aa2ada139ab`
+- run_id: `6d124ad9-b826-404d-a510-b249a2e7d473`
 - runner: `desktop_browser_replay`
 - whether_desktop_browser_used: `True`
 - status: `success`

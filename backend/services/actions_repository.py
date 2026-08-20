@@ -6,11 +6,14 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import delete, select
+
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
-from backend.db import Action as DbAction, ActionVersion, SessionLocal
+from backend.db import Action as DbAction, ActionStep, ActionVersion, ExtractionContract, SessionLocal
 from backend.services.action_pages import url_host
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
 
@@ -376,3 +379,182 @@ def find_action(action_id: str, path: Path | None = None) -> ActionDetail | None
         if wanted in candidates or wanted_slug in candidates:
             return action
     return None
+
+
+def _action_contracts_from_payload(action_id: str, version_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    overlay = data.get("reviewed_overlay") if isinstance(data.get("reviewed_overlay"), dict) else {}
+    review = data.get("extraction_review") if isinstance(data.get("extraction_review"), dict) else {}
+    target_values: list[dict[str, Any]] = []
+    for source in (overlay.get("extraction") if isinstance(overlay, dict) else None, review):
+        if isinstance(source, dict) and source:
+            target_values.append(source)
+    if isinstance(data.get("extraction_targets"), list):
+        target_values.extend({"target_name": item, "screen_label": item} for item in data["extraction_targets"] if item)
+    if not target_values and data.get("extraction_target"):
+        target_values = [{"target_name": data.get("extraction_target"), "screen_label": data.get("extraction_target")}]
+    contracts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(target_values):
+        if isinstance(item, str):
+            item = {"target_name": item, "screen_label": item}
+        if not isinstance(item, dict):
+            continue
+        target_name = str(
+            item.get("target_name")
+            or item.get("target_label_user")
+            or item.get("name")
+            or item.get("target")
+            or data.get("extraction_target")
+            or f"target_{index + 1}"
+        ).strip()
+        if not target_name or target_name in seen:
+            continue
+        seen.add(target_name)
+        contracts.append(
+            {
+                "id": str(item.get("id") or f"{version_id}-contract-{index + 1}"),
+                "action_version_id": version_id,
+                "target_name": target_name,
+                "screen_label": str(item.get("screen_label") or item.get("label") or ""),
+                "selection_type": str(item.get("selection_type") or item.get("type") or "field_value"),
+                "value_type": str(item.get("value_type") or item.get("value_pattern") or "string"),
+                "return_format": str(item.get("return_format") or "text"),
+                "selector_data": item.get("selector_data") if isinstance(item.get("selector_data"), dict) else {},
+                "anchor_data": item.get("anchor_data") if isinstance(item.get("anchor_data"), dict) else {},
+                "validation_data": item.get("validation_data") if isinstance(item.get("validation_data"), dict) else {},
+                "example_value": str(item.get("example_value") or item.get("expected_example") or item.get("example") or "") or None,
+                "summary_instruction": str(item.get("summary_instruction") or data.get("final_summary_instruction") or "") or None,
+                "status": str(item.get("status") or "active"),
+            }
+        )
+    return contracts
+
+
+def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> ActionDetail:
+    action_name = str(learned_action.get("nome_amigavel") or learned_action.get("name") or action_key).strip() or action_key
+    action_id = slugify_action_id(action_name)
+    steps = learned_action.get("robust_steps") or learned_action.get("passos_playwright") or []
+    if not isinstance(steps, list):
+        steps = []
+    variables = learned_action.get("variable_schema") or learned_action.get("variaveis_necessarias") or []
+    if not isinstance(variables, list):
+        variables = []
+
+    with SessionLocal.begin() as session:
+        action = session.scalar(select(DbAction).where(DbAction.key == action_key)) or session.get(DbAction, action_id)
+        if action is None:
+            action = DbAction(
+                id=action_id,
+                key=action_key,
+                name=action_name,
+                description=str(learned_action.get("descricao") or learned_action.get("description") or "").strip(),
+                status="published",
+            )
+            session.add(action)
+        else:
+            action.name = action_name
+            action.description = str(learned_action.get("descricao") or learned_action.get("description") or action.description)
+            action.status = str(learned_action.get("status") or action.status or "published")
+
+        version_id = f"{action.id}-v1"
+        version = session.get(ActionVersion, version_id)
+        definition = dict(learned_action)
+        version_variables = {"schema": variables}
+        if version is None:
+            version = ActionVersion(
+                id=version_id,
+                action_id=action.id,
+                version_number=1,
+                status="published",
+                created_by=str(learned_action.get("created_by") or "" ) or None,
+                source_version_id=None,
+                definition=definition,
+                variables=version_variables,
+                metadata_json={"source": "learning"},
+                created_at=datetime.now(UTC),
+                published_at=datetime.now(UTC),
+            )
+            session.add(version)
+        else:
+            version.definition = definition
+            version.variables = version_variables
+            version.status = "published"
+            version.published_at = datetime.now(UTC)
+
+        session.execute(delete(ActionStep).where(ActionStep.action_version_id == version.id))
+        session.execute(delete(ExtractionContract).where(ExtractionContract.action_version_id == version.id))
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                step = {"raw": step}
+            session.add(
+                ActionStep(
+                    id=f"{version.id}-step-{index}",
+                    action_version_id=version.id,
+                    step_index=index,
+                    step_type=str(step.get("tipo") or step.get("type") or "unknown"),
+                    selector=str(step.get("seletor") or step.get("selector") or "") or None,
+                    variable_key=str(step.get("variavel") or step.get("variable") or "") or None,
+                    step_data=step,
+                )
+            )
+        for contract in _action_contracts_from_payload(action.id, version.id, learned_action):
+            session.add(ExtractionContract(**contract))
+        action.published_version_id = version.id
+        session.flush()
+
+    saved = find_action(action_id)
+    if saved is not None:
+        return saved
+    return ActionDetail(
+        id=action_id,
+        key=action_key,
+        name=action_name,
+        description=str(learned_action.get("descricao") or ""),
+        variables=[],
+        steps_count=len(steps),
+        has_url=bool(str(learned_action.get("url_inicial") or "").strip()),
+        test_mode=False,
+        execution_type=None,
+        learning_mode=str(learned_action.get("learning_mode") or "") or None,
+        ai_reviewed=bool(learned_action.get("ai_reviewed", False)),
+        ai_observer_summary=str(learned_action.get("ai_observer_summary") or "") or None,
+        review_status=str(learned_action.get("review_status") or "") or None,
+        review_last_run_id=str(learned_action.get("review_last_run_id") or "") or None,
+        reviewed_overlay=learned_action.get("reviewed_overlay") if isinstance(learned_action.get("reviewed_overlay"), dict) else {},
+        ai_review_summary=str(learned_action.get("ai_review_summary") or "") or None,
+        final_summary_instruction=str(learned_action.get("final_summary_instruction") or "") or None,
+        extraction_review=learned_action.get("extraction_review") if isinstance(learned_action.get("extraction_review"), dict) else {},
+        replay_hints=learned_action.get("replay_hints") if isinstance(learned_action.get("replay_hints"), list) else [],
+        waits=learned_action.get("waits") if isinstance(learned_action.get("waits"), list) else [],
+        wait_strategies=learned_action.get("wait_strategies") if isinstance(learned_action.get("wait_strategies"), list) else [],
+        variable_schema=variables,
+        extraction_target=str(learned_action.get("extraction_target") or "") or None,
+        objective=str(learned_action.get("objective") or action_name),
+        input_description=str(learned_action.get("input_description") or ""),
+        expected_result=str(learned_action.get("expected_result") or ""),
+        success_criteria=str(learned_action.get("success_criteria") or ""),
+        output_type=str(learned_action.get("output_type") or ""),
+        output_schema=learned_action.get("output_schema") if isinstance(learned_action.get("output_schema"), dict) else {},
+        extraction_targets=[str(item) for item in learned_action.get("extraction_targets") or [] if str(item).strip()],
+        user_result_summary_template=str(learned_action.get("user_result_summary_template") or "") or None,
+        ai_result_summary_enabled=bool(learned_action.get("ai_result_summary_enabled", True)),
+        ai_recovery_enabled=bool(learned_action.get("ai_recovery_enabled", False)),
+        learning_warnings=learned_action.get("learning_warnings") if isinstance(learned_action.get("learning_warnings"), list) else [],
+        external_system_name=str(learned_action.get("external_system_name") or "") or None,
+        external_login_url=str(learned_action.get("external_login_url") or "") or None,
+        access_profile_name=str(learned_action.get("access_profile_name") or "") or None,
+        access_profile_email_or_identifier=str(learned_action.get("access_profile_email_or_identifier") or "") or None,
+        microsoft_saved_account_identifier=str(learned_action.get("microsoft_saved_account_identifier") or "") or None,
+        microsoft_saved_account_selector=str(learned_action.get("microsoft_saved_account_selector") or "") or None,
+        microsoft_saved_account_text=str(learned_action.get("microsoft_saved_account_text") or "") or None,
+        expected_system_host=str(learned_action.get("expected_system_host") or "") or None,
+        microsoft_hosts=learned_action.get("microsoft_hosts") if isinstance(learned_action.get("microsoft_hosts"), list) else [],
+        requires_authenticated_session=bool(learned_action.get("requires_authenticated_session", True)),
+        session_guardian_enabled=bool(learned_action.get("session_guardian_enabled", True)),
+        legacy_unconfigured=False,
+        action_timeout_seconds=(int(learned_action["action_timeout_seconds"]) if str(learned_action.get("action_timeout_seconds") or "").strip().isdigit() else None),
+        browser_mode=str(learned_action.get("browser_mode") or "desktop_browser"),
+        url_inicial=str(learned_action.get("url_inicial") or "") or None,
+        source=SOURCE_LABEL,
+        steps_preview=_steps_preview(steps),
+    )
