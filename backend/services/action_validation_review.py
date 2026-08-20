@@ -3,11 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -20,7 +18,6 @@ from backend.services.action_runner import (
     missing_required_variables,
     start_action_run,
 )
-from backend.services.actions_repository import default_ui_map_path
 from backend.services.extraction_targets import (
     extract_value_near_label,
     friendly_extraction_label,
@@ -38,37 +35,11 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _use_legacy_json(path: Path | None) -> bool:
-    return path is not None or os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}
-
-
-def _load_ui_map(path: Path | None = None) -> dict[str, Any]:
-    ui_map_path = path or default_ui_map_path()
-    if not ui_map_path.is_file():
-        return {"acoes_conhecidas": {}}
-    payload = json.loads(ui_map_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise RuntimeError("data/ui_map.json deve conter um objeto JSON.")
-    if not isinstance(payload.get("acoes_conhecidas"), dict):
-        payload["acoes_conhecidas"] = {}
-    return payload
-
-
-def _save_ui_map(payload: dict[str, Any], path: Path | None = None) -> None:
-    ui_map_path = path or default_ui_map_path()
-    ui_map_path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile("w", encoding="utf-8", dir=ui_map_path.parent, delete=False) as tmp:
-        json.dump(payload, tmp, ensure_ascii=False, indent=2)
-        tmp.write("\n")
-        tmp_path = Path(tmp.name)
-    os.replace(tmp_path, ui_map_path)
-
-
 def _raw_action(action: ActionDetail, path: Path | None = None) -> dict[str, Any]:
-    payload = _load_ui_map(path)
-    actions = payload.get("acoes_conhecidas", {})
-    raw = actions.get(action.key) if isinstance(actions, dict) else None
-    return raw if isinstance(raw, dict) else {}
+    with SessionLocal() as session:
+        db_action = session.query(DbAction).filter(DbAction.key == action.key).first()
+        version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+        return dict(version.definition or {}) if version is not None else {}
 
 
 def _example_variables(raw_action: dict[str, Any]) -> dict[str, Any]:
@@ -365,39 +336,21 @@ def _save_review_overlay(
     extraction_candidates: list[dict[str, Any]] | None = None,
     path: Path | None = None,
 ) -> None:
-    if not _use_legacy_json(path):
-        with SessionLocal.begin() as session:
-            db_action = session.query(DbAction).filter(DbAction.key == action.key).first()
-            version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
-            if version is None:
-                raise RuntimeError("Acao publicada nao encontrada no PostgreSQL.")
-            raw = dict(version.definition or {})
-            raw["review_status"] = str(overlay.get("review_status") or "needs_attention")
-            raw["review_last_run_id"] = run.id
-            raw["reviewed_overlay"] = overlay
-            raw["ai_review_summary"] = ai_review_summary or "Revisao do replay real concluida."
-            raw["final_summary_instruction"] = str(overlay.get("summary_instruction") or "")
-            raw["extraction_review"] = overlay.get("extraction") if isinstance(overlay.get("extraction"), dict) else {}
-            if extraction_candidates is not None:
-                raw["last_validation_extraction_candidates"] = extraction_candidates
-            version.definition = raw
-        return
-    payload = _load_ui_map(path)
-    actions = payload["acoes_conhecidas"]
-    raw = actions.get(action.key)
-    if not isinstance(raw, dict):
-        raise RuntimeError("Acao nao encontrada em data/ui_map.json para salvar reviewed_overlay.")
-    raw["review_status"] = str(overlay.get("review_status") or "needs_attention")
-    raw["review_last_run_id"] = run.id
-    raw["reviewed_overlay"] = overlay
-    raw["ai_review_summary"] = ai_review_summary or "Revisão do replay real concluída."
-    raw["final_summary_instruction"] = str(overlay.get("summary_instruction") or "")
-    raw["extraction_review"] = overlay.get("extraction") if isinstance(overlay.get("extraction"), dict) else {}
-    raw["ai_reviewed"] = bool(raw.get("ai_reviewed", False))
-    if extraction_candidates is not None:
-        raw["last_validation_extraction_candidates"] = extraction_candidates
-    actions[action.key] = raw
-    _save_ui_map(payload, path)
+    with SessionLocal.begin() as session:
+        db_action = session.query(DbAction).filter(DbAction.key == action.key).first()
+        version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+        if version is None:
+            raise RuntimeError("Acao publicada nao encontrada no PostgreSQL.")
+        raw = dict(version.definition or {})
+        raw["review_status"] = str(overlay.get("review_status") or "needs_attention")
+        raw["review_last_run_id"] = run.id
+        raw["reviewed_overlay"] = overlay
+        raw["ai_review_summary"] = ai_review_summary or "Revisao do replay real concluida."
+        raw["final_summary_instruction"] = str(overlay.get("summary_instruction") or "")
+        raw["extraction_review"] = overlay.get("extraction") if isinstance(overlay.get("extraction"), dict) else {}
+        if extraction_candidates is not None:
+            raw["last_validation_extraction_candidates"] = extraction_candidates
+        version.definition = raw
 
 
 def _mark_failed_review(action: ActionDetail, run: RunRecord, raw_action: dict[str, Any]) -> dict[str, Any]:

@@ -11,7 +11,7 @@ from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.action_pages import expected_action_hosts, validate_action_page_url
-from backend.services.actions_repository import default_ui_map_path, enrich_action_access_profile
+from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
 from backend.services.runs_repository import append_run, update_run
 
@@ -241,14 +241,6 @@ def _is_desktop_learned_action(action: ActionDetail) -> bool:
 
 
 def _load_action_config(action: ActionDetail) -> dict[str, Any]:
-    if __import__("os").getenv("COTASYNC_TEST_LEGACY_JSON") == "1":
-        import json
-        try:
-            payload = json.loads(default_ui_map_path().read_text(encoding="utf-8"))
-            raw = (payload.get("acoes_conhecidas") or {}).get(action.key)
-            return enrich_action_access_profile(raw) if isinstance(raw, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
     try:
         with SessionLocal() as session:
             db_action = session.query(DbAction).filter(DbAction.id == action.id).first()
@@ -458,6 +450,7 @@ def start_action_run(
         status="pending",
         mode=request.mode,
         run_type=str(run_type or "action_run"),
+        run_origin=request.run_origin,
         requested_by=request.requested_by.strip() or "api",
         session_id=request.session_id,
         created_at=created_at,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import asyncio
 import json
 import os
@@ -158,17 +160,14 @@ class GuidedLearningSaveTests(unittest.TestCase):
     )
 
     def test_external_system_url_round_trip_preserves_complete_string(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "current.json"
-            with patch("backend.services.external_systems.CURRENT_EXTERNAL_SYSTEM_PATH", config_path):
-                saved = save_current_external_system(
-                    {
-                        "external_system_name": "Sistema externo",
-                        "external_login_url": self.FULL_MICROSOFT_URL,
-                        "expected_system_host": "nwcweb.randonconsorcios.com.br",
-                    }
-                )
-                loaded = load_current_external_system()
+        saved = save_current_external_system(
+            {
+                "external_system_name": "Sistema externo",
+                "external_login_url": self.FULL_MICROSOFT_URL,
+                "expected_system_host": "nwcweb.randonconsorcios.com.br",
+            }
+        )
+        loaded = load_current_external_system()
 
         self.assertEqual(saved["external_login_url"], self.FULL_MICROSOFT_URL)
         self.assertEqual(loaded["external_login_url"], self.FULL_MICROSOFT_URL)
@@ -199,9 +198,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -228,9 +225,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -334,9 +329,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
             captured.update(payload)
 
         analyzer = AsyncMock(return_value=_review())
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=save
-        ), patch("backend.services.ai_observer.analyze_recorded_action_with_ai", analyzer):
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: save({"acoes_conhecidas": {action_key: learned_action}})), patch("backend.services.ai_observer.analyze_recorded_action_with_ai", analyzer):
             saved = asyncio.run(
                 manager.save_action(
                     "session",
@@ -373,9 +366,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         manager = DemoSessionManager()
         manager._sessions["session"] = _session()  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -387,9 +378,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         manager = DemoSessionManager()
         manager._sessions["session"] = _session(download_detected=True)  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -412,9 +401,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         manager = DemoSessionManager()
         manager._sessions["session"] = _session()  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -449,9 +436,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -494,9 +479,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -529,9 +512,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -559,9 +540,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -842,9 +821,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         session.learning_events = [{"step_index": 0, "event_type": "click", "selector": "#buscar"}]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -898,9 +875,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         with patch.object(manager, "_operator_locator", new=AsyncMock(return_value=FakeLocator())):
             asyncio.run(manager.operator_fill("session", "#ctl00_Conteudo_edtGrupo", "123", record_action=True))
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -914,9 +889,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         manager = DemoSessionManager()
         manager._sessions["session"] = _external_session()  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):
@@ -974,9 +947,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         ]
         manager._sessions["session"] = session  # type: ignore[attr-defined]
         captured: dict[str, object] = {}
-        with patch("backend.services.demo_session._load_ui_map", return_value={"acoes_conhecidas": {}}), patch(
-            "backend.services.demo_session._save_ui_map", side_effect=lambda payload: captured.update(payload)
-        ), patch(
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
             "backend.services.ai_observer.analyze_recorded_action_with_ai",
             new=AsyncMock(return_value=_review()),
         ):

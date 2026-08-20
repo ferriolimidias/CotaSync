@@ -223,6 +223,7 @@ async def main() -> None:
                 "variables": {ACTION_VARIABLE: "PED-2002"},
                 "mode": "sync",
                 "requested_by": "desktop-browser-smoke",
+                "run_origin": "smoke",
             },
             timeout=60,
         )["run"]

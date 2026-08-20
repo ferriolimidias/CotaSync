@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import json
-import tempfile
 import unittest
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from backend.db import Run as DbRun, SessionLocal
+from backend.schemas.runs import RunRecord
+from backend.services.actions_repository import save_learned_action
 from backend.services.result_selection import (
     build_extraction_contract,
     detect_extraction_candidates,
     validate_candidate_value,
 )
+from backend.services.runs_repository import append_run
 from tests.auth_helpers import authenticated_client
 
 
@@ -39,6 +43,10 @@ def _run_payload() -> dict[str, object]:
 
 
 class LearningExtractionFlowTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with SessionLocal.begin() as session:
+            session.query(DbRun).filter(DbRun.action_id == "quantidade-de-parcelas").delete()
+
     def test_confirm_last_result_saves_extraction_review_and_preserves_zero(self) -> None:
         raw_action = {
             "nome_amigavel": "Quantidade de parcelas",
@@ -48,32 +56,20 @@ class LearningExtractionFlowTests(unittest.TestCase):
             "extraction_target": "Qtd. Pcls. Pagas",
             "extraction_targets": ["Qtd. Pcls. Pagas"],
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            ui_path = Path(tmp) / "ui_map.json"
-            runs_path = Path(tmp) / "runs.json"
-            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Quantidade de parcelas": raw_action}}), encoding="utf-8")
-            runs_path.write_text(json.dumps({"runs": [_run_payload()]}), encoding="utf-8")
-
-            from unittest.mock import patch
-
-            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
-                "backend.api.actions.default_ui_map_path", return_value=ui_path, create=True
-            ), patch("backend.services.result_selection.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.runs_repository.default_runs_path", return_value=runs_path
-            ), patch("backend.api.actions.default_runs_path", return_value=runs_path, create=True):
-                with authenticated_client() as client:
-                    response = client.post(
-                        "/api/actions/quantidade-de-parcelas/extraction/confirm-last-result",
-                        json={"target_name": "Quantidade de parcelas", "screen_label": "Qtd. Pcls. Pagas"},
-                    )
-                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Quantidade de parcelas"]
+        save_learned_action("Quantidade de parcelas", raw_action)
+        append_run(RunRecord(**_run_payload()))
+        with authenticated_client() as client:
+            response = client.post(
+                "/api/actions/quantidade-de-parcelas/extraction/confirm-last-result",
+                json={"target_name": "Quantidade de parcelas", "screen_label": "Qtd. Pcls. Pagas"},
+            )
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["detected_result"]["value"], "032")
-        self.assertEqual(saved["extraction_review"]["expected_example"], "032")
-        self.assertEqual(saved["extraction_review"]["screen_label"], "Qtd. Pcls. Pagas")
-        self.assertIn("Retorne somente", saved["final_summary_instruction"])
+        self.assertEqual(body["extraction_review"]["expected_example"], "032")
+        self.assertEqual(body["extraction_review"]["screen_label"], "Qtd. Pcls. Pagas")
+        self.assertIn("Retorne somente", body["reviewed_overlay"]["summary_instruction"])
 
     def test_test_saved_extraction_returns_ok_for_valid_value(self) -> None:
         raw_action = {
@@ -89,19 +85,10 @@ class LearningExtractionFlowTests(unittest.TestCase):
                 "avoid_labels": ["Ocorrência"],
             },
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            ui_path = Path(tmp) / "ui_map.json"
-            runs_path = Path(tmp) / "runs.json"
-            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Quantidade de parcelas": raw_action}}), encoding="utf-8")
-            runs_path.write_text(json.dumps({"runs": [_run_payload()]}), encoding="utf-8")
-
-            from unittest.mock import patch
-
-            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.runs_repository.default_runs_path", return_value=runs_path
-            ):
-                with authenticated_client() as client:
-                    response = client.post("/api/actions/quantidade-de-parcelas/extraction/test")
+        save_learned_action("Quantidade de parcelas", raw_action)
+        append_run(RunRecord(**_run_payload()))
+        with authenticated_client() as client:
+            response = client.post("/api/actions/quantidade-de-parcelas/extraction/test")
 
         self.assertEqual(response.status_code, 200)
         extraction_test = response.json()["extraction_test"]

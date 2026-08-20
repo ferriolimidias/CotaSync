@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import json
 import tempfile
 import unittest

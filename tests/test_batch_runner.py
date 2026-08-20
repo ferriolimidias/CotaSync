@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import asyncio
 import json
 import tempfile
@@ -7,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from backend.db import Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.services import batch_runner
@@ -58,6 +61,12 @@ def fake_run(index: int, status: str = "success") -> RunRecord:
 
 
 class BatchRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with SessionLocal.begin() as session:
+            session.query(BatchItem).delete()
+            session.query(DbBatch).delete()
+            session.query(DbRun).filter(DbRun.run_origin == "automated_test").delete()
+
     def test_parse_csv_preserves_leading_zeroes_and_ignores_blank_rows(self) -> None:
         rows = parse_csv_rows("\ufeffgrupo,grupo_2,grupo_3\n935,110,00\n\n935,111,01\n")
 

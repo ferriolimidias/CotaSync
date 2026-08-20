@@ -120,6 +120,7 @@ class Run(Base):
     client_id: Mapped[str | None] = mapped_column(ForeignKey("clients.id", ondelete="SET NULL"), index=True)
     batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id", ondelete="SET NULL"), index=True)
     status: Mapped[str] = mapped_column(String(64), index=True)
+    run_origin: Mapped[str] = mapped_column(String(32), default="operational", index=True)
     runner: Mapped[str | None] = mapped_column(String(128))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import unittest
 
 from sqlalchemy import inspect
@@ -37,8 +39,10 @@ class PostgresRound2Tests(unittest.TestCase):
 
     def test_actions_have_published_v1_with_steps(self) -> None:
         with SessionLocal() as session:
-            actions = session.query(Action).all()
-            self.assertEqual(len(actions), 2)
+            actions = session.query(Action).filter(
+                Action.id.in_(["quantidade-de-parcelas", "quantidade-de-parcelas-2"])
+            ).all()
+            self.assertEqual({action.id for action in actions}, {"quantidade-de-parcelas", "quantidade-de-parcelas-2"})
             for action in actions:
                 version = session.get(ActionVersion, action.published_version_id)
                 self.assertIsNotNone(version)

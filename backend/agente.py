@@ -37,7 +37,6 @@ load_dotenv()
 _ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _ROOT / "data"
 os.makedirs(str(_DATA_DIR), exist_ok=True)
-_UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _LOG_DIR = _ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _LOG_FILE = _LOG_DIR / "operation.log"
@@ -59,17 +58,6 @@ sessoes_usuarios = {
 
 
 def carregar_ui_map() -> dict:
-    if os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"} and _UI_MAP_PATH.is_file():
-        try:
-            dados = json.loads(_UI_MAP_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {"acoes_conhecidas": {}}
-        if not isinstance(dados, dict):
-            return {"acoes_conhecidas": {}}
-        acoes = dados.get("acoes_conhecidas")
-        if not isinstance(acoes, dict):
-            dados["acoes_conhecidas"] = {}
-        return dados
     from backend.db import Action as DbAction, ActionVersion, SessionLocal
 
     catalog: dict[str, Any] = {"acoes_conhecidas": {}}
@@ -87,12 +75,6 @@ def salvar_ui_map(dados: dict) -> None:
     payload = dados if isinstance(dados, dict) else {"acoes_conhecidas": {}}
     if not isinstance(payload.get("acoes_conhecidas"), dict):
         payload["acoes_conhecidas"] = {}
-    if os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}:
-        _UI_MAP_PATH.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return
     for action_key, raw_action in payload["acoes_conhecidas"].items():
         if isinstance(raw_action, dict):
             save_learned_action(action_key, raw_action)

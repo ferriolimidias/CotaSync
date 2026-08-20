@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import asyncio
 import json
 import tempfile
@@ -19,7 +21,8 @@ from backend.services.action_pages import (
     select_desktop_page_for_action,
 )
 from backend.services.action_runner import finish_action_run, run_action_sync, start_action_run
-from backend.services.actions_repository import load_actions_catalog
+from backend.db import Action as DbAction, ActionVersion, SessionLocal
+from backend.services.actions_repository import load_actions_catalog, save_learned_action
 from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
@@ -28,6 +31,13 @@ from tests.auth_helpers import authenticated_client
 
 
 TARGET_URL = "https://nwcweb.randonconsorcios.com.br/CONCP/frmConCpRelResultadoAssembleia.aspx"
+
+
+def saved_action_definition(action_key: str) -> dict:
+    with SessionLocal() as session:
+        db_action = session.query(DbAction).filter(DbAction.key == action_key).first()
+        version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+        return dict(version.definition or {}) if version is not None else {}
 
 
 class VisualResultSelectionTests(unittest.TestCase):
@@ -44,29 +54,24 @@ class VisualResultSelectionTests(unittest.TestCase):
             "extraction_review": {},
             "extraction_targets": ["% Pagar"],
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            ui_path = Path(tmp) / "ui_map.json"
-            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Porcentagem": raw_action}}), encoding="utf-8")
-            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
-                "backend.api.actions.default_ui_map_path", return_value=ui_path, create=True
-            ), patch("backend.services.result_selection.default_ui_map_path", return_value=ui_path):
-                with authenticated_client() as client:
-                    response = client.post(
-                        "/api/actions/porcentagem/result-selection/confirm",
-                        json={
-                            "target_name": "porcentagem a pagar",
-                            "screen_label": "% Pagar",
-                            "selection_type": "table_footer_total",
-                            "candidate": {
-                                "label": "% Pagar",
-                                "value": "0,0000",
-                                "type": "table_footer_total",
-                                "table_headers": ["Valor Pagar", "Ocorrência", "% Pagar"],
-                                "row_context": "Total | % Pagar | 0,0000",
-                            },
-                        },
-                    )
-                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Porcentagem"]
+        save_learned_action("Porcentagem", raw_action)
+        with authenticated_client() as client:
+            response = client.post(
+                "/api/actions/porcentagem/result-selection/confirm",
+                json={
+                    "target_name": "porcentagem a pagar",
+                    "screen_label": "% Pagar",
+                    "selection_type": "table_footer_total",
+                    "candidate": {
+                        "label": "% Pagar",
+                        "value": "0,0000",
+                        "type": "table_footer_total",
+                        "table_headers": ["Valor Pagar", "Ocorrência", "% Pagar"],
+                        "row_context": "Total | % Pagar | 0,0000",
+                    },
+                },
+            )
+        saved = saved_action_definition("Porcentagem")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(saved["passos_playwright"], raw_action["passos_playwright"])
@@ -838,10 +843,7 @@ class DesktopActionRunTests(unittest.TestCase):
             "passos_executados": 1,
             "final_page": {"title": "Demo", "url": TARGET_URL},
         }
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.services.runs_repository.default_runs_path",
-            return_value=Path(tmp) / "runs.json",
-        ), patch("backend.api.runs.find_action", return_value=action), patch(
+        with patch("backend.api.runs.find_action", return_value=action), patch(
             "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
         ):
@@ -882,43 +884,36 @@ class DesktopActionRunTests(unittest.TestCase):
             "runner": "desktop_browser_replay",
             "whether_desktop_browser_used": True,
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            ui_path = Path(tmp) / "ui_map.json"
-            runs_path = Path(tmp) / "runs.json"
-            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Teste2": raw_action}}), encoding="utf-8")
-            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.action_runner.default_ui_map_path", return_value=ui_path
-            ), patch("backend.services.action_validation_review.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.runs_repository.default_runs_path", return_value=runs_path
-            ), patch(
-                "backend.services.action_runner._run_desktop_browser_replay",
-                new=AsyncMock(return_value=execution),
-            ) as desktop_replay, patch(
-                "backend.services.action_validation_review._ai_review",
-                new=AsyncMock(
-                    return_value={
-                        "review_status": "approved",
-                        "extraction_target_confirmed": True,
-                        "best_label": "Qtd. Pcls. Pagas",
-                        "best_selector": "",
-                        "best_value_example": "032",
-                        "return_format": "somente o número",
-                        "summary_instruction": (
-                            "Retorne somente a quantidade de parcelas pagas encontrada no campo "
-                            "Qtd. Pcls. Pagas. Não inclua outros dados da tela."
-                        ),
-                        "wait_suggestions": [{"after_step_index": 0, "strategy": "wait_for_text", "target": "Qtd. Pcls. Pagas"}],
-                        "selector_alternatives": [],
-                        "risks": [],
-                        "reasoning_summary": "Alvo confirmado na tela final.",
-                    }
-                ),
-            ):
-                with authenticated_client() as client:
-                    response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
-                self.assertEqual(response.status_code, 200)
-                created = response.json()["run"]
-                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Teste2"]
+        save_learned_action("Teste2", raw_action)
+        with patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
+            new=AsyncMock(return_value=execution),
+        ) as desktop_replay, patch(
+            "backend.services.action_validation_review._ai_review",
+            new=AsyncMock(
+                return_value={
+                    "review_status": "approved",
+                    "extraction_target_confirmed": True,
+                    "best_label": "Qtd. Pcls. Pagas",
+                    "best_selector": "",
+                    "best_value_example": "032",
+                    "return_format": "somente o número",
+                    "summary_instruction": (
+                        "Retorne somente a quantidade de parcelas pagas encontrada no campo "
+                        "Qtd. Pcls. Pagas. Não inclua outros dados da tela."
+                    ),
+                    "wait_suggestions": [{"after_step_index": 0, "strategy": "wait_for_text", "target": "Qtd. Pcls. Pagas"}],
+                    "selector_alternatives": [],
+                    "risks": [],
+                    "reasoning_summary": "Alvo confirmado na tela final.",
+                }
+            ),
+        ):
+            with authenticated_client() as client:
+                response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
+            self.assertEqual(response.status_code, 200)
+            created = response.json()["run"]
+            saved = saved_action_definition("Teste2")
 
         desktop_replay.assert_awaited_once()
         self.assertEqual(created["run_type"], "validation_review")
@@ -960,29 +955,22 @@ class DesktopActionRunTests(unittest.TestCase):
             "whether_desktop_browser_used": True,
             "screenshot_path": "data/runs/review.png",
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            ui_path = Path(tmp) / "ui_map.json"
-            runs_path = Path(tmp) / "runs.json"
-            ui_path.write_text(json.dumps({"acoes_conhecidas": {"NumeroParcelas": raw_action}}), encoding="utf-8")
-            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.action_runner.default_ui_map_path", return_value=ui_path
-            ), patch("backend.services.action_validation_review.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.runs_repository.default_runs_path", return_value=runs_path
-            ), patch(
-                "backend.services.action_runner._run_desktop_browser_replay",
-                new=AsyncMock(return_value=execution),
-            ), patch("backend.services.action_validation_review._ai_review", new=AsyncMock(return_value=None)):
-                with authenticated_client() as client:
-                    response = client.post(
-                        "/api/actions/numero-de-parcelas-pagas/validate-review",
-                        json={
-                            "variables": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
-                            "mode": "sync",
-                        },
-                    )
-                self.assertEqual(response.status_code, 200)
-                created = response.json()["run"]
-                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["NumeroParcelas"]
+        save_learned_action("NumeroParcelas", raw_action)
+        with patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
+            new=AsyncMock(return_value=execution),
+        ), patch("backend.services.action_validation_review._ai_review", new=AsyncMock(return_value=None)):
+            with authenticated_client() as client:
+                response = client.post(
+                    "/api/actions/numero-de-parcelas-pagas/validate-review",
+                    json={
+                        "variables": {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
+                        "mode": "sync",
+                    },
+                )
+            self.assertEqual(response.status_code, 200)
+            created = response.json()["run"]
+            saved = saved_action_definition("NumeroParcelas")
 
         self.assertEqual(created["status"], "success")
         self.assertEqual(created["run_type"], "validation_review")
@@ -1044,22 +1032,15 @@ class DesktopActionRunTests(unittest.TestCase):
                 "whether_desktop_browser_used": True,
             },
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            ui_path = Path(tmp) / "ui_map.json"
-            runs_path = Path(tmp) / "runs.json"
-            ui_path.write_text(json.dumps({"acoes_conhecidas": {"Teste2": raw_action}}), encoding="utf-8")
-            with patch("backend.services.actions_repository.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.action_runner.default_ui_map_path", return_value=ui_path
-            ), patch("backend.services.action_validation_review.default_ui_map_path", return_value=ui_path), patch(
-                "backend.services.runs_repository.default_runs_path", return_value=runs_path
-            ), patch(
-                "backend.services.action_runner._run_desktop_browser_replay",
-                new=AsyncMock(return_value=execution),
-            ):
-                with authenticated_client() as client:
-                    response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
-                self.assertEqual(response.status_code, 200)
-                saved = json.loads(ui_path.read_text(encoding="utf-8"))["acoes_conhecidas"]["Teste2"]
+        save_learned_action("Teste2", raw_action)
+        with patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
+            new=AsyncMock(return_value=execution),
+        ):
+            with authenticated_client() as client:
+                response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
+            self.assertEqual(response.status_code, 200)
+            saved = saved_action_definition("Teste2")
 
         self.assertEqual(saved["review_status"], "failed")
         self.assertEqual(saved["reviewed_overlay"]["review_status"], "failed")
@@ -1076,10 +1057,7 @@ class DesktopActionRunTests(unittest.TestCase):
             "passos_executados": 1,
             "final_page": {"title": "Demo", "url": TARGET_URL},
         }
-        with tempfile.TemporaryDirectory() as tmp, patch(
-            "backend.services.runs_repository.default_runs_path",
-            return_value=Path(tmp) / "runs.json",
-        ), patch(
+        with patch(
             "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
         ):

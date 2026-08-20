@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import json
+import tests  # noqa: F401
+
 import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException, Response
 
 from backend.api.desktop_browser import create_desktop_view_token, validate_desktop_view_token
+from backend.db import DesktopViewToken as DbDesktopViewToken, SessionLocal
 from backend.services.desktop_view_tokens import create_token, mask_token, validate_token
 
 
@@ -21,9 +22,6 @@ class DesktopViewTokensTest(unittest.TestCase):
         self.environment = patch.dict(
             os.environ,
             {
-                "COTASYNC_DESKTOP_VIEW_TOKEN_PATH": (
-                    f"{self.temporary_directory.name}/desktop_view_tokens.json"
-                ),
                 "COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL": (
                     "https://desktop-cotasync.ferriolimidias.com.br"
                 ),
@@ -70,10 +68,10 @@ class DesktopViewTokensTest(unittest.TestCase):
         created = create_token()
         report_line = f"view_token={mask_token(created.token)}"
         self.assertNotIn(created.token, report_line)
-        stored = json.loads(
-            Path(os.environ["COTASYNC_DESKTOP_VIEW_TOKEN_PATH"]).read_text(encoding="utf-8")
-        )
-        self.assertNotIn(created.token, json.dumps(stored))
+        with SessionLocal() as session:
+            digests = [row.digest for row in session.query(DbDesktopViewToken).all()]
+        self.assertTrue(digests)
+        self.assertNotIn(created.token, digests)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tests  # noqa: F401
+
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch

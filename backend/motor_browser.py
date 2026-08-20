@@ -243,21 +243,6 @@ def _safe_result_url(url: str) -> str:
         return ""
 
 
-def _carregar_ui_map() -> dict:
-    caminho = _DATA_DIR / "ui_map.json"
-    if not caminho.is_file():
-        return {"acoes_conhecidas": {}}
-    try:
-        dados = json.loads(caminho.read_text(encoding="utf-8"))
-        if not isinstance(dados, dict):
-            return {"acoes_conhecidas": {}}
-        if not isinstance(dados.get("acoes_conhecidas"), dict):
-            dados["acoes_conhecidas"] = {}
-        return dados
-    except (json.JSONDecodeError, OSError):
-        return {"acoes_conhecidas": {}}
-
-
 def _converter_pdf_para_excel(caminho_pdf: str) -> str:
     """Extrai tabelas de um PDF e salva como ficheiro Excel (.xlsx)."""
     import logging
@@ -484,62 +469,6 @@ async def _aguardar_arquivo_estavel(caminho_arquivo: str, timeout_segundos: int 
 
     logging.error(f"[DOWNLOAD] Timeout ao aguardar escrita completa: {caminho_arquivo}")
     return False
-
-
-async def processar_lote_com_semaforo(
-    chave_acao: str,
-    lista_linhas: list[dict],
-    mapeamento: dict,
-    max_concorrencia: int = 5,
-) -> list[dict]:
-    """
-    Processa uma lista de dados (linhas do Excel) de forma assíncrona e controlada.
-    Limita a abertura simultânea de automações usando asyncio.Semaphore.
-    """
-    semaforo = asyncio.Semaphore(max_concorrencia)
-    memoria = _carregar_ui_map()
-
-    if chave_acao not in memoria.get("acoes_conhecidas", {}):
-        raise ValueError(f"Ação {chave_acao} não encontrada na memória.")
-
-    passos_playwright = memoria["acoes_conhecidas"][chave_acao].get("passos_playwright", [])
-
-    async def worker(index: int, linha_dados: dict):
-        async with semaforo:
-            dados_variaveis = {}
-            for var_json, col_excel in mapeamento.items():
-                dados_variaveis[var_json] = str(linha_dados.get(col_excel, ""))
-
-            try:
-                logging.info(f"[LOTE] Iniciando linha {index}...")
-                resultado = await executar_acao_rapida(
-                    chave_acao,
-                    passos_playwright,
-                    dados_variaveis,
-                )
-                textos_extraidos = str(resultado.get("dados_extraidos", "")) if resultado.get("dados_extraidos") else ""
-
-                return {
-                    "indice_original": index,
-                    "Status_Robo": "Sucesso",
-                    "Detalhes_Erro": "",
-                    "Dados_Extraidos": textos_extraidos,
-                    "Evidencia": resultado.get("evidencia", ""),
-                }
-            except Exception as e:
-                logging.error(f"[LOTE] Erro na linha {index}: {str(e)}")
-                return {
-                    "indice_original": index,
-                    "Status_Robo": "Erro",
-                    "Detalhes_Erro": str(e),
-                    "Dados_Extraidos": "",
-                    "Evidencia": "",
-                }
-
-    tasks = [worker(idx, linha) for idx, linha in enumerate(lista_linhas)]
-    resultados = await asyncio.gather(*tasks)
-    resultados.sort(key=lambda x: x["indice_original"])
-    return resultados
 
 
 async def consultar_erp_real(cnpj: str) -> dict[str, Any]:

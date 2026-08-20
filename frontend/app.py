@@ -73,7 +73,6 @@ from frontend.api_client import (  # noqa: E402
 )
 
 _EVIDENCIA = "data/print_teste.png"
-_UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _WHITELIST_PATH = _DATA_DIR / "usuarios_autorizados.json"
 _LOG_PATH = _ROOT / "logs" / "operation.log"
 _CHAT_HISTORY_PATH = _DATA_DIR / "chat_history.json"
@@ -327,24 +326,6 @@ def _defaults_sessao_agendamentos() -> None:
     st.session_state.setdefault("cron_log_text", "Nenhuma execucao ainda (simulado).\n")
 
 
-def _carregar_ui_map() -> dict:
-    if not _UI_MAP_PATH.is_file():
-        return {"acoes_conhecidas": {}}
-    try:
-        return json.loads(_UI_MAP_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        st.warning("`ui_map.json` invalido. Usando fallback em memoria.")
-        return {"acoes_conhecidas": {}}
-    except OSError as exc:
-        st.warning(f"Falha ao ler `ui_map.json`: {exc}")
-        return {"acoes_conhecidas": {}}
-
-
-def _obter_acoes_conhecidas(ui_map: dict) -> dict:
-    acoes = ui_map.get("acoes_conhecidas", {})
-    return acoes if isinstance(acoes, dict) else {}
-
-
 def _acoes_ui_por_chave(actions: list[dict]) -> dict[str, dict]:
     return {
         str(action["key"]): action
@@ -357,18 +338,6 @@ def _acao_configurada_para_execucao_rapida(action: dict) -> bool:
     if bool(action.get("legacy_unconfigured", False)):
         return False
     return int(action.get("steps_count") or 0) > 0
-
-
-def _excluir_acao_local(chave_acao: str) -> None:
-    memoria = _carregar_ui_map()
-    acoes = memoria.get("acoes_conhecidas", {})
-    if not isinstance(acoes, dict) or chave_acao not in acoes:
-        raise KeyError(chave_acao)
-    del acoes[chave_acao]
-    _UI_MAP_PATH.write_text(
-        json.dumps(memoria, ensure_ascii=False, indent=4) + "\n",
-        encoding="utf-8",
-    )
 
 
 def _ler_ultimas_linhas_log(limite: int = 50) -> str:
@@ -2209,7 +2178,7 @@ if "messages" not in st.session_state:
 st.session_state.setdefault("estado_agente", "NORMAL")
 
 _defaults_sessao_agendamentos()
-acoes_ui_result = get_actions_for_ui(API_BASE_URL, _UI_MAP_PATH)
+acoes_ui_result = get_actions_for_ui(API_BASE_URL)
 acoes_ui = _acoes_ui_por_chave(acoes_ui_result.actions)
 
 # Permite injetar comando no chat por botao dinamico.
@@ -2548,253 +2517,8 @@ elif menu_selecionado == "Clientes":
 
 elif menu_selecionado == "Agendamentos e Filas":
     st.header("⏰ Agendamentos e Operação em Lote")
-
-    st.subheader("Agendamento por lista de clientes")
-    st.caption("Estrutura alinhada ao novo modelo: uma ação, uma lista de clientes e fila sequencial.")
-    schedule_cols = st.columns(4)
-    schedule_actions = {
-        str(action.get("name") or key): str(action.get("id") or key)
-        for key, action in acoes_ui.items()
-        if isinstance(action, dict) and _acao_configurada_para_execucao_rapida(action)
-    }
-    try:
-        schedule_groups = list_client_groups(api_base_url=API_BASE_URL).get("groups", [])
-    except DemoApiError:
-        schedule_groups = []
-    schedule_action = schedule_cols[0].selectbox(
-        "Ação",
-        options=list(schedule_actions.keys()) or ["Nenhuma ação"],
-        key="schedule_client_action",
-        disabled=not bool(schedule_actions),
-    )
-    schedule_group = schedule_cols[1].selectbox(
-        "Lista",
-        options=[str(item) for item in schedule_groups] or ["Nenhuma lista"],
-        key="schedule_client_group",
-        disabled=not bool(schedule_groups),
-    )
-    schedule_frequency = schedule_cols[2].selectbox(
-        "Frequência",
-        options=["Mensal", "Semanal"],
-        key="schedule_client_frequency",
-    )
-    schedule_delay = schedule_cols[3].number_input(
-        "Delay (s)",
-        min_value=0.0,
-        max_value=3600.0,
-        value=3.0,
-        step=1.0,
-        key="schedule_client_delay",
-    )
-    if st.button("Salvar rascunho de agendamento", key="schedule_client_draft"):
-        st.session_state.client_schedule_draft = {
-            "action_id": schedule_actions.get(schedule_action, ""),
-            "client_group": schedule_group,
-            "frequency": schedule_frequency,
-            "delay_between_rows_seconds": schedule_delay,
-            "active": True,
-        }
-        st.success("Rascunho salvo para demonstração. A execução automática do cron fica para a próxima etapa.")
-    if isinstance(st.session_state.get("client_schedule_draft"), dict):
-        st.json(st.session_state.client_schedule_draft)
-    
-    st.subheader("📁 Operação em Lote (Excel)")
-    
-    # 1. Escolha da Ação
-    memoria = _carregar_ui_map()
-    acoes_disponiveis = memoria.get("acoes_conhecidas", {})
-    
-    if not acoes_disponiveis:
-        st.info("Nenhuma ação aprendida ainda. Volte ao Chat e ensine o robô primeiro!")
-    else:
-        opcoes_lote = {dados.get("nome_amigavel", chave): chave for chave, dados in acoes_disponiveis.items()}
-        nome_acao_lote = st.selectbox("1. Qual rotina deseja aplicar à planilha?", list(opcoes_lote.keys()), key="lote_acao")
-        chave_acao_selecionada = opcoes_lote[nome_acao_lote]
-        variaveis_exigidas = acoes_disponiveis[chave_acao_selecionada].get("variaveis_necessarias", [])
-        
-        # 2. Upload do Arquivo
-        arquivo_excel = st.file_uploader("2. Suba a planilha (.xlsx, .csv)", type=["xlsx", "csv"])
-        
-        if arquivo_excel is not None:
-            try:
-                import pandas as pd
-                if arquivo_excel.name.endswith('.csv'):
-                    df_lote = pd.read_csv(arquivo_excel)
-                else:
-                    df_lote = pd.read_excel(arquivo_excel)
-                    
-                colunas_excel = df_lote.columns.tolist()
-                
-                st.write("Visualização rápida dos dados:")
-                st.dataframe(df_lote.head(3), use_container_width=True)
-                
-                # 3. Mapeamento
-                if variaveis_exigidas:
-                    st.markdown("### 🔗 Mapeamento de Variáveis")
-                    st.info(f"A rotina '{nome_acao_lote}' precisa de dados. Indique em que coluna da sua planilha eles estão:")
-                    
-                    mapeamento_colunas = {}
-                    for var in variaveis_exigidas:
-                        col_selecionada = st.selectbox(
-                            f"A variável '{var}' corresponde à coluna:",
-                            options=["-- Selecione a coluna --"] + colunas_excel,
-                            key=f"map_{var}"
-                        )
-                        mapeamento_colunas[var] = col_selecionada
-                    
-                    todas_mapeadas = all(v != "-- Selecione a coluna --" for v in mapeamento_colunas.values())
-                else:
-                    st.success(f"A rotina '{nome_acao_lote}' não exige variáveis. Pronta para disparar o lote!")
-                    mapeamento_colunas = {}
-                    todas_mapeadas = True
-                
-                # 4. Botões de Disparo
-                if todas_mapeadas:
-                    st.divider()
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if st.button("🚀 Iniciar Processamento Agora", use_container_width=True, type="primary"):
-                            lista_dados = df_lote.to_dict('records')
-                            st.info(f"A processar {len(lista_dados)} itens... Por favor, não feche a página.")
-                            barra_progresso = st.progress(0)
-                            
-                            import asyncio
-                            from backend.motor_browser import processar_lote_com_semaforo
-                            
-                            with st.spinner("O robô está a operar em lote..."):
-                                resultados_lote = asyncio.run(processar_lote_com_semaforo(
-                                    chave_acao=chave_acao_selecionada, 
-                                    lista_linhas=lista_dados, 
-                                    mapeamento=mapeamento_colunas, 
-                                    max_concorrencia=5
-                                ))
-                                
-                            df_resultado = df_lote.copy()
-                            df_resultado["Status_Robo"] = [res.get("Status_Robo", "") for res in resultados_lote]
-                            df_resultado["Detalhes_Erro"] = [res.get("Detalhes_Erro", "") for res in resultados_lote]
-                            df_resultado["Dados_Extraidos"] = [res.get("Dados_Extraidos", "") for res in resultados_lote]
-                            
-                            st.success("✅ Processamento concluído!")
-                            st.markdown("### 📊 Relatório Final")
-                            st.dataframe(df_resultado, use_container_width=True)
-                            
-                            csv_final = df_resultado.to_csv(index=False).encode('utf-8')
-                            st.download_button(
-                                label="📥 Descarregar Relatório Processado (CSV)",
-                                data=csv_final,
-                                file_name="relatorio_cotasync_processado.csv",
-                                mime="text/csv",
-                                type="primary",
-                                use_container_width=True
-                            )
-                    
-                    with col2:
-                        if st.button("⏰ Agendar para o futuro", use_container_width=True):
-                            st.session_state.mostrando_agendador = True
-                            
-                    if st.session_state.get("mostrando_agendador", False):
-                        st.divider()
-                        st.markdown("### 📅 Configurar Agendamento")
-                        
-                        col_data, col_hora = st.columns(2)
-                        with col_data:
-                            data_agendamento = st.date_input("Data de Início")
-                        with col_hora:
-                            hora_agendamento = st.time_input("Hora de Início")
-                        
-                        if st.button("Confirmar Agendamento", type="primary"):
-                            import uuid
-                            import json
-                            import datetime
-                            import os
-                            
-                            os.makedirs("data/agendamentos", exist_ok=True)
-                            job_id = str(uuid.uuid4())[:8]
-                            caminho_csv = f"data/agendamentos/lote_{job_id}.csv"
-                            caminho_json = f"data/agendamentos/job_{job_id}.json"
-                            
-                            df_lote.to_csv(caminho_csv, index=False)
-                            
-                            config_job = {
-                                "id": job_id,
-                                "chave_acao": chave_acao_selecionada,
-                                "mapeamento": mapeamento_colunas,
-                                "caminho_csv": caminho_csv,
-                                "data_execucao": data_agendamento.strftime("%Y-%m-%d"),
-                                "hora_execucao": hora_agendamento.strftime("%H:%M"),
-                                "status": "pendente",
-                                "criado_em": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            }
-                            
-                            with open(caminho_json, "w", encoding="utf-8") as f:
-                                json.dump(config_job, f, ensure_ascii=False, indent=4)
-                                
-                            st.success(f"✅ Lote agendado com sucesso para {data_agendamento.strftime('%d/%m/%Y')} às {hora_agendamento.strftime('%H:%M')}! Pode fechar o sistema.")
-                            st.session_state.mostrando_agendador = False
-                            st.rerun()
-            except Exception as e:
-                st.error(f"Erro ao ler a planilha: {str(e)}")
-        else:
-            # SE O UTILIZADOR AINDA NÃO SUBIU O EXCEL, MOSTRA UM PLACEHOLDER CLARO
-            st.divider()
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("### 🚀 Execução Imediata")
-                st.button("Iniciar Processamento Agora", disabled=True, key="btn_fake_run", use_container_width=True)
-
-            with col2:
-                st.markdown("### 📅 Agendamento Futuro")
-                st.button("⏰ Agendar para o futuro", disabled=True, key="btn_fake_cron", use_container_width=True)
-
-            st.warning(
-                "⚠️ **Ação Necessária:** Para libertar o Calendário de Agendamentos e a Execução em Lote, "
-                "por favor faça o upload da sua planilha (.xlsx ou .csv) no campo acima."
-            )
-
-    # STATUS DOS AGENDAMENTOS (Sempre visível no fundo da página)
-    st.divider()
-    st.subheader("📋 Status dos Agendamentos")
-    
-    import glob
-    import os
-    import json
-    pasta_agendamentos = "data/agendamentos"
-    os.makedirs(pasta_agendamentos, exist_ok=True)
-    arquivos_job = glob.glob(f"{pasta_agendamentos}/job_*.json")
-    
-    if arquivos_job:
-        for job_file in arquivos_job:
-            try:
-                with open(job_file, "r", encoding="utf-8") as f:
-                    job_data = json.load(f)
-                
-                status = job_data.get("status", "pendente")
-                cor_status = "🟠" if status == "pendente" else "🔵" if status == "processando" else "🟢" if status == "concluido" else "🔴"
-                
-                with st.expander(f"{cor_status} Lote: {job_data.get('chave_acao', 'N/A')} | Data: {job_data.get('data_execucao', 'N/A')} às {job_data.get('hora_execucao', 'N/A')} | Status: {status.upper()}"):
-                    st.write(f"**ID da Tarefa:** {job_data.get('id')}")
-                    st.write(f"**Data de Criação:** {job_data.get('criado_em', 'N/A')}")
-                    
-                    if status == "concluido" and "resultado_csv" in job_data:
-                        caminho_res = job_data["resultado_csv"]
-                        if os.path.exists(caminho_res):
-                            with open(caminho_res, "rb") as file_csv:
-                                csv_bytes = file_csv.read()
-                                st.download_button(
-                                    label="📥 Descarregar Resultado (CSV)",
-                                    data=csv_bytes,
-                                    file_name=f"resultado_lote_{job_data['id']}.csv",
-                                    mime="text/csv",
-                                    key=f"dl_job_{job_data['id']}"
-                                )
-                    elif status == "erro":
-                        st.error(f"Erro: {job_data.get('detalhes_erro', 'Falha desconhecida')}")
-            except Exception as e:
-                pass
-    else:
-        st.info("Nenhum agendamento pendente ou concluído encontrado.")
+    st.info("Agendamento automatico esta indisponivel ate a Rodada 3.")
+    st.caption("A execucao em massa manual permanece na aba Execução em massa, com batches persistidos no PostgreSQL.")
 
 elif menu_selecionado == "Catálogo de Ações":
     st.markdown("##### 📚 Catálogo de Ações")
@@ -2812,20 +2536,7 @@ elif menu_selecionado == "Catálogo de Ações":
             steps_count = int(dados_acao.get("steps_count", 0) or 0)
 
             with st.expander(f"🧠 {nome_amigavel}", expanded=False):
-                col_info, col_btn = st.columns([4, 1])
-                with col_info:
-                    st.caption(descricao)
-                with col_btn:
-                    if st.button("🗑️ Excluir", key=f"del_{chave_acao}"):
-                        try:
-                            _excluir_acao_local(chave_acao)
-                            if hasattr(st, "toast"):
-                                st.toast(f"Ação '{nome_amigavel}' removida com sucesso.")
-                            else:
-                                st.success(f"Ação '{nome_amigavel}' removida com sucesso.")
-                            st.rerun()
-                        except (KeyError, OSError, TypeError) as exc:
-                            st.error(f"Não foi possível excluir a ação: {exc}")
+                st.caption(descricao)
                 if variables:
                     variable_labels = [
                         str(variable.get("label") or variable.get("key"))

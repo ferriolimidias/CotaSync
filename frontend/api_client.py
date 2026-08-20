@@ -7,7 +7,6 @@ import os
 import csv
 import io
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlencode
 
@@ -15,7 +14,6 @@ import requests
 
 
 DEFAULT_API_BASE_URL = "http://cotasync_test_backend:8000"
-DEFAULT_UI_MAP_PATH = Path(__file__).resolve().parent.parent / "data" / "ui_map.json"
 
 
 class ActionsCatalogError(RuntimeError):
@@ -243,83 +241,6 @@ def _normalize_api_action(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _normalize_local_action(key: str, raw: Any) -> dict[str, Any]:
-    data = raw if isinstance(raw, dict) else {}
-    steps = data.get("passos_playwright", [])
-    if not isinstance(steps, list):
-        steps = []
-    variables = _normalize_variables(data.get("variaveis_necessarias", []))
-    schema_variables = _normalize_variables(data.get("variable_schema", []))
-    if schema_variables:
-        labels_by_key = {item["key"]: item["label"] for item in schema_variables}
-        if variables:
-            variables = [{**item, "label": labels_by_key.get(item["key"], item["label"])} for item in variables]
-        else:
-            variables = schema_variables
-    return {
-        "id": key,
-        "key": key,
-        "name": str(data.get("nome_amigavel") or key).strip() or key,
-        "description": str(data.get("descricao") or "").strip(),
-        "variables": variables,
-        "steps_count": len(steps),
-        "has_url": bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
-        "test_mode": bool(data.get("modo_teste", False)),
-        "execution_type": data.get("tipo_execucao"),
-        "learning_mode": data.get("learning_mode"),
-        "ai_reviewed": bool(data.get("ai_reviewed", False)),
-        "ai_observer_summary": str(data.get("ai_observer_summary") or "").strip(),
-        "review_status": str(data.get("review_status") or "").strip(),
-        "review_last_run_id": str(data.get("review_last_run_id") or "").strip(),
-        "reviewed_overlay": data.get("reviewed_overlay", {}) if isinstance(data.get("reviewed_overlay"), dict) else {},
-        "ai_review_summary": str(data.get("ai_review_summary") or "").strip(),
-        "final_summary_instruction": str(data.get("final_summary_instruction") or "").strip(),
-        "extraction_review": data.get("extraction_review", {}) if isinstance(data.get("extraction_review"), dict) else {},
-        "objective": str(data.get("objective") or data.get("descricao") or "").strip(),
-        "input_description": str(data.get("input_description") or "").strip(),
-        "expected_result": str(data.get("expected_result") or "").strip(),
-        "success_criteria": str(data.get("success_criteria") or "").strip(),
-        "output_type": str(data.get("output_type") or "").strip(),
-        "output_schema": data.get("output_schema", {}) if isinstance(data.get("output_schema"), dict) else {},
-        "extraction_targets": data.get("extraction_targets", []) if isinstance(data.get("extraction_targets"), list) else [],
-        "user_result_summary_template": str(data.get("user_result_summary_template") or "").strip(),
-        "ai_result_summary_enabled": bool(data.get("ai_result_summary_enabled", True)),
-        "ai_recovery_enabled": bool(data.get("ai_recovery_enabled", False)),
-        "learning_warnings": data.get("learning_warnings", []) if isinstance(data.get("learning_warnings"), list) else [],
-        "replay_hints": data.get("replay_hints", []) if isinstance(data.get("replay_hints"), list) else [],
-        "wait_strategies": (
-            data.get("wait_strategies", []) if isinstance(data.get("wait_strategies"), list) else []
-        ),
-        "external_system_name": str(data.get("external_system_name") or "").strip(),
-        "external_login_url": str(data.get("external_login_url") or "").strip(),
-        "access_profile_name": str(data.get("access_profile_name") or "").strip(),
-        "access_profile_email_or_identifier": str(data.get("access_profile_email_or_identifier") or "").strip(),
-        "microsoft_saved_account_identifier": str(data.get("microsoft_saved_account_identifier") or "").strip(),
-        "microsoft_saved_account_text": str(data.get("microsoft_saved_account_text") or "").strip(),
-        "expected_system_host": str(data.get("expected_system_host") or "").strip(),
-        "session_guardian_enabled": bool(data.get("session_guardian_enabled", True)),
-        "legacy_unconfigured": not bool(
-            (
-                str(data.get("access_profile_name") or "").strip()
-                and str(data.get("microsoft_saved_account_text") or "").strip()
-                and (
-                    str(data.get("microsoft_saved_account_identifier") or "").strip()
-                    or str(data.get("access_profile_email_or_identifier") or "").strip()
-                )
-                and str(data.get("expected_system_host") or "").strip()
-            )
-            or (
-                str(data.get("learning_mode") or "").strip()
-                in {"human_demo_mechanical_ai_reviewed", "desktop_browser_mechanical_ai_reviewed"}
-                and bool(steps)
-            )
-        ),
-        "requires_authenticated_session": bool(data.get("requires_authenticated_session", True)),
-        "action_timeout_seconds": data.get("action_timeout_seconds"),
-        "source": "data/ui_map.json",
-    }
-
-
 def get_actions_from_api(
     api_base_url: str | None = None,
     timeout: float = 5.0,
@@ -345,52 +266,15 @@ def get_actions_from_api(
     return actions
 
 
-def get_actions_fallback_local(
-    ui_map_path: Path | str = DEFAULT_UI_MAP_PATH,
-) -> list[dict[str, Any]]:
-    """Le o catalogo legado local quando a API nao estiver disponivel."""
-
-    path = Path(ui_map_path)
-    if not path.is_file():
-        return []
-    try:
-        raw = path.read_text(encoding="utf-8")
-        payload = json.loads(raw) if raw.strip() else {"acoes_conhecidas": {}}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ActionsCatalogError("Falha ao ler o catalogo local de acoes.") from exc
-
-    if not isinstance(payload, dict):
-        raise ActionsCatalogError("Formato invalido do catalogo local de acoes.")
-    raw_actions = payload.get("acoes_conhecidas", {})
-    if not isinstance(raw_actions, dict):
-        raise ActionsCatalogError("Formato invalido das acoes no catalogo local.")
-
-    return [_normalize_local_action(str(key), value) for key, value in raw_actions.items()]
-
-
 def get_actions_for_ui(
     api_base_url: str | None = None,
-    ui_map_path: Path | str = DEFAULT_UI_MAP_PATH,
 ) -> ActionsUiResult:
-    """Tenta a API primeiro e recorre ao arquivo local de forma controlada."""
+    """Consulta o catalogo de acoes exclusivamente pela API/PostgreSQL."""
 
     try:
         return ActionsUiResult(actions=get_actions_from_api(api_base_url), source="api")
     except ActionsCatalogError as api_exc:
-        try:
-            actions = get_actions_fallback_local(ui_map_path)
-        except ActionsCatalogError as fallback_exc:
-            return ActionsUiResult(
-                actions=[],
-                source="fallback_local",
-                api_error=str(api_exc),
-                fallback_error=str(fallback_exc),
-            )
-        return ActionsUiResult(
-            actions=actions,
-            source="fallback_local",
-            api_error=str(api_exc),
-        )
+        return ActionsUiResult(actions=[], source="api", api_error=str(api_exc))
 
 
 def demo_api_request(

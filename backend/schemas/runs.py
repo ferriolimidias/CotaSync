@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 RunStatus = Literal["pending", "running", "success", "error"]
 RunMode = Literal["sync", "async"]
+RunOrigin = Literal["operational", "smoke", "validation", "automated_test", "migration"]
 
 
 class ActionRunRequest(BaseModel):
@@ -14,6 +15,7 @@ class ActionRunRequest(BaseModel):
     mode: RunMode = "sync"
     requested_by: str = "api"
     session_id: str | None = None
+    run_origin: RunOrigin = "operational"
 
 
 class RunRecord(BaseModel):
@@ -23,6 +25,7 @@ class RunRecord(BaseModel):
     status: RunStatus
     mode: RunMode = "sync"
     run_type: str = "action_run"
+    run_origin: RunOrigin = "operational"
     requested_by: str = "api"
     session_id: str | None = None
     created_at: str

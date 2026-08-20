@@ -46,6 +46,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
+from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.actions_repository import enrich_action_access_profile, save_learned_action
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
@@ -60,7 +61,6 @@ from backend.services.result_selection import (
 logger = logging.getLogger("cotasync.demo")
 _ROOT = Path(__file__).resolve().parents[2]
 _DATA_DIR = _ROOT / "data"
-_UI_MAP_PATH = _DATA_DIR / "ui_map.json"
 _DEMO_SESSIONS_DIR = _DATA_DIR / "demo_sessions"
 _MAX_RECORDED_STEPS = 200
 
@@ -687,30 +687,20 @@ def _external_storage_state_path(system_name: str, session_id: str) -> Path:
     )
 
 
-def _load_ui_map() -> dict[str, Any]:
-    if not _UI_MAP_PATH.is_file():
-        return {"acoes_conhecidas": {}}
-    try:
-        payload = json.loads(_UI_MAP_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise DemoSessionError("Nao foi possivel ler o catalogo de acoes.") from exc
-    if not isinstance(payload, dict):
-        raise DemoSessionError("Catalogo de acoes em formato invalido.")
-    if not isinstance(payload.get("acoes_conhecidas"), dict):
-        payload["acoes_conhecidas"] = {}
-    return payload
-
-
-def _save_ui_map(payload: dict[str, Any]) -> None:
-    _UI_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with NamedTemporaryFile("w", encoding="utf-8", dir=_UI_MAP_PATH.parent, delete=False) as tmp:
-            json.dump(payload, tmp, ensure_ascii=False, indent=2)
-            tmp.write("\n")
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, _UI_MAP_PATH)
-    except OSError as exc:
-        raise DemoSessionError("Nao foi possivel salvar a acao aprendida.") from exc
+def _load_published_action_definition(action_key: str) -> dict[str, Any]:
+    with SessionLocal() as db_session:
+        db_action = db_session.query(DbAction).filter(DbAction.key == action_key).first()
+        version = (
+            db_session.get(ActionVersion, db_action.published_version_id)
+            if db_action is not None and db_action.published_version_id
+            else None
+        )
+        if version is None:
+            return {}
+        raw = dict(version.definition or {})
+        raw.setdefault("nome_amigavel", db_action.name if db_action is not None else action_key)
+        raw.setdefault("descricao", db_action.description if db_action is not None else "")
+        return raw
 
 
 @dataclass
@@ -2778,12 +2768,7 @@ class DemoSessionManager:
 
         screenshot_path = _DATA_DIR / f"mapeamento_{_safe_file_name(action_name)}.png"
         await session.page.screenshot(path=str(screenshot_path), full_page=False)
-        if os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}:
-            payload = _load_ui_map()
-            payload["acoes_conhecidas"][action_name] = learned_action
-            _save_ui_map(payload)
-        else:
-            save_learned_action(action_name, learned_action)
+        save_learned_action(action_name, learned_action)
 
         from backend.services.actions_repository import slugify_action_id
 
@@ -2840,8 +2825,7 @@ class DemoSessionManager:
         if session.recording:
             raise DemoSessionError("Pare a gravacao antes de executar a rotina aprendida.")
 
-        payload = _load_ui_map()
-        action = payload["acoes_conhecidas"].get(action_key)
+        action = _load_published_action_definition(action_key)
         if not isinstance(action, dict):
             raise DemoSessionError("Acao aprendida nao encontrada.")
         action = enrich_action_access_profile(action)

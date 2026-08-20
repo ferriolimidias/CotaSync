@@ -13,7 +13,6 @@ TEST_DATABASE_URL = (
 )
 
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
-os.environ["COTASYNC_TEST_LEGACY_JSON"] = "1"
 
 
 def _bootstrap_test_database() -> None:

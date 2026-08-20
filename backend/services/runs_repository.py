@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -24,7 +23,7 @@ def _parse_dt(value: str | None):
 
 
 class RunsRepositoryError(Exception):
-    """Erro seguro de leitura ou escrita do arquivo temporario de runs."""
+    """Erro seguro de leitura ou escrita da persistencia de runs."""
 
 
 def project_root() -> Path:
@@ -75,12 +74,8 @@ def _write_payload(path: Path, payload: dict[str, Any]) -> None:
         raise RunsRepositoryError("Nao foi possivel gravar data/runs/runs.json.") from exc
 
 
-def _use_legacy_json(path: Path | None) -> bool:
-    return path is not None or os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}
-
-
 def load_runs(path: Path | None = None) -> list[RunRecord]:
-    if not _use_legacy_json(path):
+    if path is None:
         with SessionLocal() as session:
             rows = session.query(DbRun).order_by(DbRun.created_at).all()
             result = []
@@ -93,6 +88,7 @@ def load_runs(path: Path | None = None) -> list[RunRecord]:
                     "action_id": row.action_id or record.get("action_id") or "",
                     "action_key": record.get("action_key") or row.action_id or "",
                     "status": row.status if row.status in {"pending", "running", "success", "error"} else "error",
+                    "run_origin": row.run_origin if row.run_origin in {"operational", "smoke", "validation", "automated_test", "migration"} else "operational",
                     "created_at": row.created_at.isoformat() if row.created_at else record.get("created_at") or "",
                     "started_at": row.started_at.isoformat() if row.started_at else record.get("started_at"),
                     "finished_at": row.finished_at.isoformat() if row.finished_at else record.get("finished_at"),
@@ -114,7 +110,7 @@ def load_runs(path: Path | None = None) -> list[RunRecord]:
 
 
 def save_runs(runs: list[RunRecord], path: Path | None = None) -> None:
-    if not _use_legacy_json(path):
+    if path is None:
         with SessionLocal.begin() as session:
             for run in runs:
                 raw = run.model_dump()
@@ -123,8 +119,11 @@ def save_runs(runs: list[RunRecord], path: Path | None = None) -> None:
                     row = DbRun(id=run.id, status=run.status)
                     session.add(row)
                 from backend.db import Action as DbAction
-                row.action_id = run.action_id if session.get(DbAction, run.action_id) is not None else None
+                action = session.get(DbAction, run.action_id)
+                row.action_id = run.action_id if action is not None else None
+                row.action_version_id = action.published_version_id if action is not None else None
                 row.status = run.status
+                row.run_origin = run.run_origin
                 row.started_at = _parse_dt(run.started_at)
                 row.finished_at = _parse_dt(run.finished_at)
                 row.result_summary = run.result_summary or run.operational_summary
@@ -140,7 +139,7 @@ def save_runs(runs: list[RunRecord], path: Path | None = None) -> None:
 
 
 def append_run(run: RunRecord, path: Path | None = None) -> RunRecord:
-    if not _use_legacy_json(path):
+    if path is None:
         save_runs([run], None)
         return run
     runs = load_runs(path)
@@ -150,7 +149,7 @@ def append_run(run: RunRecord, path: Path | None = None) -> RunRecord:
 
 
 def update_run(run: RunRecord, path: Path | None = None) -> RunRecord:
-    if not _use_legacy_json(path):
+    if path is None:
         save_runs([run], None)
         return run
     runs = load_runs(path)
@@ -165,7 +164,7 @@ def update_run(run: RunRecord, path: Path | None = None) -> RunRecord:
 
 
 def get_run(run_id: str, path: Path | None = None) -> RunRecord | None:
-    if not _use_legacy_json(path):
+    if path is None:
         with SessionLocal() as session:
             row = session.get(DbRun, str(run_id or "").strip())
             if row is None:

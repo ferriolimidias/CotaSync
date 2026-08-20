@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -333,7 +332,7 @@ def _load_ui_map(path: Path) -> tuple[dict[str, Any], bool, str | None]:
 
 
 def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
-    if path is None and os.getenv("COTASYNC_TEST_LEGACY_JSON") != "1":
+    if path is None:
         with SessionLocal() as session:
             rows = session.query(DbAction, ActionVersion).join(
                 ActionVersion, ActionVersion.id == DbAction.published_version_id
@@ -346,8 +345,7 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
                 raw.setdefault("descricao", db_action.description)
                 actions.append(_normalize_action(db_action.key, raw, used_ids))
             return ActionsCatalog(actions=actions, exists=True, warning=None)
-    ui_map_path = path or default_ui_map_path()
-    payload, exists, warning = _load_ui_map(ui_map_path)
+    payload, exists, warning = _load_ui_map(path)
     raw_actions = payload.get("acoes_conhecidas", {})
     if raw_actions is None:
         raw_actions = {}
@@ -481,6 +479,7 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             version.status = "published"
             version.published_at = datetime.now(UTC)
 
+        session.flush()
         session.execute(delete(ActionStep).where(ActionStep.action_version_id == version.id))
         session.execute(delete(ExtractionContract).where(ExtractionContract.action_version_id == version.id))
         for index, step in enumerate(steps):
@@ -499,6 +498,7 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             )
         for contract in _action_contracts_from_payload(action.id, version.id, learned_action):
             session.add(ExtractionContract(**contract))
+        session.flush()
         action.published_version_id = version.id
         session.flush()
 

@@ -4,9 +4,6 @@ API principal do CotaSync: FastAPI + agendador + webhook Evolution (simulado).
 
 from __future__ import annotations
 
-import asyncio
-import glob
-import json
 import logging
 import os
 import re
@@ -14,8 +11,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-import pandas as pd
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -30,7 +25,6 @@ from backend.api.demo import router as demo_router
 from backend.api.desktop_browser import router as desktop_browser_router
 from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
-from backend.motor_browser import processar_lote_com_semaforo
 from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf
 from backend.services.demo_session import demo_session_manager
 from backend import whatsapp
@@ -60,24 +54,10 @@ class _MaskViewTokenFilter(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_MaskViewTokenFilter())
 
-scheduler = AsyncIOScheduler()
-
-
-def _job_heartbeat_agendador() -> None:
-    """Rotina de teste do APScheduler (visível nos logs do container/host)."""
-    logger.info("CotaSync: heartbeat do agendador (a cada 1 minuto)")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicia o scheduler assíncrono junto com o servidor ASGI.
-    scheduler.add_job(_job_heartbeat_agendador, "interval", minutes=1, id="heartbeat_cotasync")
-    scheduler.start()
-    logger.info("APScheduler iniciado.")
     yield
     await demo_session_manager.close_all()
-    scheduler.shutdown(wait=False)
-    logger.info("APScheduler encerrado.")
 
 
 app = FastAPI(
@@ -119,27 +99,6 @@ async def cotasync_auth_middleware(request: Request, call_next):
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and not validate_csrf(request):
             return JSONResponse({"detail": "CSRF token required."}, status_code=403)
     return await call_next(request)
-
-
-async def verificar_fila_agendamentos():
-    """Verifica a cada minuto se há lotes agendados para a hora atual."""
-    while True:
-        try:
-            from backend.db import Schedule, SessionLocal
-
-            with SessionLocal() as session:
-                _ = session.query(Schedule).filter(Schedule.active.is_(True)).count()
-
-        except Exception as e:
-            logging.error(f"[CRON] Falha no loop de verificação: {e}")
-
-        await asyncio.sleep(60)
-
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(verificar_fila_agendamentos())
-    logging.info("Agendador de tarefas em lote iniciado em background.")
 
 
 @app.get("/health")
