@@ -101,6 +101,7 @@ services:
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       COTASYNC_WORKER_HEARTBEAT_SECONDS: ${COTASYNC_WORKER_HEARTBEAT_SECONDS:-10}
       COTASYNC_WORKER_STALE_SECONDS: ${COTASYNC_WORKER_STALE_SECONDS:-60}
+      COTASYNC_ENABLE_SLOW_FIXTURE: ${COTASYNC_ENABLE_SLOW_FIXTURE:-false}
     volumes:
       - .:/app
     networks:

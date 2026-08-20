@@ -6,6 +6,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -13,6 +14,7 @@ from backend.db import Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, 
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.services.batch_runner import (
+    BatchIdempotencyConflict,
     BatchRunnerError,
     batch_results_csv,
     cancel_batch,
@@ -299,6 +301,65 @@ class BatchRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(first["batch_id"], second["batch_id"])
+        with SessionLocal() as session:
+            self.assertEqual(session.query(DbBatch).count(), 1)
+            self.assertEqual(session.query(BatchItem).count(), 1)
+
+    def test_idempotency_same_key_different_payload_conflicts(self) -> None:
+        with patch("backend.services.batch_runner.find_action", return_value=fake_action()):
+            create_batch(
+                action_id="numero-de-parcelas-pagas",
+                rows=[{"grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
+                auto_start=False,
+                idempotency_key="conflict-key",
+                idempotency_user_id="operator",
+            )
+            with self.assertRaises(BatchIdempotencyConflict):
+                create_batch(
+                    action_id="numero-de-parcelas-pagas",
+                    rows=[{"grupo": "935", "grupo_2": "999", "grupo_3": "00"}],
+                    auto_start=False,
+                    idempotency_key="conflict-key",
+                    idempotency_user_id="operator",
+                )
+
+    def test_idempotency_same_key_different_user_does_not_collide(self) -> None:
+        with patch("backend.services.batch_runner.find_action", return_value=fake_action()):
+            first = create_batch(
+                action_id="numero-de-parcelas-pagas",
+                rows=[{"grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
+                auto_start=False,
+                idempotency_key="shared-key",
+                idempotency_user_id="operator-a",
+            )
+            second = create_batch(
+                action_id="numero-de-parcelas-pagas",
+                rows=[{"grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
+                auto_start=False,
+                idempotency_key="shared-key",
+                idempotency_user_id="operator-b",
+            )
+
+        self.assertNotEqual(first["batch_id"], second["batch_id"])
+        with SessionLocal() as session:
+            self.assertEqual(session.query(DbBatch).count(), 2)
+
+    def test_idempotency_race_same_user_same_payload_creates_one_batch(self) -> None:
+        def submit() -> str:
+            with patch("backend.services.batch_runner.find_action", return_value=fake_action()):
+                batch = create_batch(
+                    action_id="numero-de-parcelas-pagas",
+                    rows=[{"grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
+                    auto_start=False,
+                    idempotency_key="race-key",
+                    idempotency_user_id="operator",
+                )
+                return str(batch["batch_id"])
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: submit(), range(2)))
+
+        self.assertEqual(results[0], results[1])
         with SessionLocal() as session:
             self.assertEqual(session.query(DbBatch).count(), 1)
             self.assertEqual(session.query(BatchItem).count(), 1)

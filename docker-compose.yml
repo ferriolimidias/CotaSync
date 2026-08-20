@@ -83,6 +83,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-cotasync}:${POSTGRES_PASSWORD:-cotasync_password}@postgres:5432/${POSTGRES_DB:-cotasync}
       COTASYNC_WORKER_HEARTBEAT_SECONDS: ${COTASYNC_WORKER_HEARTBEAT_SECONDS:-10}
       COTASYNC_WORKER_STALE_SECONDS: ${COTASYNC_WORKER_STALE_SECONDS:-60}
+      COTASYNC_ENABLE_SLOW_FIXTURE: ${COTASYNC_ENABLE_SLOW_FIXTURE:-false}
     restart: unless-stopped
 
   cotasync_frontend:

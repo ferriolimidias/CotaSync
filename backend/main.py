@@ -14,6 +14,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.api.actions import router as actions_router
 from backend.api.auth import router as auth_router
@@ -25,6 +26,7 @@ from backend.api.demo import router as demo_router
 from backend.api.desktop_browser import router as desktop_browser_router
 from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
+from backend.api.v1 import router as api_v1_router
 from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf
 from backend.services.demo_session import demo_session_manager
 from backend import whatsapp
@@ -78,6 +80,24 @@ app.include_router(runs_router)
 app.include_router(demo_router)
 app.include_router(desktop_browser_router)
 app.include_router(external_systems_router)
+app.include_router(api_v1_router)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def cotasync_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    path = request.url.path.rstrip("/") or "/"
+    if path.startswith("/api/v1/"):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or "HTTP_ERROR")
+            message = str(detail.get("message") or detail.get("detail") or "Operacao indisponivel.")
+            extra = {key: value for key, value in detail.items() if key not in {"code", "message", "detail"}}
+        else:
+            code = "HTTP_ERROR"
+            message = str(detail or "Operacao indisponivel.")
+            extra = {}
+        return JSONResponse({"error": {"code": code, "message": message, **extra}}, status_code=exc.status_code)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
 _PUBLIC_API_PATHS = {
@@ -94,9 +114,13 @@ async def cotasync_auth_middleware(request: Request, call_next):
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         user = parse_session_token(request.cookies.get(SESSION_COOKIE, ""))
         if user is None:
+            if path.startswith("/api/v1/"):
+                return JSONResponse({"error": {"code": "AUTH_REQUIRED", "message": "Authentication required."}}, status_code=401)
             return JSONResponse({"detail": "Authentication required."}, status_code=401)
         request.state.auth_user = user
         if request.method.upper() not in {"GET", "HEAD", "OPTIONS"} and not validate_csrf(request):
+            if path.startswith("/api/v1/"):
+                return JSONResponse({"error": {"code": "CSRF_REQUIRED", "message": "CSRF token required."}}, status_code=403)
             return JSONResponse({"detail": "CSRF token required."}, status_code=403)
     return await call_next(request)
 

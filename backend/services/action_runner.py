@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -218,6 +220,10 @@ def _is_local_fixture(action: ActionDetail) -> bool:
 
 
 def _run_local_fixture(action: ActionDetail, variables: dict[str, Any]) -> dict[str, Any]:
+    if os.getenv("COTASYNC_ENABLE_SLOW_FIXTURE", "").strip().lower() in {"1", "true", "yes"}:
+        sleep_seconds = max(0.0, min(float(variables.get("__sleep_seconds") or 0), 30.0))
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
     echo = {variable.key: mask_value_for_key(variable.key, variables.get(variable.key)) for variable in action.variables}
     return {"echo": echo, "fixture": True, "action_id": action.id}
 

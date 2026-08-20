@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from backend.services.batch_runner import (
+    BatchIdempotencyConflict,
     BatchRunnerError,
     batch_results_csv,
     cancel_batch,
@@ -14,6 +15,7 @@ from backend.services.batch_runner import (
     list_batches,
     load_batch,
 )
+from backend.services.auth import require_user
 from backend.worker import latest_worker_status
 
 router = APIRouter(prefix="/api/batches", tags=["batches"])
@@ -30,9 +32,11 @@ class BatchCreateRequest(BaseModel):
 
 @router.post("")
 async def create_batch_endpoint(
+    request: Request,
     payload: BatchCreateRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
+    user = require_user(request)
     try:
         batch = create_batch(
             action_id=payload.action_id,
@@ -43,7 +47,10 @@ async def create_batch_endpoint(
             delay_between_rows_seconds=payload.delay_between_rows_seconds,
             auto_start=False,
             idempotency_key=idempotency_key,
+            idempotency_user_id=user.username,
         )
+    except BatchIdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except BatchRunnerError as exc:
         message = str(exc)
         status_code = 409 if "Ja existe um lote" in message else 422

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -10,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal
 from backend.services.actions_repository import find_action
@@ -54,6 +56,10 @@ DEFAULT_DELAY_BETWEEN_ROWS_SECONDS = 3
 
 class BatchRunnerError(Exception):
     """Erro controlado no gerenciamento da fila sequencial de batches."""
+
+
+class BatchIdempotencyConflict(BatchRunnerError):
+    """Idempotency-Key reutilizada com payload diferente no mesmo escopo."""
 
 
 def utc_now() -> datetime:
@@ -181,6 +187,61 @@ def _item_id(batch_id: str, position: int) -> str:
     return f"{batch_id}-item-{position - 1}"
 
 
+def batch_idempotency_fingerprint(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _idempotency_payload(
+    *,
+    action_id: str,
+    source: str,
+    client_group: str | None,
+    client_ids: list[str] | None,
+    rows: list[dict[str, Any]],
+    delay_between_rows_seconds: int | float,
+) -> dict[str, Any]:
+    return {
+        "operation": "batch:create",
+        "action_id": str(action_id or ""),
+        "source": str(source or ""),
+        "client_group": str(client_group or ""),
+        "client_ids": [str(item) for item in client_ids or []],
+        "delay_between_rows_seconds": max(0, float(delay_between_rows_seconds)),
+        "rows": [
+            {
+                "client_id": str(row.get("client_id") or ""),
+                "variables": {str(key): str(value) for key, value in _prepared_variables(row).items()},
+            }
+            for row in rows
+        ],
+    }
+
+
+def _load_existing_idempotent_batch(
+    *,
+    user_id: str,
+    operation: str,
+    key: str,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    with SessionLocal() as session:
+        existing = (
+            session.query(DbBatch)
+            .filter(
+                DbBatch.idempotency_user_id == user_id,
+                DbBatch.idempotency_operation == operation,
+                DbBatch.idempotency_key == key,
+            )
+            .first()
+        )
+        if existing is None:
+            return None
+        if existing.idempotency_fingerprint != fingerprint:
+            raise BatchIdempotencyConflict("Idempotency-Key ja utilizada com payload diferente.")
+        return load_batch(existing.id)
+
+
 def _recount_batch(session: Any, batch_id: str) -> None:
     batch = session.get(DbBatch, batch_id)
     if batch is None:
@@ -222,6 +283,8 @@ def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem]) -> dict[str, Any]:
         "worker_id": db_batch.worker_id or "",
         "cancel_requested": db_batch.cancel_requested,
         "idempotency_key": db_batch.idempotency_key or "",
+        "idempotency_user_id": db_batch.idempotency_user_id or "",
+        "idempotency_operation": db_batch.idempotency_operation or "",
         "total_items": db_batch.total_items,
         "processed_items": db_batch.processed_items,
         "success_items": db_batch.success_items,
@@ -299,6 +362,8 @@ def create_batch(
     batches_dir: Path | None = None,
     auto_start: bool = False,
     idempotency_key: str | None = None,
+    idempotency_user_id: str | None = None,
+    idempotency_operation: str = "batch:create",
 ) -> dict[str, Any]:
     action = find_action(action_id)
     if action is None:
@@ -313,13 +378,26 @@ def create_batch(
     _validate_prepared_rows(action, prepared_rows)
 
     normalized_key = str(idempotency_key or "").strip() or None
+    normalized_user_id = str(idempotency_user_id or requested_by or "anonymous").strip() or "anonymous"
+    operation = str(idempotency_operation or "batch:create").strip() or "batch:create"
+    fingerprint_payload = _idempotency_payload(
+        action_id=action.id,
+        source=source,
+        client_group=client_group,
+        client_ids=client_ids,
+        rows=prepared_rows,
+        delay_between_rows_seconds=delay_between_rows_seconds,
+    )
+    fingerprint = batch_idempotency_fingerprint(fingerprint_payload)
     if normalized_key:
-        with SessionLocal() as session:
-            existing = session.query(DbBatch).filter(DbBatch.idempotency_key == normalized_key).first()
-            if existing is not None:
-                loaded = load_batch(existing.id)
-                if loaded is not None:
-                    return loaded
+        existing = _load_existing_idempotent_batch(
+            user_id=normalized_user_id,
+            operation=operation,
+            key=normalized_key,
+            fingerprint=fingerprint,
+        )
+        if existing is not None:
+            return existing
 
     batch_id = str(uuid4())
     created_at = utc_now_iso()
@@ -357,35 +435,50 @@ def create_batch(
             for index, row in enumerate(prepared_rows, start=1)
         ],
     }
-    with SessionLocal.begin() as session:
-        db_batch = DbBatch(
-            id=batch_id,
-            action_id=action.id,
-            action_version_id=getattr(action, "published_version_id", None),
-            client_group=str(client_group or "") or None,
-            status=BATCH_STATUS_QUEUED,
-            delay_seconds=max(0, float(delay_between_rows_seconds)),
-            total_items=len(batch["rows"]),
-            created_by=str(requested_by or "") or None,
-            idempotency_key=normalized_key,
-            metadata_json={"source": source, "action_key": action.key, "client_ids": batch["client_ids"]},
-        )
-        session.add(db_batch)
-        session.flush()
-        for row in batch["rows"]:
-            position = int(row["index"])
-            client_id = str(row.get("client_id") or "") or None
-            item = BatchItem(
-                id=_item_id(batch_id, position),
-                batch_id=batch_id,
-                client_id=client_id if client_id and session.get(DbClient, client_id) is not None else None,
-                position=position,
-                status=ITEM_STATUS_PENDING,
-                input_variables=row["variables"],
-                result_data={},
-                error_data={},
+    try:
+        with SessionLocal.begin() as session:
+            db_batch = DbBatch(
+                id=batch_id,
+                action_id=action.id,
+                action_version_id=getattr(action, "published_version_id", None),
+                client_group=str(client_group or "") or None,
+                status=BATCH_STATUS_QUEUED,
+                delay_seconds=max(0, float(delay_between_rows_seconds)),
+                total_items=len(batch["rows"]),
+                created_by=str(requested_by or "") or None,
+                idempotency_key=normalized_key,
+                idempotency_user_id=normalized_user_id if normalized_key else None,
+                idempotency_operation=operation if normalized_key else None,
+                idempotency_fingerprint=fingerprint if normalized_key else None,
+                metadata_json={"source": source, "action_key": action.key, "client_ids": batch["client_ids"]},
             )
-            session.add(item)
+            session.add(db_batch)
+            session.flush()
+            for row in batch["rows"]:
+                position = int(row["index"])
+                client_id = str(row.get("client_id") or "") or None
+                item = BatchItem(
+                    id=_item_id(batch_id, position),
+                    batch_id=batch_id,
+                    client_id=client_id if client_id and session.get(DbClient, client_id) is not None else None,
+                    position=position,
+                    status=ITEM_STATUS_PENDING,
+                    input_variables=row["variables"],
+                    result_data={},
+                    error_data={},
+                )
+                session.add(item)
+    except IntegrityError as exc:
+        if normalized_key:
+            existing = _load_existing_idempotent_batch(
+                user_id=normalized_user_id,
+                operation=operation,
+                key=normalized_key,
+                fingerprint=fingerprint,
+            )
+            if existing is not None:
+                return existing
+        raise BatchRunnerError("Falha de idempotencia ao criar batch.") from exc
     loaded = load_batch(batch_id)
     if loaded is None:
         return batch
