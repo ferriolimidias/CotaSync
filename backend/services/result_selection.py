@@ -10,6 +10,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 from urllib.parse import urlsplit
+from backend.db import Action as DbAction, ActionVersion, SessionLocal
 
 from backend.services.actions_repository import default_ui_map_path
 from backend.services.extraction_targets import normalize_label_key
@@ -43,6 +44,10 @@ TECHNICAL_DOM_PATTERNS = (
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _use_legacy_json(path: Path | None) -> bool:
+    return path is not None or os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}
 
 
 def clean_text(value: Any) -> str:
@@ -410,6 +415,25 @@ def extract_with_contract(final_page_dom: Any, final_page_text: Any, contract: d
 
 
 def save_visual_extraction_contract(action_key: str, contract: dict[str, Any], *, path: Path | None = None) -> dict[str, Any]:
+    if not _use_legacy_json(path):
+        with SessionLocal.begin() as session:
+            action = session.query(DbAction).filter(DbAction.key == action_key).first()
+            version = session.get(ActionVersion, action.published_version_id) if action and action.published_version_id else None
+            if version is None:
+                raise RuntimeError("Acao publicada nao encontrada no PostgreSQL.")
+            raw = dict(version.definition or {})
+            overlay = dict(raw.get("reviewed_overlay") or {})
+            overlay["review_status"] = "needs_attention" if contract.get("needs_attention") else "approved"
+            overlay["reviewed_at"] = utc_now_iso()
+            overlay["extraction"] = contract
+            overlay["summary_instruction"] = contract.get("summary_instruction") or build_summary_instruction(contract)
+            raw["reviewed_overlay"] = overlay
+            raw["extraction_review"] = contract
+            raw["final_summary_instruction"] = overlay["summary_instruction"]
+            raw["review_status"] = overlay["review_status"]
+            raw["ai_review_summary"] = "Contrato visual de extração salvo pelo operador."
+            version.definition = raw
+            return raw
     ui_map_path = path or default_ui_map_path()
     if ui_map_path.is_file():
         payload = json.loads(ui_map_path.read_text(encoding="utf-8"))

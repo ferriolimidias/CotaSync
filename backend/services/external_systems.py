@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 from urllib.parse import urlsplit
+from backend.db import ExternalSystem, SessionLocal
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +33,29 @@ MICROSOFT_HOST_SUFFIXES = (
 
 class ExternalSystemConfigError(RuntimeError):
     """Erro seguro de validacao ou persistencia da configuracao externa."""
+
+
+def _use_legacy_json() -> bool:
+    return os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _load_current_json() -> dict[str, Any]:
+    if not CURRENT_EXTERNAL_SYSTEM_PATH.exists():
+        return empty_external_system()
+    try:
+        payload = json.loads(CURRENT_EXTERNAL_SYSTEM_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return empty_external_system()
+    return payload if isinstance(payload, dict) else empty_external_system()
+
+
+def _save_current_json(payload: dict[str, Any]) -> None:
+    CURRENT_EXTERNAL_SYSTEM_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile("w", encoding="utf-8", dir=CURRENT_EXTERNAL_SYSTEM_PATH.parent, delete=False) as tmp:
+        json.dump(payload, tmp, ensure_ascii=False, indent=2)
+        tmp.write("\n")
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, CURRENT_EXTERNAL_SYSTEM_PATH)
 
 
 def empty_external_system() -> dict[str, Any]:
@@ -110,35 +134,33 @@ def _normalize_access_profile_fields(result: dict[str, Any]) -> None:
 
 
 def load_current_external_system() -> dict[str, Any]:
-    if not CURRENT_EXTERNAL_SYSTEM_PATH.is_file():
-        return empty_external_system()
-    try:
-        payload = json.loads(CURRENT_EXTERNAL_SYSTEM_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ExternalSystemConfigError("Nao foi possivel ler a configuracao do sistema externo.") from exc
-    if not isinstance(payload, dict):
-        raise ExternalSystemConfigError("Configuracao do sistema externo em formato invalido.")
-    result = empty_external_system()
-    for key in _string_keys():
-        if key == "external_login_url":
+    if _use_legacy_json():
+        payload = _load_current_json()
+        result = empty_external_system()
+        for key in _string_keys():
             result[key] = str(payload.get(key) or "")
-        else:
-            result[key] = str(payload.get(key) or "").strip()
-    result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
-    _normalize_access_profile_fields(result)
-    if not result["microsoft_saved_account_identifier"]:
-        result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]
-    if not result["access_profile_email_or_identifier"]:
-        result["access_profile_email_or_identifier"] = result["microsoft_saved_account_identifier"]
-    for key, value in DEFAULT_ACCESS_PROFILE.items():
-        if key == "microsoft_hosts":
-            continue
-        if not result.get(key):
-            result[key] = str(value)
-    if result["external_login_url"]:
-        result["validation"] = _validation_mode(result)
-    result["updated_at"] = payload.get("updated_at")
-    return result
+        result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
+        result["updated_at"] = payload.get("updated_at")
+        _normalize_access_profile_fields(result)
+        return result
+    try:
+        with SessionLocal() as session:
+            row = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
+            if row is not None:
+                payload = dict(row.config or {})
+                result = empty_external_system()
+                for key in _string_keys():
+                    result[key] = str(payload.get(key) or "")
+                result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
+                _normalize_access_profile_fields(result)
+                for key, value in DEFAULT_ACCESS_PROFILE.items():
+                    if key != "microsoft_hosts" and not result.get(key):
+                        result[key] = str(value)
+                result["updated_at"] = payload.get("updated_at")
+                return result
+    except Exception:
+        pass
+    return empty_external_system()
 
 
 def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
@@ -178,22 +200,19 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
         raise ExternalSystemConfigError("Informe a URL de login para usar a validacao de autenticacao.")
 
     result["updated_at"] = datetime.now(UTC).isoformat()
-    CURRENT_EXTERNAL_SYSTEM_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path: Path | None = None
-    try:
-        with NamedTemporaryFile(
-            "w", encoding="utf-8", dir=CURRENT_EXTERNAL_SYSTEM_PATH.parent, delete=False
-        ) as tmp:
-            json.dump(result, tmp, ensure_ascii=False, indent=2)
-            tmp.write("\n")
-            tmp_path = Path(tmp.name)
-        os.replace(tmp_path, CURRENT_EXTERNAL_SYSTEM_PATH)
-        tmp_path = None
-    except OSError as exc:
-        raise ExternalSystemConfigError("Nao foi possivel salvar a configuracao do sistema externo.") from exc
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+    if _use_legacy_json():
+        _save_current_json(result)
+        return result
+    with SessionLocal.begin() as session:
+        row = session.query(ExternalSystem).filter(ExternalSystem.name == (result["external_system_name"] or "default")).first()
+        if row is None:
+            row = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
+        if row is None:
+            row = ExternalSystem(id=str(__import__("uuid").uuid4()), name=result["external_system_name"] or "default", config=result)
+            session.add(row)
+        else:
+            row.name = result["external_system_name"] or row.name
+            row.config = result
     return result
 
 

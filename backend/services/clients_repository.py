@@ -10,6 +10,8 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 from uuid import uuid4
 
+from backend.db import Client as DbClient, SessionLocal
+
 from backend.services.actions_repository import project_root
 
 CLIENT_TEMPLATE_COLUMNS = ["id", "name", "group", "active", "grupo", "cota", "versao", "notes"]
@@ -160,7 +162,29 @@ def _normalize_client(raw: dict[str, Any], existing: dict[str, Any] | None = Non
     }
 
 
+def _db_client_dict(client: DbClient) -> dict[str, Any]:
+    variables = normalize_client_variables(client.variables or {})
+    return {
+        "id": client.id,
+        "name": client.name,
+        "active": client.active,
+        "group": client.client_group,
+        "notes": client.notes or "",
+        "created_at": client.created_at.isoformat() if client.created_at else utc_now_iso(),
+        "updated_at": client.updated_at.isoformat() if client.updated_at else utc_now_iso(),
+        "variables": variables,
+        "display_variables": get_client_display_fields({"variables": variables}),
+    }
+
+
+def _db_clients() -> list[dict[str, Any]]:
+    with SessionLocal() as session:
+        return [_db_client_dict(item) for item in session.query(DbClient).all()]
+
+
 def load_clients(path: Path | None = None) -> list[dict[str, Any]]:
+    if path is None:
+        return _db_clients()
     payload = _load_payload(path or default_clients_path())
     clients: list[dict[str, Any]] = []
     for raw in payload["clients"]:
@@ -170,6 +194,23 @@ def load_clients(path: Path | None = None) -> list[dict[str, Any]]:
 
 
 def save_clients(clients: list[dict[str, Any]], path: Path | None = None) -> None:
+    if path is None:
+        with SessionLocal.begin() as session:
+            for raw in clients:
+                normalized = _normalize_client(raw, raw)
+                client = session.get(DbClient, normalized["id"])
+                if client is None:
+                    client = DbClient(id=normalized["id"], name=normalized["name"], client_group=normalized["group"])
+                    session.add(client)
+                client.name = normalized["name"]
+                client.client_group = normalized["group"]
+                client.active = normalized["active"]
+                client.notes = normalized["notes"]
+                client.variables = normalized["variables"]
+                client.grupo = normalized["display_variables"]["grupo"]
+                client.cota = normalized["display_variables"]["cota"]
+                client.versao = normalized["display_variables"]["versao"]
+        return
     _write_payload(path or default_clients_path(), {"clients": clients})
 
 
@@ -197,6 +238,13 @@ def get_client(client_id: str, path: Path | None = None) -> dict[str, Any] | Non
 
 
 def create_client(data: dict[str, Any], path: Path | None = None) -> dict[str, Any]:
+    if path is None:
+        client = _normalize_client(data)
+        with SessionLocal.begin() as session:
+            if session.get(DbClient, client["id"]) is not None:
+                raise ClientsRepositoryError("Cliente ja existe.")
+            session.add(DbClient(id=client["id"], name=client["name"], client_group=client["group"], active=client["active"], variables=client["variables"], notes=client["notes"], grupo=client["display_variables"]["grupo"], cota=client["display_variables"]["cota"], versao=client["display_variables"]["versao"]))
+        return client
     clients = load_clients(path)
     client = _normalize_client(data)
     clients.append(client)
@@ -205,6 +253,17 @@ def create_client(data: dict[str, Any], path: Path | None = None) -> dict[str, A
 
 
 def update_client(client_id: str, data: dict[str, Any], path: Path | None = None) -> dict[str, Any]:
+    if path is None:
+        with SessionLocal.begin() as session:
+            db_client = session.get(DbClient, str(client_id))
+            if db_client is None:
+                raise ClientsRepositoryError("Cliente nao encontrado.")
+            current = _db_client_dict(db_client)
+            client = _normalize_client({**data, "id": str(client_id)}, current)
+            db_client.name, db_client.client_group = client["name"], client["group"]
+            db_client.active, db_client.notes, db_client.variables = client["active"], client["notes"], client["variables"]
+            db_client.grupo, db_client.cota, db_client.versao = client["display_variables"]["grupo"], client["display_variables"]["cota"], client["display_variables"]["versao"]
+        return client
     clients = load_clients(path)
     wanted = str(client_id or "").strip()
     for index, existing in enumerate(clients):
@@ -220,6 +279,13 @@ def deactivate_client(client_id: str, path: Path | None = None) -> dict[str, Any
 
 
 def delete_client(client_id: str, path: Path | None = None) -> None:
+    if path is None:
+        with SessionLocal.begin() as session:
+            db_client = session.get(DbClient, str(client_id))
+            if db_client is None:
+                raise ClientsRepositoryError("Cliente nao encontrado.")
+            session.delete(db_client)
+        return
     clients = load_clients(path)
     remaining = [client for client in clients if str(client.get("id") or "") != str(client_id or "").strip()]
     if len(remaining) == len(clients):

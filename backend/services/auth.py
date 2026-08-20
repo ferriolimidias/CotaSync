@@ -13,6 +13,9 @@ from typing import Any, Literal
 
 from fastapi import HTTPException, Request, Response, status
 
+from backend.db import SessionLocal, User
+from sqlalchemy import select
+
 Role = Literal["admin", "operator"]
 
 SESSION_COOKIE = os.getenv("COTASYNC_SESSION_COOKIE", "cotasync_session")
@@ -81,8 +84,32 @@ def _configured_users() -> dict[str, tuple[Role, str]]:
 
 
 def authenticate(username: str, password: str) -> AuthUser | None:
+    wanted = str(username or "").strip()
+    if os.getenv("COTASYNC_DISABLE_DB_AUTH", "").strip().lower() in {"1", "true", "yes"}:
+        configured = _configured_users()
+        role_and_hash = configured.get(wanted)
+        if not role_and_hash or not verify_password(password, role_and_hash[1]):
+            return None
+        return AuthUser(username=wanted, role=role_and_hash[0])
+    try:
+        with SessionLocal.begin() as session:
+            db_user = session.scalar(select(User).where(User.username == wanted))
+            if db_user is not None:
+                if not db_user.active or not verify_password(password, db_user.password_hash):
+                    return None
+                db_user.last_login_at = datetime.now(UTC)
+                return AuthUser(username=db_user.username, role=db_user.role)  # type: ignore[arg-type]
+            if session.scalar(select(User.id).limit(1)) is None:
+                configured = _configured_users()
+                configured_user = configured.get(wanted)
+                if configured_user and verify_password(password, configured_user[1]):
+                    role, stored_hash = configured_user
+                    session.add(User(id=secrets.token_urlsafe(16), username=wanted, role=role, password_hash=stored_hash, active=True))
+                    return AuthUser(username=wanted, role=role)
+    except Exception:
+        logger.debug("PostgreSQL auth indisponivel; usando configuracao de ambiente.", exc_info=True)
     configured = _configured_users()
-    role_and_hash = configured.get(str(username or "").strip())
+    role_and_hash = configured.get(wanted)
     if not role_and_hash:
         return None
     role, stored_hash = role_and_hash
@@ -170,6 +197,13 @@ def user_from_request(request: Request) -> AuthUser | None:
     token = request.cookies.get(SESSION_COOKIE)
     user = parse_session_token(token or "")
     if user is not None:
+        try:
+            with SessionLocal() as session:
+                db_user = session.scalar(select(User).where(User.username == user.username))
+                if db_user is not None and (not db_user.active or db_user.role != user.role):
+                    return None
+        except Exception:
+            logger.debug("Nao foi possivel validar a sessao no PostgreSQL.", exc_info=True)
         request.state.auth_user = user
     return user
 

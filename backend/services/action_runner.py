@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import json
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -10,6 +9,7 @@ from uuid import uuid4
 
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
+from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.action_pages import expected_action_hosts, validate_action_page_url
 from backend.services.actions_repository import default_ui_map_path, enrich_action_access_profile
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
@@ -241,13 +241,28 @@ def _is_desktop_learned_action(action: ActionDetail) -> bool:
 
 
 def _load_action_config(action: ActionDetail) -> dict[str, Any]:
+    if __import__("os").getenv("COTASYNC_TEST_LEGACY_JSON") == "1":
+        import json
+        try:
+            payload = json.loads(default_ui_map_path().read_text(encoding="utf-8"))
+            raw = (payload.get("acoes_conhecidas") or {}).get(action.key)
+            return enrich_action_access_profile(raw) if isinstance(raw, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
     try:
-        payload = json.loads(default_ui_map_path().read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        with SessionLocal() as session:
+            db_action = session.query(DbAction).filter(DbAction.id == action.id).first()
+            if db_action is not None and db_action.published_version_id:
+                version = session.get(ActionVersion, db_action.published_version_id)
+                if version is not None:
+                    raw = dict(version.definition or {})
+                    raw.setdefault("nome_amigavel", db_action.name)
+                    raw.setdefault("descricao", db_action.description)
+                    return enrich_action_access_profile(raw)
+    except Exception:
+        logger.exception("Falha ao carregar acao publicada do PostgreSQL.")
         return {}
-    actions = payload.get("acoes_conhecidas") if isinstance(payload, dict) else {}
-    raw = actions.get(action.key) if isinstance(actions, dict) else None
-    return enrich_action_access_profile(raw) if isinstance(raw, dict) else {}
+    return {}
 
 
 def _action_steps(action_config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -264,7 +279,7 @@ async def _run_desktop_browser_replay(
 
     action_config = _load_action_config(action)
     if not action_config:
-        raise RuntimeError("Acao aprendida desktop_browser nao encontrada em data/ui_map.json.")
+        raise RuntimeError("Acao publicada nao encontrada no PostgreSQL.")
     action_config["browser_mode"] = "desktop_browser"
     steps = _action_steps(action_config)
     if not steps:

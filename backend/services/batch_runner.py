@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.schemas.runs import ActionRunRequest, RunRecord
+from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, SessionLocal
 from backend.services.action_runner import missing_required_variables, run_action_sync
 from backend.services.actions_repository import find_action, project_root
 from backend.services.clients_repository import validate_clients_for_action
@@ -36,6 +37,15 @@ class BatchRunnerError(Exception):
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+def _parse_batch_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def default_batches_dir() -> Path:
@@ -141,6 +151,39 @@ def _rows_from_clients(
 
 
 def _write_batch(batch: dict[str, Any], batches_dir: Path | None = None) -> dict[str, Any]:
+    if batches_dir is None:
+        with SessionLocal.begin() as session:
+            action = session.get(DbAction, str(batch.get("action_id") or ""))
+            db_batch = session.get(DbBatch, str(batch["batch_id"]))
+            rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
+            if db_batch is None:
+                db_batch = DbBatch(id=str(batch["batch_id"]), action_id=action.id if action else None, client_group=str(batch.get("client_group") or "") or None, status=str(batch.get("status") or "pending"), delay_seconds=float(batch.get("delay_between_rows_seconds") or 0), total_items=len(rows), created_by=str(batch.get("requested_by") or "") or None, metadata_json={"source": batch.get("source"), "action_key": batch.get("action_key")})
+                session.add(db_batch)
+            db_batch.status = str(batch.get("status") or db_batch.status)
+            db_batch.cancel_requested = bool(batch.get("cancel_requested", False))
+            db_batch.started_at = _parse_batch_dt(batch.get("started_at"))
+            db_batch.finished_at = _parse_batch_dt(batch.get("finished_at"))
+            db_batch.processed_items = sum(1 for row in rows if isinstance(row, dict) and row.get("status") in {"success", "error"})
+            db_batch.success_items = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "success")
+            db_batch.error_items = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "error")
+            session.flush()
+            for index, row in enumerate(rows, start=1):
+                if not isinstance(row, dict):
+                    continue
+                item_id = f"{db_batch.id}-item-{index-1}"
+                item = session.get(BatchItem, item_id)
+                if item is None:
+                    item = BatchItem(id=item_id, batch_id=db_batch.id, position=index)
+                    session.add(item)
+                item.client_id = str(row.get("client_id") or "") or None
+                item.status = str(row.get("status") or "pending")
+                item.run_id = str(row.get("run_id") or "") or None
+                item.input_variables = _prepared_variables(row)
+                item.result_data = row.get("result_payload") if isinstance(row.get("result_payload"), dict) else {}
+                item.error_data = {"message": row.get("error_message")} if row.get("error_message") else {}
+                item.started_at = _parse_batch_dt(row.get("started_at"))
+                item.finished_at = _parse_batch_dt(row.get("finished_at"))
+        return batch
     path = _batch_path(str(batch["batch_id"]), batches_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -155,6 +198,13 @@ def _write_batch(batch: dict[str, Any], batches_dir: Path | None = None) -> dict
 
 
 def load_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, Any] | None:
+    if batches_dir is None:
+        with SessionLocal() as session:
+            db_batch = session.get(DbBatch, str(batch_id))
+            if db_batch is None:
+                return None
+            items = session.query(BatchItem).filter(BatchItem.batch_id == db_batch.id).order_by(BatchItem.position).all()
+            return {"batch_id": db_batch.id, "action_id": db_batch.action_id or "", "status": db_batch.status, "requested_by": db_batch.created_by or "api", "client_group": db_batch.client_group or "", "delay_between_rows_seconds": db_batch.delay_seconds, "created_at": db_batch.created_at.isoformat() if db_batch.created_at else None, "started_at": db_batch.started_at.isoformat() if db_batch.started_at else None, "finished_at": db_batch.finished_at.isoformat() if db_batch.finished_at else None, "cancel_requested": db_batch.cancel_requested, "rows": [{"index": item.position, "client_id": item.client_id or "", "status": item.status, "run_id": item.run_id or "", "variables": item.input_variables or {}, "result_payload": item.result_data or {}, "error_message": (item.error_data or {}).get("message", ""), "started_at": item.started_at.isoformat() if item.started_at else None, "finished_at": item.finished_at.isoformat() if item.finished_at else None} for item in items]}
     path = _batch_path(batch_id, batches_dir)
     if not path.exists():
         return None
@@ -168,6 +218,10 @@ def load_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, Any]
 
 
 def list_batches(*, limit: int = 20, batches_dir: Path | None = None) -> list[dict[str, Any]]:
+    if batches_dir is None:
+        with SessionLocal() as session:
+            rows = session.query(DbBatch).order_by(DbBatch.created_at.desc()).limit(max(0, min(int(limit), 200))).all()
+            return [load_batch(row.id, None) for row in rows if load_batch(row.id, None) is not None]
     root = batches_dir or default_batches_dir()
     if not root.exists():
         return []

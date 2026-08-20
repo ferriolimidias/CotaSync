@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
+from backend.db import DesktopViewToken as DbDesktopViewToken, SessionLocal
 
 
 DEFAULT_TOKEN_TTL_SECONDS = 1800
@@ -98,6 +99,12 @@ def _parse_expiry(record: Any) -> datetime | None:
 
 def cleanup_expired_tokens(*, now: datetime | None = None) -> int:
     current = (now or _utc_now()).astimezone(timezone.utc)
+    if os.getenv("COTASYNC_TEST_LEGACY_JSON") != "1":
+        with SessionLocal.begin() as session:
+            rows = session.query(DbDesktopViewToken).filter(DbDesktopViewToken.expires_at <= current).all()
+            for row in rows:
+                session.delete(row)
+            return len(rows)
     path = token_store_path()
     with _LOCK:
         payload = _load_store(path)
@@ -118,6 +125,11 @@ def create_token(ttl_seconds: int | None = None, *, now: datetime | None = None)
     expires_at = current + timedelta(seconds=ttl)
     token = secrets.token_urlsafe(32)
     digest = _token_digest(token)
+    if os.getenv("COTASYNC_TEST_LEGACY_JSON") != "1":
+        with SessionLocal.begin() as session:
+            session.query(DbDesktopViewToken).filter(DbDesktopViewToken.expires_at <= current).delete()
+            session.add(DbDesktopViewToken(digest=digest, purpose=TOKEN_PURPOSE, created_at=current, expires_at=expires_at))
+        return DesktopViewToken(token=token, expires_at=expires_at, ttl_seconds=ttl)
     path = token_store_path()
 
     with _LOCK:
@@ -141,6 +153,15 @@ def validate_token(token: str | None, *, now: datetime | None = None) -> bool:
         return False
     current = (now or _utc_now()).astimezone(timezone.utc)
     digest = _token_digest(candidate)
+    if os.getenv("COTASYNC_TEST_LEGACY_JSON") != "1":
+        with SessionLocal.begin() as session:
+            row = session.get(DbDesktopViewToken, digest)
+            if row is None:
+                return False
+            valid = row.purpose == TOKEN_PURPOSE and row.expires_at > current
+            if not valid:
+                session.delete(row)
+            return valid
     path = token_store_path()
     with _LOCK:
         payload = _load_store(path)

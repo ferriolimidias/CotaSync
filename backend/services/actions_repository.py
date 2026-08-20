@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
+from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.action_pages import url_host
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
 
@@ -328,6 +330,19 @@ def _load_ui_map(path: Path) -> tuple[dict[str, Any], bool, str | None]:
 
 
 def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
+    if path is None and os.getenv("COTASYNC_TEST_LEGACY_JSON") != "1":
+        with SessionLocal() as session:
+            rows = session.query(DbAction, ActionVersion).join(
+                ActionVersion, ActionVersion.id == DbAction.published_version_id
+            ).order_by(DbAction.name).all()
+            actions: list[ActionDetail] = []
+            used_ids: set[str] = set()
+            for db_action, version in rows:
+                raw = dict(version.definition or {})
+                raw.setdefault("nome_amigavel", db_action.name)
+                raw.setdefault("descricao", db_action.description)
+                actions.append(_normalize_action(db_action.key, raw, used_ids))
+            return ActionsCatalog(actions=actions, exists=True, warning=None)
     ui_map_path = path or default_ui_map_path()
     payload, exists, warning = _load_ui_map(ui_map_path)
     raw_actions = payload.get("acoes_conhecidas", {})

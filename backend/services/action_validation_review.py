@@ -11,6 +11,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 
 from langchain_openai import ChatOpenAI
+from backend.db import Action as DbAction, ActionVersion, SessionLocal
 
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
@@ -35,6 +36,10 @@ _MAX_FINAL_DOM_CHARS = 30000
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _use_legacy_json(path: Path | None) -> bool:
+    return path is not None or os.getenv("COTASYNC_TEST_LEGACY_JSON", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _load_ui_map(path: Path | None = None) -> dict[str, Any]:
@@ -360,6 +365,23 @@ def _save_review_overlay(
     extraction_candidates: list[dict[str, Any]] | None = None,
     path: Path | None = None,
 ) -> None:
+    if not _use_legacy_json(path):
+        with SessionLocal.begin() as session:
+            db_action = session.query(DbAction).filter(DbAction.key == action.key).first()
+            version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+            if version is None:
+                raise RuntimeError("Acao publicada nao encontrada no PostgreSQL.")
+            raw = dict(version.definition or {})
+            raw["review_status"] = str(overlay.get("review_status") or "needs_attention")
+            raw["review_last_run_id"] = run.id
+            raw["reviewed_overlay"] = overlay
+            raw["ai_review_summary"] = ai_review_summary or "Revisao do replay real concluida."
+            raw["final_summary_instruction"] = str(overlay.get("summary_instruction") or "")
+            raw["extraction_review"] = overlay.get("extraction") if isinstance(overlay.get("extraction"), dict) else {}
+            if extraction_candidates is not None:
+                raw["last_validation_extraction_candidates"] = extraction_candidates
+            version.definition = raw
+        return
     payload = _load_ui_map(path)
     actions = payload["acoes_conhecidas"]
     raw = actions.get(action.key)
