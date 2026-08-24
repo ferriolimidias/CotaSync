@@ -3,6 +3,7 @@ import { AppSidebar } from "./AppSidebar";
 import { BadgeStatus } from "./BadgeStatus";
 import { Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/services/auth";
 
 export function AppShell({
   title,
@@ -15,6 +16,7 @@ export function AppShell({
   actions?: React.ReactNode;
   children: React.ReactNode;
 }) {
+  const { user, logout } = useAuth();
   return (
     <SidebarProvider>
       <div className="flex min-h-screen w-full bg-muted/30">
@@ -27,10 +29,15 @@ export function AppShell({
               {subtitle && <p className="truncate text-xs text-muted-foreground">{subtitle}</p>}
             </div>
             <div className="hidden sm:block">
-              <BadgeStatus tone="success">Sessão conectada</BadgeStatus>
+              <BadgeStatus tone="success">
+                {user?.role === "admin" ? "Admin" : "Operador"}
+              </BadgeStatus>
             </div>
             <Button variant="ghost" size="icon" className="h-8 w-8">
               <Bell className="h-4 w-4" />
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void logout()}>
+              Sair
             </Button>
             {actions}
           </header>

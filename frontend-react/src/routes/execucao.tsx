@@ -1,212 +1,309 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+import { Download, Play, StopCircle } from "lucide-react";
+
 import { AppShell } from "@/components/cotasync/AppShell";
-import { StatusCard } from "@/components/cotasync/StatusCard";
-import { DataTable, type Column } from "@/components/cotasync/DataTable";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataTable, type Column } from "@/components/cotasync/DataTable";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { mockClients, mockActions } from "@/lib/mock-data";
 import {
-  Users, CheckCircle2, AlertTriangle, PowerOff, Play, Download, RefreshCcw,
-  StopCircle, Info, ChevronDown, Upload,
-} from "lucide-react";
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  cancelBatch,
+  createBatch,
+  getActions,
+  getBatch,
+  getBatches,
+  getClients,
+} from "@/services/api";
+import type { ApiBatch, ApiClient } from "@/types/api";
 
 export const Route = createFileRoute("/execucao")({
   head: () => ({ meta: [{ title: "Execução em massa — CotaSync" }] }),
   component: ExecucaoPage,
 });
 
-type PreviewRow = {
-  id: string; name: string; grupo: string; cota: string; versao: string;
-  status: "Pronto" | "Incompleto" | "Inativo";
-};
-
-const previewCols: Column<PreviewRow>[] = [
-  { key: "n", header: "Cliente", cell: (r) => <span className="font-medium text-foreground">{r.name}</span> },
-  { key: "g", header: "Grupo", cell: (r) => r.grupo },
-  { key: "c", header: "Cota", cell: (r) => r.cota },
-  { key: "v", header: "Versão", cell: (r) => r.versao },
-  { key: "s", header: "Status", cell: (r) => (
-    <BadgeStatus tone={r.status === "Pronto" ? "success" : r.status === "Incompleto" ? "warning" : "neutral"}>
-      {r.status}
-    </BadgeStatus>
-  )},
-];
-
-type ResultRow = {
-  id: string; name: string; status: "Sucesso" | "Erro" | "Pendente";
-  result: string; runId: string; start: string; end: string; error?: string;
-};
-
-const resultCols: Column<ResultRow>[] = [
-  { key: "n", header: "Cliente", cell: (r) => <span className="font-medium text-foreground">{r.name}</span> },
-  { key: "s", header: "Status", cell: (r) => (
-    <BadgeStatus tone={r.status === "Sucesso" ? "success" : r.status === "Erro" ? "error" : "info"}>{r.status}</BadgeStatus>
-  )},
-  { key: "r", header: "Resultado", cell: (r) => r.result },
-  { key: "id", header: "Run ID", cell: (r) => <span className="font-mono text-xs text-muted-foreground">{r.runId}</span> },
-  { key: "ini", header: "Início", cell: (r) => <span className="text-xs text-muted-foreground">{r.start}</span> },
-  { key: "fim", header: "Fim", cell: (r) => <span className="text-xs text-muted-foreground">{r.end}</span> },
-  { key: "e", header: "Erro", cell: (r) => r.error ? <span className="text-xs text-destructive">{r.error}</span> : "—" },
-];
-
 function ExecucaoPage() {
-  const [advOpen, setAdvOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const actions = useQuery({ queryKey: ["actions"], queryFn: () => getActions({ pageSize: 200 }) });
+  const clients = useQuery({
+    queryKey: ["clients"],
+    queryFn: () => getClients({ pageSize: 200, includeInactive: false }),
+  });
+  const batches = useQuery({
+    queryKey: ["batches"],
+    queryFn: () => getBatches({ pageSize: 10 }),
+    refetchInterval: 3000,
+  });
+  const [actionId, setActionId] = useState("");
+  const [group, setGroup] = useState("");
+  const [delay, setDelay] = useState(3);
+  const [currentBatchId, setCurrentBatchId] = useState<string | null>(null);
+  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  const currentBatch = useQuery({
+    queryKey: ["batch", currentBatchId],
+    queryFn: () => getBatch(currentBatchId as string),
+    enabled: Boolean(currentBatchId),
+    refetchInterval: (query) =>
+      isFinalBatch(query.state.data as ApiBatch | undefined) ? false : 2500,
+  });
 
-  const preview: PreviewRow[] = mockClients.map((c) => ({
-    id: c.id, name: c.name, grupo: c.grupo, cota: c.cota, versao: c.versao,
-    status: !c.active ? "Inativo" : c.grupo && c.cota ? "Pronto" : "Incompleto",
-  }));
+  const groups = useMemo(
+    () =>
+      Array.from(
+        new Set((clients.data?.items ?? []).map((client) => client.group).filter(Boolean)),
+      ).sort(),
+    [clients.data],
+  );
+  const selectedClients = useMemo(
+    () => (clients.data?.items ?? []).filter((client) => !group || client.group === group),
+    [clients.data, group],
+  );
 
-  const results: ResultRow[] = [
-    { id: "1", name: "Cliente Alfa",    status: "Sucesso", result: "038", runId: "run_9f2a", start: "09:15:02", end: "09:15:08" },
-    { id: "2", name: "Cliente Beta",    status: "Sucesso", result: "042", runId: "run_9f2b", start: "09:15:11", end: "09:15:17" },
-    { id: "3", name: "Cliente Gama",    status: "Erro",    result: "—",   runId: "run_9f2c", start: "09:15:20", end: "09:15:26", error: "Campo cota não encontrado" },
-    { id: "4", name: "Cliente Épsilon", status: "Pendente",result: "—",   runId: "run_9f2d", start: "—",        end: "—" },
-  ];
+  const create = useMutation({
+    mutationFn: () =>
+      createBatch({
+        action_id: actionId,
+        client_group: group || undefined,
+        delay_between_rows_seconds: delay,
+        idempotencyKey,
+      }),
+    onSuccess: (batch) => {
+      const id = batch.batch_id || batch.id;
+      if (id) setCurrentBatchId(id);
+      setIdempotencyKey(crypto.randomUUID());
+      toast.success("Execução adicionada à fila.");
+      void queryClient.invalidateQueries({ queryKey: ["batches"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível criar a execução."),
+  });
 
-  const total = preview.length;
-  const done = 2;
-  const progress = Math.round((done / total) * 100);
+  const cancel = useMutation({
+    mutationFn: (id: string) => cancelBatch(id),
+    onSuccess: () => {
+      toast.message(
+        "Cancelamento solicitado. A execução atual será concluída antes de cancelar os próximos clientes.",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["batch", currentBatchId] });
+      void queryClient.invalidateQueries({ queryKey: ["batches"] });
+    },
+  });
+
+  const batch = currentBatch.data || batches.data?.items[0];
+  const batchId = batch?.batch_id || batch?.id || "";
+  const progress = batch?.total_items
+    ? Math.round((batch.processed_items / batch.total_items) * 100)
+    : 0;
 
   return (
-    <AppShell title="Execução em massa" subtitle="Execute uma ação para toda uma lista de clientes">
-      {/* Aviso de fila sequencial */}
-      <div className="mb-4 flex items-start gap-3 rounded-md border border-border bg-muted/30 p-3">
-        <Info className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-        <p className="text-sm text-foreground">
-          <span className="font-medium">Fila sequencial:</span> o CotaSync executa um cliente por vez para operar com segurança no sistema externo.
-        </p>
-      </div>
-
-      {/* Passo 1 + 2 + delay */}
-      <Card className="mb-4">
-        <CardContent className="grid gap-4 p-4 md:grid-cols-3">
-          <div className="grid gap-1.5">
-            <Label className="text-xs">1. Ação</Label>
-            <Select>
-              <SelectTrigger><SelectValue placeholder="Selecione uma ação" /></SelectTrigger>
-              <SelectContent>
-                {mockActions.map((a) => (
-                  <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="grid gap-1.5">
-            <Label className="text-xs">2. Lista/grupo de clientes</Label>
-            <Select>
-              <SelectTrigger><SelectValue placeholder="Selecione uma lista" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="p">Lista Principal</SelectItem>
-                <SelectItem value="v">Lista VIP</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="grid gap-1.5">
-            <Label className="text-xs">Delay entre clientes (segundos)</Label>
-            <Input type="number" min={0} defaultValue={3} />
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Passo 3 — Validação */}
-      <div className="mb-4 grid gap-4 md:grid-cols-3">
-        <StatusCard label="Clientes prontos" value={preview.filter(p => p.status === "Pronto").length} icon={CheckCircle2} tone="success" />
-        <StatusCard label="Clientes incompletos" value={preview.filter(p => p.status === "Incompleto").length} icon={AlertTriangle} tone="warning" />
-        <StatusCard label="Clientes inativos" value={preview.filter(p => p.status === "Inativo").length} icon={PowerOff} />
-      </div>
-
-      <Card className="mb-4">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Prévia da fila</CardTitle>
-          <Button><Play className="h-4 w-4" /> Executar agora</Button>
-        </CardHeader>
-        <CardContent>
-          <DataTable columns={previewCols} data={preview} />
-        </CardContent>
-      </Card>
-
-      {/* Passo 4 — Progresso */}
-      <Card className="mb-4">
-        <CardHeader><CardTitle className="text-base">Execução em andamento</CardTitle></CardHeader>
-        <CardContent className="grid gap-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-            <div className="lg:col-span-2 rounded-md border border-border bg-muted/30 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Cliente atual</p>
-              <p className="mt-1 truncate font-semibold text-foreground">Cliente Gama</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">Linha {done + 1} de {total}</p>
+    <AppShell title="Execução em massa" subtitle="Um cliente por vez, na ordem da fila">
+      <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Nova execução</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-2">
+              <Label>Ação</Label>
+              <Select value={actionId} onValueChange={setActionId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione uma ação" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(actions.data?.items ?? []).map((action) => (
+                    <SelectItem key={action.id} value={action.id}>
+                      {action.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            <div className="rounded-md border border-border bg-card p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Processados</p>
-              <p className="mt-1 text-xl font-semibold text-foreground">{done}</p>
+            <div className="grid gap-2">
+              <Label>Lista/grupo</Label>
+              <Select
+                value={group || "all"}
+                onValueChange={(value) => setGroup(value === "all" ? "" : value)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos os clientes ativos</SelectItem>
+                  {groups.map((item) => (
+                    <SelectItem key={item} value={item}>
+                      {item}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            <div className="rounded-md border border-border bg-card p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Faltam</p>
-              <p className="mt-1 text-xl font-semibold text-foreground">{total - done}</p>
+            <div className="grid gap-2">
+              <Label>Intervalo entre clientes</Label>
+              <Input
+                type="number"
+                min={0}
+                value={delay}
+                onChange={(event) => setDelay(Number(event.target.value || 0))}
+              />
             </div>
-            <div className="rounded-md border border-success/30 bg-success/5 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Sucessos</p>
-              <p className="mt-1 text-xl font-semibold text-success">2</p>
-            </div>
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Erros</p>
-              <p className="mt-1 text-xl font-semibold text-destructive">0</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <BadgeStatus tone="info">Em andamento</BadgeStatus>
-            <span className="text-xs text-muted-foreground">Tempo estimado ~ 00:00:18</span>
-          </div>
-
-          <div>
-            <Progress value={progress} />
-            <p className="mt-1 text-xs text-muted-foreground">{progress}% concluído</p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm"><StopCircle className="h-4 w-4" /> Cancelar depois do cliente atual</Button>
-          </div>
-
-        </CardContent>
-      </Card>
-
-      {/* Passo 5 — Resultados */}
-      <Card className="mb-4">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Resultados</CardTitle>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm"><RefreshCcw className="h-4 w-4" /> Reprocessar erros</Button>
-            <Button size="sm"><Download className="h-4 w-4" /> Baixar CSV final</Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <DataTable columns={resultCols} data={results} />
-        </CardContent>
-      </Card>
-
-      {/* Avançado */}
-      <Collapsible open={advOpen} onOpenChange={setAdvOpen}>
-        <CollapsibleTrigger className="flex w-full items-center justify-between rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted-foreground hover:bg-muted/40">
-          Avançado: executar com CSV avulso
-          <ChevronDown className={`h-4 w-4 transition ${advOpen ? "rotate-180" : ""}`} />
-        </CollapsibleTrigger>
-        <CollapsibleContent className="mt-2">
-          <Card>
-            <CardContent className="flex flex-wrap items-center gap-2 p-4">
-              <p className="flex-1 text-sm text-muted-foreground">
-                Envie um CSV avulso apenas para uma execução pontual. O fluxo recomendado é utilizar a lista de clientes cadastrada.
+            <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+              <p className="font-medium text-foreground">
+                {selectedClients.length} clientes selecionados
               </p>
-              <Button variant="outline" size="sm"><Upload className="h-4 w-4" /> Selecionar CSV</Button>
-            </CardContent>
-          </Card>
-        </CollapsibleContent>
-      </Collapsible>
+              <p className="mt-1 text-xs text-muted-foreground">
+                O sistema processa 1 cliente por vez.
+              </p>
+            </div>
+            <Button
+              className="w-full"
+              disabled={!actionId || selectedClients.length === 0 || create.isPending}
+              onClick={() => create.mutate()}
+            >
+              <Play className="h-4 w-4" /> {create.isPending ? "Enfileirando..." : "Executar agora"}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between">
+            <CardTitle className="text-base">Progresso</CardTitle>
+            {batch && (
+              <BadgeStatus
+                tone={
+                  batch.status === "completed" || batch.status === "success"
+                    ? "success"
+                    : batch.status.includes("error")
+                      ? "error"
+                      : "info"
+                }
+              >
+                {batchStatus(batch.status)}
+              </BadgeStatus>
+            )}
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {!batch ? (
+              <p className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                Nenhuma execução em massa recente.
+              </p>
+            ) : (
+              <>
+                <div className="space-y-2">
+                  <Progress value={progress} />
+                  <div className="grid gap-2 text-sm sm:grid-cols-3">
+                    <Info label="Total" value={batch.total_items} />
+                    <Info label="Processados" value={batch.processed_items} />
+                    <Info label="Sucesso" value={batch.success_items} />
+                    <Info label="Erros" value={batch.error_items} />
+                    <Info label="Interrompidos" value={batch.interrupted_items} />
+                    <Info label="Cancelados" value={batch.cancelled_items} />
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!batchId || isFinalBatch(batch) || cancel.isPending}
+                    onClick={() => cancel.mutate(batchId)}
+                  >
+                    <StopCircle className="h-4 w-4" /> Cancelar execução
+                  </Button>
+                  <Button variant="outline" size="sm" disabled>
+                    <Download className="h-4 w-4" /> Baixar CSV final
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Cancelar execução conclui o cliente atual e cancela os próximos.
+                </p>
+                <DataTable
+                  columns={itemColumns}
+                  data={(batch.items || batch.results || []).map((item, index) => ({
+                    id: item.id || `${index}`,
+                    ...item,
+                  }))}
+                  empty="Resultados aparecerão conforme o worker processar a fila."
+                />
+              </>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </AppShell>
+  );
+}
+
+const itemColumns: Column<{
+  id: string;
+  client_name?: string;
+  client_id?: string;
+  status?: string;
+  result_summary?: string | null;
+  error_message?: string | null;
+}>[] = [
+  { key: "client", header: "Cliente", cell: (item) => item.client_name || item.client_id || "-" },
+  {
+    key: "status",
+    header: "Status",
+    cell: (item) => (
+      <BadgeStatus
+        tone={item.status === "success" ? "success" : item.status === "error" ? "error" : "info"}
+      >
+        {batchStatus(item.status || "queued")}
+      </BadgeStatus>
+    ),
+  },
+  {
+    key: "result",
+    header: "Resultado",
+    cell: (item) => item.result_summary || item.error_message || "-",
+  },
+];
+
+function Info({ label, value }: { label: string; value: number | string }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-lg font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function batchStatus(status: string) {
+  return (
+    (
+      {
+        queued: "Na fila",
+        running: "Executando",
+        cancel_requested: "Cancelamento solicitado",
+        completed: "Concluído",
+        completed_with_errors: "Concluído com erros",
+        cancelled: "Cancelado",
+        interrupted: "Interrompido",
+        error: "Erro",
+        success: "Concluído",
+      } as Record<string, string>
+    )[status] || status
+  );
+}
+
+function isFinalBatch(batch?: ApiBatch) {
+  return Boolean(
+    batch &&
+    ["completed", "completed_with_errors", "cancelled", "interrupted", "error", "success"].includes(
+      batch.status,
+    ),
   );
 }

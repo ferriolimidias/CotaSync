@@ -29,14 +29,12 @@ const nav = [
   { title: "Ações", url: "/acoes", icon: Zap },
   { title: "Ensinar ação", url: "/ensinar-acao", icon: GraduationCap },
   { title: "Execução em massa", url: "/execucao", icon: ListChecks },
-  { title: "Agendamentos", url: "/agendamentos", icon: CalendarClock },
   { title: "Relatórios", url: "/relatorios", icon: FileBarChart2 },
   { title: "Configurações", url: "/configuracoes", icon: Settings },
+  { title: "Agendamentos", url: "/agendamentos", icon: CalendarClock },
 ];
 
-const secondaryNav = [
-  { title: "Diagnóstico técnico", url: "/diagnostico", icon: Stethoscope },
-];
+const secondaryNav = [{ title: "Diagnóstico técnico", url: "/diagnostico", icon: Stethoscope }];
 
 export function AppSidebar() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -62,11 +60,7 @@ export function AppSidebar() {
             <SidebarMenu>
               {nav.map((item) => (
                 <SidebarMenuItem key={item.url}>
-                  <SidebarMenuButton
-                    asChild
-                    isActive={pathname === item.url}
-                    tooltip={item.title}
-                  >
+                  <SidebarMenuButton asChild isActive={pathname === item.url} tooltip={item.title}>
                     <Link to={item.url}>
                       <item.icon className="h-4 w-4" />
                       <span>{item.title}</span>
@@ -104,10 +98,9 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-
       <SidebarFooter className="border-t border-sidebar-border">
         <div className="px-2 py-2 text-[10px] text-sidebar-foreground/60 group-data-[collapsible=icon]:hidden">
-          v0.1 · Front-end mock
+          React · API v1
         </div>
       </SidebarFooter>
     </Sidebar>

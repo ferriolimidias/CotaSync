@@ -12,6 +12,7 @@ from backend.api.demo import GuidedLearningRequest, OperatorInsertActiveRequest,
 from backend.api.desktop_browser import _public_view_url
 from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal
 from backend.services.actions_repository import ActionsRepositoryError, find_action, load_actions_catalog
+from backend.services.action_runner import finish_action_run, missing_required_variables, run_action_sync, start_action_run
 from backend.services.auth import AuthUser, require_admin, require_user
 from backend.services.batch_runner import (
     BatchIdempotencyConflict,
@@ -60,6 +61,14 @@ class BatchCreatePayload(BaseModel):
     client_ids: list[str] = Field(default_factory=list)
     requested_by: str = "api-v1"
     delay_between_rows_seconds: float = 3
+
+
+class ActionRunPayload(BaseModel):
+    variables: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "async"
+    requested_by: str = "api-v1"
+    session_id: str | None = None
+    run_origin: str = "operational"
 
 
 def _error(status_code: int, code: str, message: str) -> HTTPException:
@@ -223,6 +232,27 @@ async def action_versions(action_id: str, _user: AuthUser = Depends(require_user
     return {"status": "ok", "versions": items}
 
 
+@router.post("/actions/{action_id}/run", summary="Executa ação individual")
+async def action_run(action_id: str, payload: ActionRunPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    action = find_action(action_id)
+    if action is None:
+        raise _error(404, "ACTION_NOT_FOUND", "Acao nao encontrada.")
+    missing = missing_required_variables(action, payload.variables)
+    if missing:
+        raise _error(422, "ACTION_VARIABLES_MISSING", f"Variaveis obrigatorias ausentes: {', '.join(missing)}.")
+    try:
+        if payload.mode == "async":
+            run = start_action_run(action, payload)  # type: ignore[arg-type]
+            import asyncio
+
+            asyncio.create_task(finish_action_run(action, payload, run))  # type: ignore[arg-type]
+        else:
+            run = await run_action_sync(action, payload)  # type: ignore[arg-type]
+    except RunsRepositoryError as exc:
+        raise _error(500, "RUN_UNAVAILABLE", str(exc)) from exc
+    return {"status": "ok", "run": run.model_dump()}
+
+
 @router.get("/learning/capabilities", summary="Capacidades de aprendizado")
 async def learning_capabilities(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     return {
@@ -308,6 +338,8 @@ async def learning_insert_active(session_id: str, payload: OperatorInsertActiveR
     if payload.sensitive and isinstance(result, dict):
         result.pop("value", None)
         result.pop("text", None)
+    if payload.variable_key and isinstance(result, dict):
+        result["variable_key"] = str(payload.variable_key)
     return {"status": "ok", "operator": result}
 
 

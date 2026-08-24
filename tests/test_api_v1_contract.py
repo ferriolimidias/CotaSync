@@ -3,7 +3,8 @@ from __future__ import annotations
 import tests  # noqa: F401
 
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -79,6 +80,42 @@ class ApiV1ContractTests(unittest.TestCase):
             batch_id = first.json()["batch"]["batch_id"]
             self.assertEqual(client.get(f"/api/v1/batches/{batch_id}").status_code, 200)
             self.assertEqual(client.get(f"/api/v1/batches/{batch_id}/results").status_code, 200)
+
+    def test_action_run_v1_contract(self) -> None:
+        fake_run = {
+            "id": "run-v1",
+            "action_id": "numero-de-parcelas-pagas",
+            "action_key": "numero-de-parcelas-pagas",
+            "status": "pending",
+            "mode": "async",
+            "run_type": "action_run",
+            "run_origin": "operational",
+            "requested_by": "react",
+            "session_id": None,
+            "created_at": "2026-08-24T00:00:00+00:00",
+            "started_at": None,
+            "finished_at": None,
+            "variables": {"grupo": "935", "cota": "110", "versao": "00"},
+            "result_summary": None,
+            "operational_summary": None,
+            "technical_summary": None,
+            "result_payload": None,
+            "ai_summary_used": False,
+            "summary_source": None,
+            "summary_reason": None,
+            "error_message": None,
+        }
+        with authenticated_client("operator") as client, patch("backend.api.v1.find_action", return_value=fake_action()), patch(
+            "backend.api.v1.missing_required_variables",
+            return_value=[],
+        ), patch("backend.api.v1.run_action_sync", new_callable=AsyncMock) as run_action:
+            run_action.return_value = SimpleNamespace(model_dump=lambda: fake_run)
+            response = client.post(
+                "/api/v1/actions/numero-de-parcelas-pagas/run",
+                json={"variables": fake_run["variables"], "mode": "sync", "requested_by": "react"},
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["run"]["id"], "run-v1")
 
     def test_diagnostics_requires_admin(self) -> None:
         fake_health = {"cdp_reachable": True}

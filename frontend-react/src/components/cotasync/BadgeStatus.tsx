@@ -27,13 +27,15 @@ export function BadgeStatus({
         className,
       )}
     >
-      <span className={cn("h-1.5 w-1.5 rounded-full", {
-        "bg-success": tone === "success",
-        "bg-destructive": tone === "error",
-        "bg-warning": tone === "warning",
-        "bg-primary": tone === "info",
-        "bg-muted-foreground": tone === "neutral",
-      })} />
+      <span
+        className={cn("h-1.5 w-1.5 rounded-full", {
+          "bg-success": tone === "success",
+          "bg-destructive": tone === "error",
+          "bg-warning": tone === "warning",
+          "bg-primary": tone === "info",
+          "bg-muted-foreground": tone === "neutral",
+        })}
+      />
       {children}
     </span>
   );

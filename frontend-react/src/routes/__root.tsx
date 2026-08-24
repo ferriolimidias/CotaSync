@@ -8,6 +8,9 @@ import {
   Scripts,
 } from "@tanstack/react-router";
 import { useEffect, type ReactNode } from "react";
+import { Toaster } from "@/components/ui/sonner";
+import { LoginScreen } from "@/components/cotasync/LoginScreen";
+import { AuthProvider, useAuth } from "@/services/auth";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
@@ -78,10 +81,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "CotaSync — Automação inteligente para consultas" },
-      { name: "description", content: "Painel operacional do CotaSync: cadastre clientes, ensine ações e execute consultas em sistemas externos sem API." },
+      {
+        name: "description",
+        content:
+          "Painel operacional do CotaSync: cadastre clientes, ensine ações e execute consultas em sistemas externos sem API.",
+      },
       { name: "author", content: "CotaSync" },
       { property: "og:title", content: "CotaSync — Automação inteligente" },
-      { property: "og:description", content: "Automação inteligente para consultas em sistemas sem API." },
+      {
+        property: "og:description",
+        content: "Automação inteligente para consultas em sistemas sem API.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
@@ -118,8 +128,23 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      <AuthProvider>
+        <AuthGate />
+        <Toaster richColors closeButton />
+      </AuthProvider>
     </QueryClientProvider>
   );
+}
+
+function AuthGate() {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-muted/30 text-sm text-muted-foreground">
+        Carregando sessão...
+      </div>
+    );
+  }
+  if (!user) return <LoginScreen />;
+  return <Outlet />;
 }

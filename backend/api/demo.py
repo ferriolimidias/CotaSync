@@ -55,6 +55,7 @@ class OperatorFillRequest(BaseModel):
 class OperatorInsertActiveRequest(BaseModel):
     value: str = ""
     sensitive: bool = False
+    variable_key: str | None = None
 
 
 class OperatorPressRequest(BaseModel):

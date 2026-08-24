@@ -1,205 +1,436 @@
-// CotaSync API — mocked layer.
-// All functions return realistic mocked data with the same shape the future
-// REST backend will use. Swap the bodies for real `fetch()` calls without
-// changing any component. Base URL is read from Vite env when available.
+import type {
+  ApiAction,
+  ApiActionVersion,
+  ApiBatch,
+  ApiClient,
+  ApiPage,
+  ApiRun,
+  ApiUser,
+  BrowserStatus,
+  DashboardPayload,
+  DiagnosticsPayload,
+  ExternalSessionStatus,
+  LearningSession,
+  WorkerStatus,
+} from "@/types/api";
 
-import {
-  mockActions, mockClients, mockExecutions, mockSchedules,
-  type ActionRow, type ClientRow, type ExecutionRow, type ScheduleRow,
-} from "@/lib/mock-data";
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+const DEFAULT_TIMEOUT_MS = 20_000;
 
-const BASE_URL =
-  (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_COTASYNC_API) || "";
+let csrfToken: string | null = null;
 
-const delay = <T,>(data: T, ms = 250): Promise<T> =>
-  new Promise((r) => setTimeout(() => r(data), ms));
+export class ApiError extends Error {
+  status: number;
+  code: string;
 
-/** Real HTTP helper for the future — currently unused by mocks. */
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-    ...init,
-  });
-  if (!res.ok) throw new Error(`API ${res.status} ${res.statusText}`);
-  return res.json();
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
 }
-void http;
 
-/* ------------------------------ Dashboard ------------------------------ */
-export type DashboardData = {
-  session: "connected" | "disconnected";
-  activeClients: number;
-  readyActions: number;
-  executionsToday: number;
-  lastExecution: { status: "success" | "error"; at: string };
-  nextSchedule: { name: string; at: string } | null;
-  queue: "idle" | "running";
-  recent: ExecutionRow[];
-  alerts: { tone: "warning" | "info" | "error"; title: string; desc: string }[];
-};
+export function setCsrfToken(token: string | null) {
+  csrfToken = token;
+}
 
-export const getDashboard = (): Promise<DashboardData> =>
-  delay({
-    session: "connected",
-    activeClients: 124,
-    readyActions: 3,
-    executionsToday: 18,
-    lastExecution: { status: "success", at: "2025-07-14 09:15" },
-    nextSchedule: { name: "Consulta mensal de parcelas", at: "2025-08-05 08:00" },
-    queue: "idle",
-    recent: mockExecutions,
-    alerts: [
-      { tone: "warning", title: "Sessão expira em breve", desc: "Renove em Configurações." },
-      { tone: "info", title: "2 clientes com dados incompletos", desc: "Lista Principal." },
-      { tone: "error", title: "1 execução com erro pendente", desc: "Reprocesse em Relatórios." },
-    ],
+export function getCsrfToken() {
+  return csrfToken;
+}
+
+export function restoreCsrfTokenFromCookie() {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie
+    .split(";")
+    .map((item) => item.trim())
+    .find((item) => item.startsWith("cotasync_csrf="));
+  csrfToken = match ? decodeURIComponent(match.split("=").slice(1).join("=")) : csrfToken;
+  return csrfToken;
+}
+
+function friendlyMessage(status: number, code: string, message: string) {
+  if (status === 401) return "Sessão CotaSync encerrada. Faça login novamente.";
+  if (status === 403) return "Acesso não permitido para seu perfil.";
+  if (status === 409 && code === "BATCH_IDEMPOTENCY_CONFLICT")
+    return "Esta execução já foi enviada com dados diferentes.";
+  if (code === "BROWSER_UNAVAILABLE") return "Navegador indisponível no momento.";
+  if (code === "EXTERNAL_LOGIN_URL_MISSING")
+    return "URL de login do sistema externo não configurada.";
+  return message || "Não foi possível concluir a operação.";
+}
+
+async function parseError(response: Response): Promise<ApiError> {
+  let code = `HTTP_${response.status}`;
+  let message = response.statusText;
+  try {
+    const payload = await response.json();
+    if (payload?.error) {
+      code = String(payload.error.code || code);
+      message = String(payload.error.message || message);
+    } else if (payload?.detail) {
+      if (typeof payload.detail === "string") message = payload.detail;
+      if (typeof payload.detail === "object") {
+        code = String(payload.detail.code || code);
+        message = String(payload.detail.message || payload.detail.message || message);
+      }
+    }
+  } catch {
+    // Non-JSON error responses keep the HTTP status text.
+  }
+  return new ApiError(response.status, code, friendlyMessage(response.status, code, message));
+}
+
+export async function apiFetch<T>(
+  path: string,
+  init: RequestInit & { timeoutMs?: number } = {},
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), init.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const method = (init.method || "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+
+  if (!(init.body instanceof FormData) && !headers.has("Content-Type") && init.body) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...init,
+      method,
+      headers,
+      credentials: "include",
+      signal: init.signal || controller.signal,
+    });
+    if (!response.ok) throw await parseError(response);
+    if (response.status === 204) return undefined as T;
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/csv")) return (await response.text()) as T;
+    return (await response.json()) as T;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new ApiError(0, "REQUEST_TIMEOUT", "Tempo esgotado ao falar com a API.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+export async function login(username: string, password: string) {
+  const payload = await apiFetch<{ user: ApiUser; csrf_token: string }>("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
   });
+  setCsrfToken(payload.csrf_token);
+  return payload.user;
+}
 
-/* ------------------------------- Clients ------------------------------- */
-export const getClients = (): Promise<ClientRow[]> => delay(mockClients);
+export async function logout() {
+  await apiFetch<{ status: string }>("/api/v1/auth/logout", { method: "POST" });
+  setCsrfToken(null);
+}
 
-export type NewClientInput = {
-  name: string; list: string; active: boolean;
-  grupo: string; cota: string; versao: string;
-  notes?: string; extras?: Record<string, unknown>;
-};
-export const createClient = (input: NewClientInput): Promise<ClientRow> =>
-  delay({
-    id: crypto.randomUUID(),
-    name: input.name,
-    list: input.list,
-    active: input.active,
-    grupo: input.grupo,
-    cota: input.cota,
-    versao: input.versao,
-    lastQuery: "—",
-    lastResult: "—",
+export async function getMe() {
+  const payload = await apiFetch<{ user: ApiUser }>("/api/v1/auth/me");
+  return payload.user;
+}
+
+export async function getDashboard() {
+  const payload = await apiFetch<{ dashboard: DashboardPayload }>("/api/v1/dashboard");
+  return payload.dashboard;
+}
+
+export async function getClients(
+  params: { page?: number; pageSize?: number; group?: string; includeInactive?: boolean } = {},
+) {
+  const query = new URLSearchParams({
+    page: String(params.page ?? 1),
+    page_size: String(params.pageSize ?? 50),
+    include_inactive: String(params.includeInactive ?? true),
   });
+  if (params.group) query.set("group", params.group);
+  const payload = await apiFetch<{ clients: ApiPage<ApiClient> }>(`/api/v1/clients?${query}`);
+  return payload.clients;
+}
 
-export type CsvImportResult = { inserted: number; skipped: number; errors: string[] };
-export const importClientsCsv = (_file: File): Promise<CsvImportResult> =>
-  delay({ inserted: 42, skipped: 3, errors: [] });
-
-/* ------------------------------- Actions ------------------------------- */
-export const getActions = (): Promise<ActionRow[]> => delay(mockActions);
-
-export type LearningSession = { sessionId: string; startedAt: string };
-export const startLearning = (input: { name: string; expected: string; vars?: string[] }): Promise<LearningSession> =>
-  delay({ sessionId: `learn_${Date.now()}`, startedAt: new Date().toISOString(), ...input });
-
-export const insertOperatorText = (input: {
-  sessionId: string; text: string; isVariable?: boolean; variableName?: string;
-}): Promise<{ ok: true; step: number }> => delay({ ok: true, step: 8 });
-
-export const finishLearning = (input: { sessionId: string }): Promise<{
-  ok: true; pathLearned: boolean; vars: string[]; detectedResult: string;
-}> => delay({ ok: true, pathLearned: true, vars: ["grupo", "cota", "versao"], detectedResult: "032" });
-
-export const confirmExtractionResult = (input: {
-  sessionId: string; value: string; useAi?: boolean;
-}): Promise<{ ok: true; actionId: string }> =>
-  delay({ ok: true, actionId: `a_${Date.now()}` });
-
-/* -------------------------------- Batches ------------------------------ */
-export type BatchStatus = "queued" | "running" | "done" | "error" | "canceled";
-export type BatchResult = {
-  clientId: string; clientName: string;
-  status: "success" | "error" | "pending";
-  result: string; runId: string; startedAt: string; finishedAt: string; error?: string;
-};
-export type Batch = {
-  id: string; actionId: string; listId: string; delaySeconds: number;
-  total: number; done: number; status: BatchStatus;
-  currentClient?: string; etaSeconds?: number; results: BatchResult[];
-};
-
-export const createBatch = (input: {
-  actionId: string; listId: string; delaySeconds: number;
-}): Promise<Batch> =>
-  delay({
-    id: `batch_${Date.now()}`,
-    actionId: input.actionId, listId: input.listId, delaySeconds: input.delaySeconds,
-    total: mockClients.length, done: 0, status: "queued", results: [],
+export async function createClient(input: {
+  name: string;
+  group: string;
+  active: boolean;
+  notes: string;
+  variables: Record<string, string>;
+}) {
+  const payload = await apiFetch<{ client: ApiClient }>("/api/v1/clients", {
+    method: "POST",
+    body: JSON.stringify(input),
   });
+  return payload.client;
+}
 
-export const getBatch = (id: string): Promise<Batch> =>
-  delay({
-    id, actionId: "a1", listId: "p", delaySeconds: 3,
-    total: 4, done: 2, status: "running", currentClient: "Cliente Gama", etaSeconds: 18,
-    results: [
-      { clientId: "1", clientName: "Cliente Alfa", status: "success", result: "038", runId: "run_9f2a", startedAt: "09:15:02", finishedAt: "09:15:08" },
-      { clientId: "2", clientName: "Cliente Beta", status: "success", result: "042", runId: "run_9f2b", startedAt: "09:15:11", finishedAt: "09:15:17" },
-      { clientId: "3", clientName: "Cliente Gama", status: "error",   result: "—",   runId: "run_9f2c", startedAt: "09:15:20", finishedAt: "09:15:26", error: "Campo cota não encontrado" },
-      { clientId: "4", clientName: "Cliente Épsilon", status: "pending", result: "—", runId: "run_9f2d", startedAt: "—", finishedAt: "—" },
-    ],
+export async function updateClient(
+  id: string,
+  input: {
+    name: string;
+    group: string;
+    active: boolean;
+    notes: string;
+    variables: Record<string, string>;
+  },
+) {
+  const payload = await apiFetch<{ client: ApiClient }>(`/api/v1/clients/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
   });
+  return payload.client;
+}
 
-/* ------------------------------ Schedules ------------------------------ */
-export const getSchedules = (): Promise<ScheduleRow[]> => delay(mockSchedules);
-
-export type NewScheduleInput = {
-  name: string; actionId: string; listId: string;
-  frequency: "diario" | "semanal" | "mensal";
-  dayOfMonth?: number; time: string; delaySeconds: number; active: boolean;
-};
-export const createSchedule = (input: NewScheduleInput): Promise<ScheduleRow> =>
-  delay({
-    id: `s_${Date.now()}`,
-    name: input.name,
-    action: input.actionId,
-    list: input.listId,
-    frequency: input.frequency,
-    next: "2025-08-05 08:00",
-    status: input.active ? "Ativo" : "Pausado",
-    last: "—",
+export async function deactivateClient(id: string) {
+  const payload = await apiFetch<{ client: ApiClient }>(`/api/v1/clients/${id}`, {
+    method: "DELETE",
   });
+  return payload.client;
+}
 
-/* ------------------------------- Reports ------------------------------- */
-export type ReportFilters = {
-  from?: string; to?: string; actionId?: string; listId?: string;
-  clientQuery?: string; status?: "success" | "error";
-};
-export type ReportRow = {
-  id: string; date: string; client: string; action: string;
-  result: string; status: "success" | "error"; error?: string;
-  variables: Record<string, string>; screenshotUrl?: string;
-  diagnostic: { runId: string; steps: number; durationMs: number };
-};
-export const getReports = (_filters?: ReportFilters): Promise<ReportRow[]> =>
-  delay([
-    { id: "r1", date: "2025-07-14 09:15", client: "Cliente Alfa", action: "Número de parcelas pagas", result: "038", status: "success",
-      variables: { grupo: "935", cota: "110", versao: "00" },
-      diagnostic: { runId: "run_9f2a", steps: 7, durationMs: 5820 } },
-    { id: "r3", date: "2025-07-14 09:16", client: "Cliente Gama", action: "Número de parcelas pagas", result: "—", status: "error", error: "Campo cota não encontrado",
-      variables: { grupo: "935", cota: "112", versao: "00" },
-      diagnostic: { runId: "run_9f2c", steps: 4, durationMs: 6120 } },
-  ]);
-
-/* ----------------------------- Diagnostics ----------------------------- */
-export type Diagnostics = {
-  backend: "ok" | "degraded" | "down";
-  browser: "ok" | "disconnected";
-  version: string; commit: string; healthcheck: "ok" | "fail";
-  runs: { runId: string; action: string; status: "success" | "error" | "running"; host: string; lastStep: string; error?: string }[];
-  batches: { id: string; total: number; done: number; status: BatchStatus }[];
-  logs: { t: string; level: "info" | "ok" | "err"; msg: string }[];
-};
-export const getDiagnostics = (): Promise<Diagnostics> =>
-  delay({
-    backend: "ok", browser: "ok",
-    version: "0.1.0", commit: "a1b2c3d", healthcheck: "ok",
-    runs: [
-      { runId: "run_9f2a", action: "Número de parcelas pagas", status: "success", host: "sistema.externo", lastStep: "extract_result" },
-      { runId: "run_9f2c", action: "Número de parcelas pagas", status: "error",   host: "sistema.externo", lastStep: "fill_cota", error: "Campo cota não encontrado" },
-      { runId: "run_9f2d", action: "Número de parcelas pagas", status: "running", host: "sistema.externo", lastStep: "open_page" },
-    ],
-    batches: [
-      { id: "batch_1042", total: 42, done: 42, status: "done" },
-      { id: "batch_1043", total: 4,  done: 2,  status: "running" },
-    ],
-    logs: [
-      { t: "09:15:02", level: "info", msg: "Execução iniciada — Ação: Número de parcelas pagas" },
-      { t: "09:15:07", level: "ok",   msg: "Cliente Alfa · resultado 038" },
-      { t: "09:15:22", level: "err",  msg: "Cliente Gama · sessão expirada" },
-    ],
+export async function getActions(params: { page?: number; pageSize?: number } = {}) {
+  const query = new URLSearchParams({
+    page: String(params.page ?? 1),
+    page_size: String(params.pageSize ?? 50),
   });
+  const payload = await apiFetch<{ actions: ApiPage<ApiAction> }>(`/api/v1/actions?${query}`);
+  return payload.actions;
+}
+
+export async function getAction(id: string) {
+  const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/actions/${id}`);
+  return payload.action;
+}
+
+export async function getActionVersions(id: string) {
+  const payload = await apiFetch<{ versions: ApiActionVersion[] }>(
+    `/api/v1/actions/${id}/versions`,
+  );
+  return payload.versions;
+}
+
+export async function runAction(id: string, variables: Record<string, string>) {
+  const payload = await apiFetch<{ run: ApiRun }>(`/api/v1/actions/${id}/run`, {
+    method: "POST",
+    body: JSON.stringify({
+      variables,
+      mode: "async",
+      requested_by: "react",
+      run_origin: "operational",
+    }),
+  });
+  return payload.run;
+}
+
+export async function getBatches(params: { page?: number; pageSize?: number } = {}) {
+  const query = new URLSearchParams({
+    page: String(params.page ?? 1),
+    page_size: String(params.pageSize ?? 20),
+  });
+  const payload = await apiFetch<{ batches: ApiPage<ApiBatch> }>(`/api/v1/batches?${query}`);
+  return payload.batches;
+}
+
+export async function createBatch(input: {
+  action_id: string;
+  client_group?: string;
+  client_ids?: string[];
+  delay_between_rows_seconds?: number;
+  idempotencyKey: string;
+}) {
+  const payload = await apiFetch<{ batch: ApiBatch }>("/api/v1/batches", {
+    method: "POST",
+    headers: { "Idempotency-Key": input.idempotencyKey },
+    body: JSON.stringify({
+      action_id: input.action_id,
+      client_group: input.client_group || null,
+      client_ids: input.client_ids || [],
+      requested_by: "react",
+      delay_between_rows_seconds: input.delay_between_rows_seconds ?? 3,
+    }),
+  });
+  return payload.batch;
+}
+
+export async function getBatch(id: string) {
+  const payload = await apiFetch<{ batch: ApiBatch }>(`/api/v1/batches/${id}`);
+  return payload.batch;
+}
+
+export async function cancelBatch(id: string) {
+  const payload = await apiFetch<{ batch: ApiBatch }>(`/api/v1/batches/${id}/cancel`, {
+    method: "POST",
+  });
+  return payload.batch;
+}
+
+export async function getReportsRuns(
+  params: { page?: number; pageSize?: number; actionId?: string; status?: string } = {},
+) {
+  const query = new URLSearchParams({
+    page: String(params.page ?? 1),
+    page_size: String(params.pageSize ?? 50),
+  });
+  if (params.actionId) query.set("action_id", params.actionId);
+  if (params.status) query.set("status", params.status);
+  const payload = await apiFetch<{ runs: ApiPage<ApiRun> }>(`/api/v1/reports/runs?${query}`);
+  return payload.runs;
+}
+
+export async function getReportsBatches(
+  params: { page?: number; pageSize?: number; status?: string } = {},
+) {
+  const query = new URLSearchParams({
+    page: String(params.page ?? 1),
+    page_size: String(params.pageSize ?? 50),
+  });
+  if (params.status) query.set("status", params.status);
+  const payload = await apiFetch<{ batches: ApiPage<ApiBatch> }>(
+    `/api/v1/reports/batches?${query}`,
+  );
+  return payload.batches;
+}
+
+export async function getWorkerStatus() {
+  const payload = await apiFetch<{ worker: WorkerStatus }>("/api/v1/worker/status");
+  return payload.worker;
+}
+
+export async function getBrowserStatus() {
+  const payload = await apiFetch<{ browser: BrowserStatus }>("/api/v1/browser/status");
+  return payload.browser;
+}
+
+export async function createBrowserViewToken() {
+  return apiFetch<{ view_url: string; expires_at: string; ttl_seconds: number }>(
+    "/api/v1/browser/view-token",
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function ensureBrowserReady() {
+  const payload = await apiFetch<{ browser: Record<string, unknown> }>(
+    "/api/v1/browser/ensure-ready",
+    { method: "POST" },
+  );
+  return payload.browser;
+}
+
+export async function getExternalSessionStatus() {
+  const payload = await apiFetch<{ external_session: ExternalSessionStatus }>(
+    "/api/v1/external-session/status",
+  );
+  return payload.external_session;
+}
+
+export async function openExternalLogin() {
+  return apiFetch<{ login_url: string; manual_login_required: boolean }>(
+    "/api/v1/external-session/open-login",
+    { method: "POST" },
+  );
+}
+
+export async function validateExternalSession() {
+  return apiFetch<{ valid: boolean; manual_login_required: boolean }>(
+    "/api/v1/external-session/validate",
+    { method: "POST" },
+  );
+}
+
+export async function createLearningSession() {
+  const payload = await apiFetch<{ session: LearningSession }>("/api/v1/learning/sessions", {
+    method: "POST",
+  });
+  return payload.session;
+}
+
+export async function getLearningSession(id: string) {
+  const payload = await apiFetch<{ session: LearningSession }>(`/api/v1/learning/sessions/${id}`);
+  return payload.session;
+}
+
+export async function startLearningRecording(
+  id: string,
+  input: { name: string; objective: string; expected_result: string },
+) {
+  const payload = await apiFetch<{ session: LearningSession }>(
+    `/api/v1/learning/sessions/${id}/recording/start`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+  return payload.session;
+}
+
+export async function stopLearningRecording(id: string) {
+  return apiFetch<{ learned_action?: unknown; session?: LearningSession }>(
+    `/api/v1/learning/sessions/${id}/recording/stop`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function saveLearnedAction(
+  id: string,
+  input: {
+    name: string;
+    description: string;
+    objective: string;
+    expected_result: string;
+    variable_names: string[];
+  },
+) {
+  const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/learning/sessions/${id}/actions`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...input,
+      input_description: "Campos informados pelo operador durante o ensino.",
+      success_criteria: "Retornar a informação confirmada pelo operador.",
+      output_type: "text",
+      ai_result_summary_enabled: false,
+      ai_recovery_enabled: false,
+    }),
+  });
+  return payload.action;
+}
+
+export async function operatorInsertActive(
+  id: string,
+  value: string,
+  sensitive: boolean,
+  variableKey?: string,
+) {
+  return apiFetch<{ operator: unknown }>(`/api/v1/learning/sessions/${id}/operator/insert-active`, {
+    method: "POST",
+    body: JSON.stringify({ value, sensitive, variable_key: variableKey || null }),
+  });
+}
+
+export async function operatorPress(id: string, key: "Tab" | "Enter") {
+  return apiFetch<{ operator: unknown }>(`/api/v1/learning/sessions/${id}/operator/press`, {
+    method: "POST",
+    body: JSON.stringify({ key }),
+  });
+}
+
+export async function operatorClearActive(id: string) {
+  return apiFetch<{ operator: unknown }>(`/api/v1/learning/sessions/${id}/operator/clear-active`, {
+    method: "POST",
+  });
+}
+
+export async function getDiagnostics() {
+  const payload = await apiFetch<{ diagnostics: DiagnosticsPayload }>("/api/v1/diagnostics/system");
+  return payload.diagnostics;
+}

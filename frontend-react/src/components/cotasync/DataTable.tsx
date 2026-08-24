@@ -38,7 +38,10 @@ export function DataTable<T extends { id: string }>({
         <TableBody>
           {data.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={columns.length} className="h-32 text-center text-muted-foreground">
+              <TableCell
+                colSpan={columns.length}
+                className="h-32 text-center text-muted-foreground"
+              >
                 {empty ?? "Sem dados para exibir."}
               </TableCell>
             </TableRow>

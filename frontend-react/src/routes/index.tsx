@@ -1,77 +1,113 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { AppShell } from "@/components/cotasync/AppShell";
-import { StatusCard } from "@/components/cotasync/StatusCard";
-import { DataTable, type Column } from "@/components/cotasync/DataTable";
-import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { mockExecutions, type ExecutionRow } from "@/lib/mock-data";
+import { useQuery } from "@tanstack/react-query";
 import {
-  Wifi, Users, Zap, Activity, Clock, CalendarClock, ListChecks, AlertTriangle,
-  GraduationCap, UserPlus, Shield, ChevronRight,
+  Activity,
+  AlertTriangle,
+  ChevronRight,
+  Clock,
+  GraduationCap,
+  ListChecks,
+  Shield,
+  UserPlus,
+  Users,
+  Wifi,
+  Zap,
 } from "lucide-react";
 
+import { AppShell } from "@/components/cotasync/AppShell";
+import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
+import { DataTable, type Column } from "@/components/cotasync/DataTable";
+import { StatusCard } from "@/components/cotasync/StatusCard";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { getDashboard, getReportsRuns } from "@/services/api";
+import type { ApiRun } from "@/types/api";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "Dashboard — CotaSync" }] }),
   component: Dashboard,
 });
 
-const columns: Column<ExecutionRow>[] = [
-  { key: "dt", header: "Data/hora", cell: (r) => r.datetime },
-  { key: "ac", header: "Ação", cell: (r) => r.action },
-  { key: "cl", header: "Clientes", cell: (r) => r.clients },
+const columns: Column<ApiRun>[] = [
+  { key: "dt", header: "Data/hora", cell: (run) => formatDate(run.created_at) },
+  { key: "ac", header: "Ação", cell: (run) => run.action_key || run.action_id },
   {
-    key: "st", header: "Status",
-    cell: (r) => (
-      <BadgeStatus tone={r.status === "Sucesso" ? "success" : r.status === "Erro" ? "error" : "info"}>
-        {r.status}
+    key: "st",
+    header: "Status",
+    cell: (run) => (
+      <BadgeStatus
+        tone={run.status === "success" ? "success" : run.status === "error" ? "error" : "info"}
+      >
+        {statusLabel(run.status)}
       </BadgeStatus>
     ),
   },
-  { key: "ok", header: "Sucesso", cell: (r) => r.ok },
-  { key: "er", header: "Erros", cell: (r) => r.err },
-  { key: "ac2", header: "", cell: () => <Button size="sm" variant="ghost">Ver detalhes</Button> },
+  { key: "or", header: "Origem", cell: (run) => run.run_origin || "operacional" },
+  {
+    key: "rs",
+    header: "Resultado",
+    cell: (run) => run.operational_summary || run.result_summary || run.error_message || "-",
+  },
 ];
 
 const quickActions = [
-  { title: "Ensinar nova ação", desc: "Grave um novo fluxo automatizado", to: "/ensinar-acao", icon: GraduationCap, tone: "primary" as const },
-  { title: "Executar em massa", desc: "Rode uma ação para vários clientes", to: "/execucao", icon: ListChecks },
-  { title: "Cadastrar cliente", desc: "Adicione um novo cliente à lista", to: "/clientes", icon: UserPlus },
-  { title: "Verificar sessão", desc: "Teste o acesso ao sistema externo", to: "/configuracoes", icon: Shield },
-];
-
-const alerts = [
-  { tone: "warning" as const, label: "Precisa de atenção", title: "Sessão expira em breve", desc: "Renove a sessão do sistema externo.", to: "/configuracoes" },
-  { tone: "info" as const, label: "Info", title: "2 clientes com dados incompletos", desc: "Grupo ou cota ausentes na Lista Principal.", to: "/clientes" },
-  { tone: "error" as const, label: "Erro", title: "1 execução com erro pendente", desc: "Reprocesse a partir de Relatórios.", to: "/relatorios" },
+  {
+    title: "Ensinar nova ação",
+    desc: "Grave um novo fluxo automatizado",
+    to: "/ensinar-acao",
+    icon: GraduationCap,
+    tone: "primary" as const,
+  },
+  {
+    title: "Executar em massa",
+    desc: "Rode uma ação para vários clientes",
+    to: "/execucao",
+    icon: ListChecks,
+  },
+  {
+    title: "Cadastrar cliente",
+    desc: "Adicione um cliente à base",
+    to: "/clientes",
+    icon: UserPlus,
+  },
+  { title: "Verificar sessão", desc: "Teste o acesso externo", to: "/configuracoes", icon: Shield },
 ];
 
 function Dashboard() {
+  const dashboard = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: getDashboard,
+    refetchInterval: 3000,
+  });
+  const runs = useQuery({
+    queryKey: ["reports", "runs", "dashboard"],
+    queryFn: () => getReportsRuns({ pageSize: 5 }),
+  });
+  const data = dashboard.data;
+  const workerOnline = Boolean(data?.worker_status?.online);
+  const queueRunning = Number(data?.queue_status.running || 0);
+
   return (
     <AppShell title="Dashboard" subtitle="Visão geral do CotaSync">
-      {/* Ações rápidas */}
       <div className="mb-6">
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Ações rápidas
         </h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {quickActions.map((a) => (
+          {quickActions.map((action) => (
             <Link
-              key={a.to}
-              to={a.to}
-              className={`group flex items-start gap-3 rounded-lg border p-4 transition hover:border-primary hover:bg-primary/5 ${
-                a.tone === "primary" ? "border-primary/40 bg-primary/5" : "border-border bg-card"
-              }`}
+              key={action.to}
+              to={action.to}
+              className={`group flex items-start gap-3 rounded-lg border p-4 transition hover:border-primary hover:bg-primary/5 ${action.tone === "primary" ? "border-primary/40 bg-primary/5" : "border-border bg-card"}`}
             >
-              <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-md ${
-                a.tone === "primary" ? "bg-primary text-primary-foreground" : "bg-muted text-foreground"
-              }`}>
-                <a.icon className="h-5 w-5" />
+              <div
+                className={`grid h-10 w-10 shrink-0 place-items-center rounded-md ${action.tone === "primary" ? "bg-primary text-primary-foreground" : "bg-muted text-foreground"}`}
+              >
+                <action.icon className="h-5 w-5" />
               </div>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-semibold text-foreground">{a.title}</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">{a.desc}</p>
+                <p className="truncate text-sm font-semibold text-foreground">{action.title}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">{action.desc}</p>
               </div>
               <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition group-hover:translate-x-0.5 group-hover:text-primary" />
             </Link>
@@ -80,14 +116,60 @@ function Dashboard() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <StatusCard label="Sessão externa" value="Sessão conectada" hint="Última verificação: agora" icon={Wifi} tone="success" />
-        <StatusCard label="Clientes ativos" value="124" hint="Lista Principal + VIP" icon={Users} />
-        <StatusCard label="Ações prontas" value="3" hint="1 em desenvolvimento" icon={Zap} />
-        <StatusCard label="Execuções hoje" value="18" hint="17 sucesso · 1 erro" icon={Activity} />
-        <StatusCard label="Última execução" value="Concluído" hint="Hoje às 09:15" icon={Clock} tone="success" />
-        <StatusCard label="Próximo agendamento" value="05/08 · 08:00" hint="Consulta mensal de parcelas" icon={CalendarClock} />
-        <StatusCard label="Fila atual" value="Ociosa" hint="Nenhuma execução em andamento" icon={ListChecks} />
-        <StatusCard label="Alertas" value="3" hint="Requerem revisão" icon={AlertTriangle} tone="warning" />
+        <StatusCard
+          label="Sessão externa"
+          value="Manual"
+          hint={data?.session_status || "Aguardando API"}
+          icon={Wifi}
+          tone="success"
+        />
+        <StatusCard
+          label="Clientes ativos"
+          value={dashboard.isLoading ? "..." : (data?.clients_active ?? 0)}
+          hint="Base operacional"
+          icon={Users}
+        />
+        <StatusCard
+          label="Ações prontas"
+          value={dashboard.isLoading ? "..." : (data?.actions_ready ?? 0)}
+          hint="Versões publicadas"
+          icon={Zap}
+        />
+        <StatusCard
+          label="Execuções hoje"
+          value={dashboard.isLoading ? "..." : (data?.runs_today ?? 0)}
+          hint="Runs criadas hoje"
+          icon={Activity}
+        />
+        <StatusCard
+          label="Última execução"
+          value={data?.last_run ? statusLabel(data.last_run.status) : "Sem histórico"}
+          hint={
+            data?.last_run ? formatDate(data.last_run.created_at) : "Nenhuma execução registrada"
+          }
+          icon={Clock}
+          tone={data?.last_run?.status === "success" ? "success" : "default"}
+        />
+        <StatusCard
+          label="Sistema de execução"
+          value={workerOnline ? "Online" : "Offline"}
+          hint={data?.worker_status?.status || "Sem heartbeat"}
+          icon={Shield}
+          tone={workerOnline ? "success" : "warning"}
+        />
+        <StatusCard
+          label="Fila atual"
+          value={queueRunning ? "Executando" : "Ociosa"}
+          hint={`${data?.queue_status.queued ?? 0} na fila · ${queueRunning} em execução`}
+          icon={ListChecks}
+        />
+        <StatusCard
+          label="Alertas"
+          value={data?.alerts.length ?? 0}
+          hint="Requerem revisão"
+          icon={AlertTriangle}
+          tone={(data?.alerts.length ?? 0) > 0 ? "warning" : "success"}
+        />
       </div>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
@@ -96,29 +178,46 @@ function Dashboard() {
             <CardTitle className="text-base">Últimas execuções</CardTitle>
           </CardHeader>
           <CardContent>
-            <DataTable columns={columns} data={mockExecutions} />
+            <DataTable
+              columns={columns}
+              data={runs.data?.items ?? []}
+              empty={runs.isLoading ? "Carregando..." : "Nenhuma execução registrada."}
+            />
           </CardContent>
         </Card>
-
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Alertas</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {alerts.map((a, i) => (
-              <Link
-                key={i}
-                to={a.to}
-                className="group block rounded-md border border-border bg-muted/30 p-3 transition hover:border-primary/50 hover:bg-muted/60"
-              >
-                <div className="flex items-center gap-2">
-                  <BadgeStatus tone={a.tone}>{a.label}</BadgeStatus>
-                  <p className="flex-1 text-sm font-medium text-foreground">{a.title}</p>
-                  <ChevronRight className="h-4 w-4 text-muted-foreground transition group-hover:translate-x-0.5 group-hover:text-primary" />
+            {(data?.alerts ?? []).length === 0 ? (
+              <p className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                Nenhum alerta ativo.
+              </p>
+            ) : (
+              data?.alerts.map((alert) => (
+                <div key={alert.code} className="rounded-md border border-border bg-muted/30 p-3">
+                  <BadgeStatus
+                    tone={
+                      alert.level === "error"
+                        ? "error"
+                        : alert.level === "warning"
+                          ? "warning"
+                          : "info"
+                    }
+                  >
+                    {alert.code}
+                  </BadgeStatus>
+                  <p className="mt-2 text-sm text-foreground">{alert.message}</p>
                 </div>
-                <p className="mt-1 text-xs text-muted-foreground">{a.desc}</p>
-              </Link>
-            ))}
+              ))
+            )}
+            {dashboard.error && (
+              <p className="text-sm text-destructive">Não foi possível carregar o dashboard.</p>
+            )}
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/diagnostico">Diagnóstico técnico</Link>
+            </Button>
           </CardContent>
         </Card>
       </div>
@@ -126,3 +225,18 @@ function Dashboard() {
   );
 }
 
+function statusLabel(status: string) {
+  return (
+    (
+      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila" } as Record<
+        string,
+        string
+      >
+    )[status] || status
+  );
+}
+
+function formatDate(value?: string | null) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString("pt-BR");
+}
