@@ -42,8 +42,8 @@ frontend_lint: sucesso com 7 warnings.
 frontend_build: sucesso.
 backend_tests: nao executados; nao houve alteracao de codigo backend.
 
-commit: pendente no momento deste arquivo.
-push_status: pendente no momento deste arquivo.
+commit: `d4ce0a6` (`Configura React no dominio oficial de homologacao`).
+push_status: enviado para `origin/master`.
 
 reports_dir: `reports/2026-08-24_1505_dominio_react/`
 
