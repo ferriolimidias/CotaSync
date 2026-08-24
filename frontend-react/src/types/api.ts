@@ -26,6 +26,54 @@ export type ApiClient = {
   updated_at?: string;
 };
 
+export type ClientsCsvPreviewRow = {
+  row_number: number;
+  operation: "create" | "update";
+  valid: boolean;
+  name: string;
+  group: string;
+  active: boolean;
+  display_variables: {
+    grupo?: string;
+    cota?: string;
+    versao?: string;
+  };
+  notes?: string;
+  errors: string[];
+};
+
+export type ClientsCsvPreview = {
+  filename: string;
+  limits: {
+    max_bytes: number;
+    max_rows: number;
+    encoding: string;
+    supported_headers: string[];
+  };
+  headers: string[];
+  total_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  new_clients: number;
+  updates: number;
+  conflicts: Array<{
+    row_number: number;
+    field: string;
+    message: string;
+    values: Record<string, string>;
+  }>;
+  warnings: Array<{ code: string; message: string }>;
+  rows: ClientsCsvPreviewRow[];
+  can_import: boolean;
+};
+
+export type ClientsCsvImportResult = {
+  created: number;
+  updated: number;
+  count: number;
+  clients: ApiClient[];
+};
+
 export type ApiAction = {
   id: string;
   key?: string;

@@ -52,6 +52,14 @@ export function OperatorAssistant({ sessionId }: { sessionId: string | null }) {
   });
 
   const disabled = !sessionId;
+  const insertThenTab = async () => {
+    try {
+      await insert.mutateAsync();
+      await press.mutateAsync("Tab");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Não foi possível inserir e avançar.");
+    }
+  };
 
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -111,11 +119,8 @@ export function OperatorAssistant({ sessionId }: { sessionId: string | null }) {
           <Button
             size="sm"
             variant="outline"
-            disabled={disabled}
-            onClick={() => {
-              insert.mutate();
-              press.mutate("Tab");
-            }}
+            disabled={disabled || !text || insert.isPending || press.isPending}
+            onClick={() => void insertThenTab()}
           >
             <Send className="h-4 w-4" /> Inserir + Tab
           </Button>

@@ -9,6 +9,7 @@ import { DataTable, type Column } from "@/components/cotasync/DataTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -16,8 +17,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { getActions, getReportsBatches, getReportsRuns } from "@/services/api";
+import {
+  exportReportsRunsCsv,
+  getActions,
+  getReportsBatches,
+  getReportsRuns,
+} from "@/services/api";
 import type { ApiBatch, ApiRun } from "@/types/api";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/relatorios")({
   head: () => ({ meta: [{ title: "Relatórios — CotaSync" }] }),
@@ -27,15 +34,21 @@ export const Route = createFileRoute("/relatorios")({
 function RelatoriosPage() {
   const [actionId, setActionId] = useState("all");
   const [status, setStatus] = useState("all");
+  const [clientFilter, setClientFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [detail, setDetail] = useState<ApiRun | null>(null);
   const actions = useQuery({ queryKey: ["actions"], queryFn: () => getActions({ pageSize: 200 }) });
   const runs = useQuery({
-    queryKey: ["reports", "runs", actionId, status],
+    queryKey: ["reports", "runs", actionId, status, clientFilter, dateFrom, dateTo],
     queryFn: () =>
       getReportsRuns({
         pageSize: 50,
         actionId: actionId === "all" ? undefined : actionId,
         status: status === "all" ? undefined : status,
+        client: clientFilter || undefined,
+        dateFrom: dateFrom || undefined,
+        dateTo: dateTo || undefined,
       }),
   });
   const batches = useQuery({
@@ -102,7 +115,44 @@ function RelatoriosPage() {
               <SelectItem value="running">Executando</SelectItem>
             </SelectContent>
           </Select>
-          <Button variant="outline" size="sm" disabled>
+          <Input
+            className="w-44"
+            placeholder="Cliente"
+            value={clientFilter}
+            onChange={(event) => setClientFilter(event.target.value)}
+          />
+          <Input
+            className="w-36"
+            type="date"
+            value={dateFrom}
+            onChange={(event) => setDateFrom(event.target.value)}
+          />
+          <Input
+            className="w-36"
+            type="date"
+            value={dateTo}
+            onChange={(event) => setDateTo(event.target.value)}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              try {
+                const csvText = await exportReportsRunsCsv({
+                  actionId: actionId === "all" ? undefined : actionId,
+                  status: status === "all" ? undefined : status,
+                  client: clientFilter || undefined,
+                  dateFrom: dateFrom || undefined,
+                  dateTo: dateTo || undefined,
+                });
+                downloadCsv("execucoes_cotasync.csv", csvText);
+              } catch (error) {
+                toast.error(
+                  error instanceof Error ? error.message : "Não foi possível exportar relatórios.",
+                );
+              }
+            }}
+          >
             <Download className="h-4 w-4" /> Exportação CSV
           </Button>
         </CardContent>
@@ -212,4 +262,14 @@ function batchStatus(status: string) {
 
 function formatDate(value?: string | null) {
   return value ? new Date(value).toLocaleString("pt-BR") : "-";
+}
+
+function downloadCsv(filename: string, csvText: string) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }

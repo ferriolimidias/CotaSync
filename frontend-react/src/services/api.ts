@@ -3,6 +3,8 @@ import type {
   ApiActionVersion,
   ApiBatch,
   ApiClient,
+  ClientsCsvImportResult,
+  ClientsCsvPreview,
   ApiPage,
   ApiRun,
   ApiUser,
@@ -195,6 +197,29 @@ export async function deactivateClient(id: string) {
   return payload.client;
 }
 
+export async function previewClientsCsv(input: { filename: string; csvText: string }) {
+  const payload = await apiFetch<{ preview: ClientsCsvPreview }>("/api/v1/clients/import/preview", {
+    method: "POST",
+    body: JSON.stringify({ filename: input.filename, csv_text: input.csvText }),
+  });
+  return payload.preview;
+}
+
+export async function importClientsCsv(input: { filename: string; csvText: string }) {
+  const payload = await apiFetch<{ import_result: ClientsCsvImportResult }>(
+    "/api/v1/clients/import",
+    {
+      method: "POST",
+      body: JSON.stringify({ filename: input.filename, csv_text: input.csvText }),
+    },
+  );
+  return payload.import_result;
+}
+
+export async function exportClientsCsv() {
+  return apiFetch<string>("/api/v1/clients/export.csv");
+}
+
 export async function getActions(params: { page?: number; pageSize?: number } = {}) {
   const query = new URLSearchParams({
     page: String(params.page ?? 1),
@@ -226,6 +251,11 @@ export async function runAction(id: string, variables: Record<string, string>) {
       run_origin: "operational",
     }),
   });
+  return payload.run;
+}
+
+export async function getRun(id: string) {
+  const payload = await apiFetch<{ run: ApiRun }>(`/api/v1/runs/${id}`);
   return payload.run;
 }
 
@@ -271,8 +301,20 @@ export async function cancelBatch(id: string) {
   return payload.batch;
 }
 
+export async function exportBatchResultsCsv(id: string) {
+  return apiFetch<string>(`/api/v1/batches/${id}/results.csv`);
+}
+
 export async function getReportsRuns(
-  params: { page?: number; pageSize?: number; actionId?: string; status?: string } = {},
+  params: {
+    page?: number;
+    pageSize?: number;
+    actionId?: string;
+    status?: string;
+    client?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  } = {},
 ) {
   const query = new URLSearchParams({
     page: String(params.page ?? 1),
@@ -280,8 +322,30 @@ export async function getReportsRuns(
   });
   if (params.actionId) query.set("action_id", params.actionId);
   if (params.status) query.set("status", params.status);
+  if (params.client) query.set("client", params.client);
+  if (params.dateFrom) query.set("date_from", params.dateFrom);
+  if (params.dateTo) query.set("date_to", params.dateTo);
   const payload = await apiFetch<{ runs: ApiPage<ApiRun> }>(`/api/v1/reports/runs?${query}`);
   return payload.runs;
+}
+
+export async function exportReportsRunsCsv(
+  params: {
+    actionId?: string;
+    status?: string;
+    client?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.actionId) query.set("action_id", params.actionId);
+  if (params.status) query.set("status", params.status);
+  if (params.client) query.set("client", params.client);
+  if (params.dateFrom) query.set("date_from", params.dateFrom);
+  if (params.dateTo) query.set("date_to", params.dateTo);
+  const suffix = query.toString() ? `?${query}` : "";
+  return apiFetch<string>(`/api/v1/reports/runs.csv${suffix}`);
 }
 
 export async function getReportsBatches(

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from backend.db import Batch as DbBatch, BatchItem, SessionLocal, WorkerInstance
+from backend.db import Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal, WorkerInstance
 from backend.main import app
 from tests.auth_helpers import TEST_AUTH_ENV, authenticated_client
 from tests.test_batch_runner import fake_action
@@ -20,6 +20,8 @@ class ApiV1ContractTests(unittest.TestCase):
             session.query(WorkerInstance).delete()
             session.query(BatchItem).delete()
             session.query(DbBatch).delete()
+            session.query(DbRun).filter(DbRun.id.in_(["run-v1-detail", "run-v1-csv"])).delete(synchronize_session=False)
+            session.query(DbClient).filter(DbClient.id.in_(["csv-new-1", "csv-existing-1"])).delete(synchronize_session=False)
 
     def test_auth_v1_uses_cookie_session(self) -> None:
         with patch.dict("os.environ", TEST_AUTH_ENV, clear=False):
@@ -80,6 +82,62 @@ class ApiV1ContractTests(unittest.TestCase):
             batch_id = first.json()["batch"]["batch_id"]
             self.assertEqual(client.get(f"/api/v1/batches/{batch_id}").status_code, 200)
             self.assertEqual(client.get(f"/api/v1/batches/{batch_id}/results").status_code, 200)
+            self.assertEqual(client.get(f"/api/v1/batches/{batch_id}/results.csv").status_code, 200)
+
+    def test_clients_csv_preview_import_and_export_contract(self) -> None:
+        with SessionLocal.begin() as session:
+            session.add(
+                DbClient(
+                    id="csv-existing-1",
+                    name="Cliente Existente CSV",
+                    client_group="Lista CSV",
+                    active=True,
+                    variables={"grupo": "935", "cota": "110", "versao": "00"},
+                    grupo="935",
+                    cota="110",
+                    versao="00",
+                    notes="antes",
+                )
+            )
+        csv_text = (
+            "id,name,group,active,grupo,cota,versao,notes\n"
+            "csv-existing-1,Cliente Existente CSV,Lista CSV,true,935,111,00,atualizado\n"
+            "csv-new-1,Cliente Novo CSV,Lista CSV,true,936,112,01,novo\n"
+        )
+        with authenticated_client("operator") as client:
+            preview = client.post(
+                "/api/v1/clients/import/preview",
+                json={"filename": "clientes.csv", "csv_text": csv_text},
+            )
+            self.assertEqual(preview.status_code, 200, preview.text)
+            body = preview.json()["preview"]
+            self.assertTrue(body["can_import"])
+            self.assertEqual(body["valid_rows"], 2)
+            self.assertEqual(body["new_clients"], 1)
+            self.assertEqual(body["updates"], 1)
+            imported = client.post(
+                "/api/v1/clients/import",
+                json={"filename": "clientes.csv", "csv_text": csv_text},
+            )
+            self.assertEqual(imported.status_code, 200, imported.text)
+            self.assertEqual(imported.json()["import_result"]["count"], 2)
+            exported = client.get("/api/v1/clients/export.csv")
+            self.assertEqual(exported.status_code, 200)
+            self.assertIn("Cliente Novo CSV", exported.text)
+            self.assertIn("id,name,group,active,grupo,cota,versao,notes", exported.text)
+
+    def test_clients_csv_preview_reports_alias_conflicts(self) -> None:
+        csv_text = "name,group,grupo,cota,grupo_2,versao,vers_o\nCliente,Lista,935,110,999,00,01\n"
+        with authenticated_client("operator") as client:
+            preview = client.post(
+                "/api/v1/clients/import/preview",
+                json={"filename": "clientes.csv", "csv_text": csv_text},
+            )
+            self.assertEqual(preview.status_code, 200, preview.text)
+            body = preview.json()["preview"]
+            self.assertFalse(body["can_import"])
+            self.assertEqual(body["invalid_rows"], 1)
+            self.assertEqual(len(body["conflicts"]), 2)
 
     def test_action_run_v1_contract(self) -> None:
         fake_run = {
@@ -116,6 +174,31 @@ class ApiV1ContractTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["run"]["id"], "run-v1")
+
+    def test_run_detail_and_reports_csv_contract(self) -> None:
+        with SessionLocal.begin() as session:
+            session.add(
+                DbRun(
+                    id="run-v1-detail",
+                    action_id=None,
+                    status="success",
+                    run_origin="validation",
+                    runner="desktop_browser_replay",
+                    result_summary="Quantidade de parcelas pagas: 032",
+                    input_variables={"cliente": "Cliente CSV", "grupo": "935"},
+                    diagnostics={"_record": {"requested_by": "react"}},
+                )
+            )
+        with authenticated_client("operator") as client:
+            detail = client.get("/api/v1/runs/run-v1-detail")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertEqual(detail.json()["run"]["id"], "run-v1-detail")
+            report = client.get("/api/v1/reports/runs?run_origin=validation&client=Cliente CSV")
+            self.assertEqual(report.status_code, 200, report.text)
+            self.assertEqual(report.json()["runs"]["total"], 1)
+            exported = client.get("/api/v1/reports/runs.csv?run_origin=validation&client=Cliente CSV")
+            self.assertEqual(exported.status_code, 200)
+            self.assertIn("Quantidade de parcelas pagas: 032", exported.text)
 
     def test_diagnostics_requires_admin(self) -> None:
         fake_health = {"cdp_reachable": True}

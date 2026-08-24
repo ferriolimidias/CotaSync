@@ -22,15 +22,18 @@ import {
 import {
   cancelBatch,
   createBatch,
+  exportBatchResultsCsv,
   getActions,
   getBatch,
   getBatches,
   getClients,
+  getRun,
+  runAction,
 } from "@/services/api";
-import type { ApiBatch, ApiClient } from "@/types/api";
+import type { ApiBatch, ApiClient, ApiRun } from "@/types/api";
 
 export const Route = createFileRoute("/execucao")({
-  head: () => ({ meta: [{ title: "Execução em massa — CotaSync" }] }),
+  head: () => ({ meta: [{ title: "Execução — CotaSync" }] }),
   component: ExecucaoPage,
 });
 
@@ -51,12 +54,21 @@ function ExecucaoPage() {
   const [delay, setDelay] = useState(3);
   const [currentBatchId, setCurrentBatchId] = useState<string | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
+  const [singleActionId, setSingleActionId] = useState("");
+  const [singleClientId, setSingleClientId] = useState("");
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const currentBatch = useQuery({
     queryKey: ["batch", currentBatchId],
     queryFn: () => getBatch(currentBatchId as string),
     enabled: Boolean(currentBatchId),
     refetchInterval: (query) =>
       isFinalBatch(query.state.data as ApiBatch | undefined) ? false : 2500,
+  });
+  const currentRun = useQuery({
+    queryKey: ["run", currentRunId],
+    queryFn: () => getRun(currentRunId as string),
+    enabled: Boolean(currentRunId),
+    refetchInterval: (query) => (isFinalRun(query.state.data as ApiRun | undefined) ? false : 2500),
   });
 
   const groups = useMemo(
@@ -70,6 +82,27 @@ function ExecucaoPage() {
     () => (clients.data?.items ?? []).filter((client) => !group || client.group === group),
     [clients.data, group],
   );
+  const selectedSingleClient = useMemo(
+    () => (clients.data?.items ?? []).find((client) => client.id === singleClientId),
+    [clients.data, singleClientId],
+  );
+
+  const runSingle = useMutation({
+    mutationFn: async () => {
+      if (!selectedSingleClient) throw new Error("Selecione um cliente.");
+      return runAction(singleActionId, variablesFromClient(selectedSingleClient));
+    },
+    onSuccess: (run) => {
+      setCurrentRunId(run.id);
+      toast.success("Execução individual adicionada à fila.");
+      void queryClient.invalidateQueries({ queryKey: ["reports"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Não foi possível executar a ação individual.",
+      ),
+  });
 
   const create = useMutation({
     mutationFn: () =>
@@ -109,7 +142,95 @@ function ExecucaoPage() {
     : 0;
 
   return (
-    <AppShell title="Execução em massa" subtitle="Um cliente por vez, na ordem da fila">
+    <AppShell title="Execução" subtitle="Consultas individuais e lotes sequenciais">
+      <div className="mb-4 grid gap-4 lg:grid-cols-[360px_1fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Execução individual</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-2">
+              <Label>Ação</Label>
+              <Select value={singleActionId} onValueChange={setSingleActionId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione uma ação" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(actions.data?.items ?? []).map((action) => (
+                    <SelectItem key={action.id} value={action.id}>
+                      {action.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-2">
+              <Label>Cliente</Label>
+              <Select value={singleClientId} onValueChange={setSingleClientId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Selecione um cliente ativo" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(clients.data?.items ?? []).map((client) => (
+                    <SelectItem key={client.id} value={client.id}>
+                      {client.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {selectedSingleClient && (
+              <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
+                Grupo {selectedSingleClient.display_variables.grupo || "-"} · Cota{" "}
+                {selectedSingleClient.display_variables.cota || "-"} · Versão{" "}
+                {selectedSingleClient.display_variables.versao || "-"}
+              </div>
+            )}
+            <Button
+              className="w-full"
+              disabled={!singleActionId || !singleClientId || runSingle.isPending}
+              onClick={() => runSingle.mutate()}
+            >
+              <Play className="h-4 w-4" />{" "}
+              {runSingle.isPending ? "Enfileirando..." : "Executar cliente"}
+            </Button>
+            {currentRun.data && (
+              <RunProgress
+                run={currentRun.data}
+                loading={currentRun.isFetching && !isFinalRun(currentRun.data)}
+              />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Resultado individual</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!currentRun.data ? (
+              <p className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                Execute um cliente para acompanhar status e resultado aqui.
+              </p>
+            ) : (
+              <div className="space-y-3 text-sm">
+                <Info label="Run" value={currentRun.data.id} />
+                <Info label="Status" value={runStatus(currentRun.data.status)} />
+                <Info
+                  label="Resultado"
+                  value={
+                    currentRun.data.operational_summary ||
+                    currentRun.data.result_summary ||
+                    currentRun.data.error_message ||
+                    "-"
+                  }
+                />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
         <Card>
           <CardHeader>
@@ -221,7 +342,23 @@ function ExecucaoPage() {
                   >
                     <StopCircle className="h-4 w-4" /> Cancelar execução
                   </Button>
-                  <Button variant="outline" size="sm" disabled>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!batchId}
+                    onClick={async () => {
+                      try {
+                        downloadCsv(
+                          `batch_${batchId}_results.csv`,
+                          await exportBatchResultsCsv(batchId),
+                        );
+                      } catch (error) {
+                        toast.error(
+                          error instanceof Error ? error.message : "Não foi possível baixar o CSV.",
+                        );
+                      }
+                    }}
+                  >
                     <Download className="h-4 w-4" /> Baixar CSV final
                   </Button>
                 </div>
@@ -242,6 +379,27 @@ function ExecucaoPage() {
         </Card>
       </div>
     </AppShell>
+  );
+}
+
+function RunProgress({ run, loading }: { run: ApiRun; loading: boolean }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-muted-foreground">{loading ? "Atualizando..." : "Status"}</span>
+        <BadgeStatus
+          tone={run.status === "success" ? "success" : run.status === "error" ? "error" : "info"}
+        >
+          {runStatus(run.status)}
+        </BadgeStatus>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        {run.status === "pending" && "A execução entrou na fila."}
+        {run.status === "running" && "O sistema está operando no navegador."}
+        {run.status === "success" && "Execução concluída."}
+        {run.status === "error" && (run.error_message || "Execução finalizada com erro.")}
+      </p>
+    </div>
   );
 }
 
@@ -306,4 +464,37 @@ function isFinalBatch(batch?: ApiBatch) {
       batch.status,
     ),
   );
+}
+
+function isFinalRun(run?: ApiRun) {
+  return Boolean(run && ["success", "error"].includes(run.status));
+}
+
+function runStatus(status: string) {
+  return (
+    (
+      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila" } as Record<
+        string,
+        string
+      >
+    )[status] || status
+  );
+}
+
+function variablesFromClient(client: ApiClient) {
+  return {
+    grupo: client.display_variables?.grupo || client.variables.grupo || "",
+    cota: client.display_variables?.cota || client.variables.cota || "",
+    versao: client.display_variables?.versao || client.variables.versao || "",
+  };
+}
+
+function downloadCsv(filename: string, csvText: string) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }

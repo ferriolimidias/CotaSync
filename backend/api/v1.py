@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import UTC, datetime, time
 from typing import Any
 
@@ -26,10 +28,13 @@ from backend.services.batch_runner import (
 from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
 from backend.services.clients_repository import (
     ClientsRepositoryError,
+    CLIENT_TEMPLATE_COLUMNS,
     create_client,
     deactivate_client,
     get_client,
+    get_client_display_fields,
     list_clients,
+    parse_clients_csv,
     update_client,
 )
 from backend.services.demo_session import DemoSessionError, demo_session_manager
@@ -71,6 +76,32 @@ class ActionRunPayload(BaseModel):
     run_origin: str = "operational"
 
 
+class ClientsCsvPayload(BaseModel):
+    filename: str = "clientes.csv"
+    csv_text: str = Field(min_length=1)
+
+
+MAX_CLIENTS_CSV_BYTES = 1_048_576
+MAX_CLIENTS_CSV_ROWS = 1_000
+CLIENTS_CSV_SUPPORTED_HEADERS = {
+    "id",
+    "name",
+    "group",
+    "active",
+    "grupo",
+    "cota",
+    "grupo_2",
+    "versao",
+    "vers_o",
+    "grupo_3",
+    "notes",
+}
+CLIENTS_CSV_CONFLICT_GROUPS = {
+    "cota": ("cota", "grupo_2"),
+    "versao": ("versao", "vers_o", "grupo_3"),
+}
+
+
 def _error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
@@ -99,6 +130,203 @@ def _batch_summary(batch: dict[str, Any]) -> dict[str, Any]:
         "started_at": batch.get("started_at"),
         "finished_at": batch.get("finished_at"),
     }
+
+
+def _csv_text_with_limits(payload: ClientsCsvPayload) -> str:
+    filename = str(payload.filename or "")
+    if filename and not filename.lower().endswith(".csv"):
+        raise _error(422, "CLIENTS_CSV_INVALID", "Envie um arquivo CSV.")
+    try:
+        size = len(payload.csv_text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise _error(422, "CLIENTS_CSV_ENCODING", "CSV deve estar em UTF-8.") from exc
+    if size > MAX_CLIENTS_CSV_BYTES:
+        raise _error(413, "CLIENTS_CSV_TOO_LARGE", "CSV deve ter no maximo 1 MB.")
+    return payload.csv_text.lstrip("\ufeff")
+
+
+def _raw_csv_rows(csv_text: str) -> tuple[list[str], list[dict[str, str]]]:
+    try:
+        reader = csv.DictReader(io.StringIO(csv_text))
+        headers = [str(header or "").lstrip("\ufeff").strip() for header in (reader.fieldnames or [])]
+        rows: list[dict[str, str]] = []
+        for raw_row in reader:
+            row = {
+                str(key or "").lstrip("\ufeff").strip(): "" if value is None else str(value).strip()
+                for key, value in (raw_row or {}).items()
+                if key is not None and str(key).strip()
+            }
+            if any(value.strip() for value in row.values()):
+                rows.append(row)
+            if len(rows) > MAX_CLIENTS_CSV_ROWS:
+                raise _error(413, "CLIENTS_CSV_TOO_MANY_ROWS", "CSV deve ter no maximo 1000 linhas.")
+    except csv.Error as exc:
+        raise _error(422, "CLIENTS_CSV_INVALID", "CSV invalido.") from exc
+    if not headers:
+        raise _error(422, "CLIENTS_CSV_HEADERS_MISSING", "CSV precisa de cabecalho.")
+    unknown = sorted({header for header in headers if header not in CLIENTS_CSV_SUPPORTED_HEADERS})
+    if unknown:
+        raise _error(422, "CLIENTS_CSV_UNSUPPORTED_HEADERS", f"Cabecalhos nao suportados: {', '.join(unknown)}.")
+    return headers, rows
+
+
+def _conflicts_for_raw_row(row_number: int, raw_row: dict[str, str]) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    for canonical, aliases in CLIENTS_CSV_CONFLICT_GROUPS.items():
+        values = {alias: str(raw_row.get(alias) or "").strip() for alias in aliases}
+        filled = {key: value for key, value in values.items() if value}
+        if len(set(filled.values())) > 1:
+            conflicts.append(
+                {
+                    "row_number": row_number,
+                    "field": canonical,
+                    "message": f"Valores divergentes para {canonical}.",
+                    "values": filled,
+                }
+            )
+    return conflicts
+
+
+def _clients_import_preview(csv_text: str) -> dict[str, Any]:
+    headers, raw_rows = _raw_csv_rows(csv_text)
+    parsed = parse_clients_csv(csv_text)
+    existing = list_clients(include_inactive=True)
+    existing_ids = {str(client.get("id") or "") for client in existing}
+    existing_name_group = {
+        (str(client.get("name") or "").casefold(), str(client.get("group") or "").casefold())
+        for client in existing
+    }
+    invalid: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    preview_rows: list[dict[str, Any]] = []
+    new_clients = 0
+    updates = 0
+    for index, raw in enumerate(raw_rows, start=2):
+        row_conflicts = _conflicts_for_raw_row(index, raw)
+        conflicts.extend(row_conflicts)
+        parsed_row = parsed[index - 2] if index - 2 < len(parsed) else {}
+        row_errors = []
+        if not str(parsed_row.get("name") or "").strip():
+            row_errors.append("Nome do cliente e obrigatorio.")
+        if row_conflicts:
+            row_errors.append("Ha campos equivalentes com valores diferentes.")
+        if row_errors:
+            invalid.append({"row_number": index, "errors": row_errors})
+        raw_id = str(parsed_row.get("id") or "").strip()
+        name_group = (
+            str(parsed_row.get("name") or "").casefold(),
+            str(parsed_row.get("group") or "").casefold(),
+        )
+        operation = "update" if (raw_id and raw_id in existing_ids) or name_group in existing_name_group else "create"
+        if operation == "update":
+            updates += 1
+        else:
+            new_clients += 1
+        variables = parsed_row.get("variables", {}) if isinstance(parsed_row, dict) else {}
+        display = get_client_display_fields({"variables": variables})
+        if len(preview_rows) < 50:
+            preview_rows.append(
+                {
+                    "row_number": index,
+                    "operation": operation,
+                    "valid": not row_errors,
+                    "name": parsed_row.get("name", ""),
+                    "group": parsed_row.get("group", ""),
+                    "active": parsed_row.get("active", True),
+                    "display_variables": display,
+                    "notes": parsed_row.get("notes", ""),
+                    "errors": row_errors,
+                }
+            )
+    if not raw_rows:
+        warnings.append({"code": "EMPTY_CSV", "message": "CSV sem linhas de clientes."})
+    if len(raw_rows) > len(preview_rows):
+        warnings.append({"code": "PREVIEW_TRUNCATED", "message": "Preview mostra as primeiras 50 linhas."})
+    valid_rows = len(raw_rows) - len(invalid)
+    return {
+        "filename": "",
+        "limits": {
+            "max_bytes": MAX_CLIENTS_CSV_BYTES,
+            "max_rows": MAX_CLIENTS_CSV_ROWS,
+            "encoding": "utf-8",
+            "supported_headers": sorted(CLIENTS_CSV_SUPPORTED_HEADERS),
+        },
+        "headers": headers,
+        "total_rows": len(raw_rows),
+        "valid_rows": valid_rows,
+        "invalid_rows": len(invalid),
+        "new_clients": new_clients,
+        "updates": updates,
+        "conflicts": conflicts,
+        "warnings": warnings,
+        "rows": preview_rows,
+        "can_import": valid_rows > 0 and not invalid and not conflicts,
+    }
+
+
+def _clients_export_csv(clients: list[dict[str, Any]]) -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=CLIENT_TEMPLATE_COLUMNS)
+    writer.writeheader()
+    for client in clients:
+        display = client.get("display_variables") or get_client_display_fields(client)
+        writer.writerow(
+            {
+                "id": client.get("id", ""),
+                "name": client.get("name", ""),
+                "group": client.get("group", ""),
+                "active": "true" if client.get("active", True) else "false",
+                "grupo": display.get("grupo", ""),
+                "cota": display.get("cota", ""),
+                "versao": display.get("versao", ""),
+                "notes": client.get("notes", ""),
+            }
+        )
+    return output.getvalue()
+
+
+def _run_matches_filters(run: dict[str, Any], *, client: str | None, date_from: str | None, date_to: str | None) -> bool:
+    if client:
+        wanted = client.casefold()
+        haystack = " ".join(
+            [
+                str(run.get("client_id") or ""),
+                str((run.get("variables") or {}).get("client_id") or ""),
+                str((run.get("variables") or {}).get("name") or ""),
+                str((run.get("variables") or {}).get("cliente") or ""),
+            ]
+        ).casefold()
+        if wanted not in haystack:
+            return False
+    created = str(run.get("created_at") or "")
+    if date_from and created[:10] < date_from:
+        return False
+    if date_to and created[:10] > date_to:
+        return False
+    return True
+
+
+def _runs_csv(runs: list[dict[str, Any]]) -> str:
+    output = io.StringIO()
+    columns = ["id", "created_at", "action_id", "action_key", "status", "run_origin", "requested_by", "result", "error"]
+    writer = csv.DictWriter(output, fieldnames=columns)
+    writer.writeheader()
+    for run in runs:
+        writer.writerow(
+            {
+                "id": run.get("id", ""),
+                "created_at": run.get("created_at", ""),
+                "action_id": run.get("action_id", ""),
+                "action_key": run.get("action_key", ""),
+                "status": run.get("status", ""),
+                "run_origin": run.get("run_origin", ""),
+                "requested_by": run.get("requested_by", ""),
+                "result": run.get("operational_summary") or run.get("result_summary") or "",
+                "error": run.get("error_message") or "",
+            }
+        )
+    return output.getvalue()
 
 
 @router.get("/dashboard", summary="Resumo operacional para dashboard")
@@ -147,6 +375,61 @@ async def clients_list(
     except ClientsRepositoryError as exc:
         raise _error(500, "CLIENTS_UNAVAILABLE", str(exc)) from exc
     return {"status": "ok", "clients": _paginate(clients, page, page_size)}
+
+
+@router.post("/clients/import/preview", summary="Preview validado de CSV de clientes")
+async def clients_import_preview(payload: ClientsCsvPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    csv_text = _csv_text_with_limits(payload)
+    preview = _clients_import_preview(csv_text)
+    preview["filename"] = payload.filename
+    return {"status": "ok", "preview": preview}
+
+
+@router.post("/clients/import", summary="Importa CSV de clientes apos preview")
+async def clients_import(payload: ClientsCsvPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    csv_text = _csv_text_with_limits(payload)
+    preview = _clients_import_preview(csv_text)
+    if not preview["can_import"]:
+        raise _error(422, "CLIENTS_CSV_HAS_ERRORS", "Corrija os conflitos e linhas invalidas antes de importar.")
+    try:
+        parsed = parse_clients_csv(csv_text)
+        created = 0
+        updated = 0
+        clients = []
+        existing = list_clients(include_inactive=True)
+        by_id = {str(client.get("id") or ""): client for client in existing}
+        by_name_group = {
+            (str(client.get("name") or "").casefold(), str(client.get("group") or "").casefold()): client
+            for client in existing
+        }
+        for raw in parsed:
+            raw_id = str(raw.get("id") or "").strip()
+            existing_client = by_id.get(raw_id) if raw_id else None
+            existing_client = existing_client or by_name_group.get(
+                (str(raw.get("name") or "").casefold(), str(raw.get("group") or "").casefold())
+            )
+            if existing_client:
+                clients.append(update_client(str(existing_client["id"]), raw))
+                updated += 1
+            else:
+                clients.append(create_client(raw))
+                created += 1
+    except ClientsRepositoryError as exc:
+        raise _error(422, "CLIENTS_CSV_IMPORT_FAILED", str(exc)) from exc
+    return {"status": "ok", "import_result": {"created": created, "updated": updated, "count": len(clients), "clients": clients}}
+
+
+@router.get("/clients/export.csv", summary="Exporta clientes em CSV")
+async def clients_export_csv(_user: AuthUser = Depends(require_user)) -> FastAPIResponse:
+    try:
+        clients = list_clients(include_inactive=True)
+    except ClientsRepositoryError as exc:
+        raise _error(500, "CLIENTS_UNAVAILABLE", str(exc)) from exc
+    return FastAPIResponse(
+        content=_clients_export_csv(clients),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="clientes_cotasync.csv"'},
+    )
 
 
 @router.post("/clients", summary="Cria cliente")
@@ -250,6 +533,14 @@ async def action_run(action_id: str, payload: ActionRunPayload, _user: AuthUser 
             run = await run_action_sync(action, payload)  # type: ignore[arg-type]
     except RunsRepositoryError as exc:
         raise _error(500, "RUN_UNAVAILABLE", str(exc)) from exc
+    return {"status": "ok", "run": run.model_dump()}
+
+
+@router.get("/runs/{run_id}", summary="Consulta execução individual")
+async def runs_get(run_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    run = get_run(run_id)
+    if run is None:
+        raise _error(404, "RUN_NOT_FOUND", "Execucao nao encontrada.")
     return {"status": "ok", "run": run.model_dump()}
 
 
@@ -473,6 +764,11 @@ async def batches_results(batch_id: str, _user: AuthUser = Depends(require_user)
     return FastAPIResponse(content=batch_results_csv(batch), media_type="text/csv; charset=utf-8")
 
 
+@router.get("/batches/{batch_id}/results.csv", summary="Resultados CSV do batch")
+async def batches_results_csv_alias(batch_id: str, _user: AuthUser = Depends(require_user)) -> FastAPIResponse:
+    return await batches_results(batch_id, _user)
+
+
 @router.get("/worker/status", summary="Status do worker")
 async def worker_status(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     return {"status": "ok", "worker": latest_worker_status()}
@@ -485,6 +781,9 @@ async def reports_runs(
     action_id: str | None = None,
     status: str | None = None,
     run_origin: str | None = None,
+    client: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
@@ -493,7 +792,32 @@ async def reports_runs(
         raise _error(500, "RUNS_UNAVAILABLE", str(exc)) from exc
     if run_origin:
         runs = [run for run in runs if run.get("run_origin") == run_origin]
+    runs = [run for run in runs if _run_matches_filters(run, client=client, date_from=date_from, date_to=date_to)]
     return {"status": "ok", "runs": _paginate(runs, page, page_size)}
+
+
+@router.get("/reports/runs.csv", summary="Exporta histórico filtrado de runs em CSV")
+async def reports_runs_csv(
+    action_id: str | None = None,
+    status: str | None = None,
+    run_origin: str | None = None,
+    client: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    _user: AuthUser = Depends(require_user),
+) -> FastAPIResponse:
+    try:
+        runs = [run.model_dump() for run in list_runs(action_id=action_id, status=status, limit=500)]  # type: ignore[arg-type]
+    except RunsRepositoryError as exc:
+        raise _error(500, "RUNS_UNAVAILABLE", str(exc)) from exc
+    if run_origin:
+        runs = [run for run in runs if run.get("run_origin") == run_origin]
+    runs = [run for run in runs if _run_matches_filters(run, client=client, date_from=date_from, date_to=date_to)]
+    return FastAPIResponse(
+        content=_runs_csv(runs),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="execucoes_cotasync.csv"'},
+    )
 
 
 @router.get("/reports/batches", summary="Histórico paginado de batches")

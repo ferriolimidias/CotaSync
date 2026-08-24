@@ -7,6 +7,7 @@ import { Download, Pencil, Plus, PowerOff, Search, Upload } from "lucide-react";
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { DataTable, type Column } from "@/components/cotasync/DataTable";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -27,8 +28,16 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { createClient, deactivateClient, getClients, updateClient } from "@/services/api";
-import type { ApiClient } from "@/types/api";
+import {
+  createClient,
+  deactivateClient,
+  exportClientsCsv,
+  getClients,
+  importClientsCsv,
+  previewClientsCsv,
+  updateClient,
+} from "@/services/api";
+import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow } from "@/types/api";
 
 export const Route = createFileRoute("/clientes")({
   head: () => ({ meta: [{ title: "Clientes — CotaSync" }] }),
@@ -45,6 +54,8 @@ type FormState = {
   versao: string;
   notes: string;
 };
+
+type PreviewRowWithId = ClientsCsvPreviewRow & { id: string };
 
 const emptyForm: FormState = {
   name: "",
@@ -63,6 +74,9 @@ function ClientesPage() {
   const [group, setGroup] = useState("all");
   const [status, setStatus] = useState("all");
   const [form, setForm] = useState<FormState | null>(null);
+  const [csvDialogOpen, setCsvDialogOpen] = useState(false);
+  const [csvFile, setCsvFile] = useState<{ name: string; text: string } | null>(null);
+  const [csvPreview, setCsvPreview] = useState<ClientsCsvPreview | null>(null);
 
   const groups = useMemo(
     () =>
@@ -111,6 +125,40 @@ function ClientesPage() {
     },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "Não foi possível desativar o cliente."),
+  });
+
+  const previewCsv = useMutation({
+    mutationFn: async () => {
+      if (!csvFile) throw new Error("Selecione um arquivo CSV.");
+      return previewClientsCsv({ filename: csvFile.name, csvText: csvFile.text });
+    },
+    onSuccess: (preview) => setCsvPreview(preview),
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível validar o CSV."),
+  });
+
+  const importCsv = useMutation({
+    mutationFn: async () => {
+      if (!csvFile) throw new Error("Selecione um arquivo CSV.");
+      return importClientsCsv({ filename: csvFile.name, csvText: csvFile.text });
+    },
+    onSuccess: (result) => {
+      toast.success(`${result.count} clientes importados.`);
+      setCsvDialogOpen(false);
+      setCsvFile(null);
+      setCsvPreview(null);
+      void queryClient.invalidateQueries({ queryKey: ["clients"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível importar o CSV."),
+  });
+
+  const exportCsv = useMutation({
+    mutationFn: exportClientsCsv,
+    onSuccess: (csvText) => downloadCsv("clientes_cotasync.csv", csvText),
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível exportar clientes."),
   });
 
   const columns: Column<ApiClient>[] = [
@@ -197,20 +245,10 @@ function ClientesPage() {
             </SelectContent>
           </Select>
           <div className="ml-auto flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled
-              title="Importação CSV será conectada em rodada posterior"
-            >
-              <Download className="h-4 w-4" /> Modelo CSV
+            <Button variant="outline" size="sm" onClick={() => exportCsv.mutate()}>
+              <Download className="h-4 w-4" /> Exportar CSV
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled
-              title="Importação CSV pendente de fachada v1"
-            >
+            <Button variant="outline" size="sm" onClick={() => setCsvDialogOpen(true)}>
               <Upload className="h-4 w-4" /> Importar CSV
             </Button>
             <Button size="sm" onClick={() => setForm(emptyForm)}>
@@ -232,7 +270,160 @@ function ClientesPage() {
         onSubmit={(input) => save.mutate(input)}
         saving={save.isPending}
       />
+      <CsvImportDialog
+        open={csvDialogOpen}
+        onOpenChange={(open) => {
+          setCsvDialogOpen(open);
+          if (!open) {
+            setCsvFile(null);
+            setCsvPreview(null);
+          }
+        }}
+        csvFile={csvFile}
+        setCsvFile={(file) => {
+          setCsvFile(file);
+          setCsvPreview(null);
+        }}
+        preview={csvPreview}
+        previewing={previewCsv.isPending}
+        importing={importCsv.isPending}
+        onPreview={() => previewCsv.mutate()}
+        onImport={() => importCsv.mutate()}
+      />
     </AppShell>
+  );
+}
+
+function CsvImportDialog({
+  open,
+  onOpenChange,
+  csvFile,
+  setCsvFile,
+  preview,
+  previewing,
+  importing,
+  onPreview,
+  onImport,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  csvFile: { name: string; text: string } | null;
+  setCsvFile: (file: { name: string; text: string } | null) => void;
+  preview: ClientsCsvPreview | null;
+  previewing: boolean;
+  importing: boolean;
+  onPreview: () => void;
+  onImport: () => void;
+}) {
+  const previewColumns: Column<PreviewRowWithId>[] = [
+    { key: "line", header: "Linha", cell: (row) => row.row_number },
+    { key: "name", header: "Nome", cell: (row) => row.name || "-" },
+    { key: "group", header: "Lista/grupo", cell: (row) => row.group || "-" },
+    { key: "grupo", header: "Grupo", cell: (row) => row.display_variables.grupo || "-" },
+    { key: "cota", header: "Cota", cell: (row) => row.display_variables.cota || "-" },
+    { key: "versao", header: "Versão", cell: (row) => row.display_variables.versao || "-" },
+    {
+      key: "status",
+      header: "Estado",
+      cell: (row) => (
+        <BadgeStatus tone={row.valid ? "success" : "error"}>
+          {row.valid ? (row.operation === "update" ? "Atualização" : "Novo") : "Corrigir"}
+        </BadgeStatus>
+      ),
+    },
+  ];
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] max-w-5xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Importar clientes por CSV</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <Alert>
+            <AlertTitle>Preview obrigatório</AlertTitle>
+            <AlertDescription>
+              Limites: CSV UTF-8, até 1 MB e 1000 linhas. Headers aceitos: id, name, group, active,
+              grupo, cota, versao e notes.
+            </AlertDescription>
+          </Alert>
+          <div className="grid gap-2">
+            <Label>Arquivo CSV</Label>
+            <Input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={async (event) => {
+                const file = event.target.files?.[0];
+                if (!file) {
+                  setCsvFile(null);
+                  return;
+                }
+                setCsvFile({ name: file.name, text: await file.text() });
+              }}
+            />
+            {csvFile && (
+              <p className="text-xs text-muted-foreground">
+                {csvFile.name} · {new Blob([csvFile.text]).size} bytes
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={!csvFile || previewing} onClick={onPreview}>
+              {previewing ? "Validando..." : "Gerar preview"}
+            </Button>
+            <Button disabled={!preview?.can_import || importing} onClick={onImport}>
+              {importing ? "Importando..." : "Confirmar importação"}
+            </Button>
+          </div>
+          {preview && (
+            <>
+              <div className="grid gap-2 text-sm sm:grid-cols-5">
+                <CsvMetric label="Linhas" value={preview.total_rows} />
+                <CsvMetric label="Válidas" value={preview.valid_rows} />
+                <CsvMetric label="Inválidas" value={preview.invalid_rows} />
+                <CsvMetric label="Novos" value={preview.new_clients} />
+                <CsvMetric label="Atualizações" value={preview.updates} />
+              </div>
+              {preview.conflicts.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Conflitos encontrados</AlertTitle>
+                  <AlertDescription>
+                    {preview.conflicts.slice(0, 5).map((conflict) => (
+                      <p key={`${conflict.row_number}-${conflict.field}`}>
+                        Linha {conflict.row_number}: {conflict.message}
+                      </p>
+                    ))}
+                  </AlertDescription>
+                </Alert>
+              )}
+              {preview.warnings.length > 0 && (
+                <Alert>
+                  <AlertTitle>Avisos</AlertTitle>
+                  <AlertDescription>
+                    {preview.warnings.map((warning) => (
+                      <p key={warning.code}>{warning.message}</p>
+                    ))}
+                  </AlertDescription>
+                </Alert>
+              )}
+              <DataTable
+                columns={previewColumns}
+                data={preview.rows.map((row) => ({ id: String(row.row_number), ...row }))}
+                empty="Nenhuma linha para mostrar."
+              />
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CsvMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/20 p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-lg font-semibold text-foreground">{value}</p>
+    </div>
   );
 }
 
@@ -341,4 +532,14 @@ function fromClient(client: ApiClient): FormState {
     versao: client.display_variables?.versao || client.variables.versao || "",
     notes: client.notes || "",
   };
+}
+
+function downloadCsv(filename: string, csvText: string) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }

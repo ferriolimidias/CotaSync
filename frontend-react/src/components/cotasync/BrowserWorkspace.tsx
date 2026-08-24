@@ -15,7 +15,7 @@ export function BrowserWorkspace() {
   const viewUrl = token.data?.view_url;
 
   return (
-    <div className="flex min-h-[520px] flex-col overflow-hidden rounded-lg border border-border bg-card">
+    <div className="flex min-h-[min(680px,calc(100vh-9rem))] flex-col overflow-hidden rounded-lg border border-border bg-card">
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
         <div className="flex items-center gap-2 text-sm font-medium">
           <Monitor className="h-4 w-4" />
@@ -34,10 +34,10 @@ export function BrowserWorkspace() {
         <iframe
           title="Navegador CotaSync"
           src={viewUrl}
-          className="min-h-[520px] flex-1 bg-background"
+          className="min-h-[min(620px,calc(100vh-12rem))] flex-1 bg-background"
         />
       ) : (
-        <div className="grid min-h-[520px] flex-1 place-items-center bg-muted/30 p-6 text-center">
+        <div className="grid min-h-[min(620px,calc(100vh-12rem))] flex-1 place-items-center bg-muted/30 p-6 text-center">
           <div>
             <p className="text-sm font-medium text-foreground">
               {status.data ? "Navegador pronto para abrir." : "Verificando navegador..."}
