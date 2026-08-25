@@ -4,6 +4,7 @@ import csv
 import io
 from datetime import UTC, datetime, time
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import Response as FastAPIResponse
@@ -13,6 +14,7 @@ from sqlalchemy import text
 from backend.api.demo import GuidedLearningRequest, OperatorInsertActiveRequest, OperatorPressRequest, SaveDemoActionRequest
 from backend.api.desktop_browser import _public_view_url
 from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal
+from backend.services.action_pages import is_reauthentication_url, url_host
 from backend.services.actions_repository import ActionsRepositoryError, find_action, load_actions_catalog
 from backend.services.action_runner import finish_action_run, missing_required_variables, run_action_sync, start_action_run
 from backend.services.auth import AuthUser, require_admin, require_user
@@ -383,6 +385,54 @@ async def _navigate_desktop_browser(url: str) -> None:
         await connection.page.goto(url, wait_until="domcontentloaded", timeout=20_000)
     finally:
         await playwright.stop()
+
+
+async def _current_desktop_url() -> str:
+    playwright = await async_playwright().start()
+    try:
+        connection = await browser_provider("desktop_browser").connect(playwright, "external-status")
+        return str(connection.page.url or "")
+    finally:
+        await playwright.stop()
+
+
+def _redirect_uri_host(login_url: str) -> str:
+    try:
+        parsed = urlsplit(str(login_url or "").strip())
+        redirect_uri = parse_qs(parsed.query).get("redirect_uri", [""])[0]
+        return url_host(redirect_uri)
+    except (ValueError, IndexError):
+        return ""
+
+
+def _expected_external_hosts(config: dict[str, Any]) -> set[str]:
+    expected_host = str(config.get("expected_system_host") or "").strip().lower().rstrip(".")
+    login_url = str(config.get("external_login_url") or "")
+    hosts = {
+        expected_host,
+        _redirect_uri_host(login_url),
+    }
+    return {host for host in hosts if host}
+
+
+async def _external_session_status_from_browser(config: dict[str, Any]) -> str:
+    external_session = _external_session_payload(config)
+    if not external_session["external_system_configured"]:
+        return "not_configured"
+    health = await desktop_browser_health()
+    if not health.get("cdp_reachable"):
+        return "browser_offline"
+    try:
+        current_url = await _current_desktop_url()
+    except Exception:
+        return "unknown"
+    current_host = url_host(current_url)
+    expected_hosts = _expected_external_hosts(config)
+    if current_host and current_host in expected_hosts:
+        return "authenticated"
+    if is_reauthentication_url(current_url, expected_hosts):
+        return "unauthenticated"
+    return "unknown"
 
 
 def _action_executable(action: Any) -> bool:
@@ -808,7 +858,9 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
         config = load_current_external_system()
     except ExternalSystemConfigError as exc:
         raise _error(500, "EXTERNAL_SESSION_UNAVAILABLE", str(exc)) from exc
-    return {"status": "ok", "external_session": _external_session_payload(config)}
+    external_session = _external_session_payload(config)
+    external_session["session_status"] = await _external_session_status_from_browser(config)
+    return {"status": "ok", "external_session": external_session}
 
 
 @router.post("/external-session/open-login", summary="Retorna URL de login configurada")
@@ -831,9 +883,10 @@ async def external_session_open_login(_user: AuthUser = Depends(require_user)) -
 async def external_session_validate(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     config = load_current_external_system()
     external_session = _external_session_payload(config)
+    external_session["session_status"] = await _external_session_status_from_browser(config)
     return {
         "status": "ok",
-        "valid": bool(external_session["external_system_configured"]),
+        "valid": external_session["session_status"] == "authenticated",
         "configuration_valid": bool(external_session["external_system_configured"]),
         "session_status": external_session["session_status"],
         "manual_login_required": True,

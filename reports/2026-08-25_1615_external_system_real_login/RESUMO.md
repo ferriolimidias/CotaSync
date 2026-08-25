@@ -24,6 +24,7 @@ Data: 2026-08-25
 - `/configuracoes/navegador` abre o noVNC automaticamente e mostra `Renovar acesso` apenas para renovar o token de visualização.
 - O workspace normal não renderiza OperatorAssistant; a digitação de login/senha/MFA deve ocorrer diretamente no noVNC.
 - O OperatorAssistant permanece disponível em `/ensinar-acao` para variáveis e aprendizado.
+- `Validar sessão` e o polling de status consultam a página atual do Chromium persistente e classificam a sessão por host esperado/redirect_uri, sem usar `browser running` como prova de login.
 
 ## Persistência
 
