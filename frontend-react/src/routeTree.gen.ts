@@ -18,6 +18,7 @@ import { Route as ClientesRouteImport } from './routes/clientes'
 import { Route as AgendamentosRouteImport } from './routes/agendamentos'
 import { Route as AcoesRouteImport } from './routes/acoes'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ConfiguracoesNavegadorRouteImport } from './routes/configuracoes.navegador'
 
 const RelatoriosRoute = RelatoriosRouteImport.update({
   id: '/relatorios',
@@ -64,28 +65,35 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConfiguracoesNavegadorRoute = ConfiguracoesNavegadorRouteImport.update({
+  id: '/navegador',
+  path: '/navegador',
+  getParentRoute: () => ConfiguracoesRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/acoes': typeof AcoesRoute
   '/agendamentos': typeof AgendamentosRoute
   '/clientes': typeof ClientesRoute
-  '/configuracoes': typeof ConfiguracoesRoute
+  '/configuracoes': typeof ConfiguracoesRouteWithChildren
   '/diagnostico': typeof DiagnosticoRoute
   '/ensinar-acao': typeof EnsinarAcaoRoute
   '/execucao': typeof ExecucaoRoute
   '/relatorios': typeof RelatoriosRoute
+  '/configuracoes/navegador': typeof ConfiguracoesNavegadorRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/acoes': typeof AcoesRoute
   '/agendamentos': typeof AgendamentosRoute
   '/clientes': typeof ClientesRoute
-  '/configuracoes': typeof ConfiguracoesRoute
+  '/configuracoes': typeof ConfiguracoesRouteWithChildren
   '/diagnostico': typeof DiagnosticoRoute
   '/ensinar-acao': typeof EnsinarAcaoRoute
   '/execucao': typeof ExecucaoRoute
   '/relatorios': typeof RelatoriosRoute
+  '/configuracoes/navegador': typeof ConfiguracoesNavegadorRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -93,11 +101,12 @@ export interface FileRoutesById {
   '/acoes': typeof AcoesRoute
   '/agendamentos': typeof AgendamentosRoute
   '/clientes': typeof ClientesRoute
-  '/configuracoes': typeof ConfiguracoesRoute
+  '/configuracoes': typeof ConfiguracoesRouteWithChildren
   '/diagnostico': typeof DiagnosticoRoute
   '/ensinar-acao': typeof EnsinarAcaoRoute
   '/execucao': typeof ExecucaoRoute
   '/relatorios': typeof RelatoriosRoute
+  '/configuracoes/navegador': typeof ConfiguracoesNavegadorRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -111,6 +120,7 @@ export interface FileRouteTypes {
     | '/ensinar-acao'
     | '/execucao'
     | '/relatorios'
+    | '/configuracoes/navegador'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -122,6 +132,7 @@ export interface FileRouteTypes {
     | '/ensinar-acao'
     | '/execucao'
     | '/relatorios'
+    | '/configuracoes/navegador'
   id:
     | '__root__'
     | '/'
@@ -133,6 +144,7 @@ export interface FileRouteTypes {
     | '/ensinar-acao'
     | '/execucao'
     | '/relatorios'
+    | '/configuracoes/navegador'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -140,7 +152,7 @@ export interface RootRouteChildren {
   AcoesRoute: typeof AcoesRoute
   AgendamentosRoute: typeof AgendamentosRoute
   ClientesRoute: typeof ClientesRoute
-  ConfiguracoesRoute: typeof ConfiguracoesRoute
+  ConfiguracoesRoute: typeof ConfiguracoesRouteWithChildren
   DiagnosticoRoute: typeof DiagnosticoRoute
   EnsinarAcaoRoute: typeof EnsinarAcaoRoute
   ExecucaoRoute: typeof ExecucaoRoute
@@ -212,15 +224,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/configuracoes/navegador': {
+      id: '/configuracoes/navegador'
+      path: '/navegador'
+      fullPath: '/configuracoes/navegador'
+      preLoaderRoute: typeof ConfiguracoesNavegadorRouteImport
+      parentRoute: typeof ConfiguracoesRoute
+    }
   }
 }
+
+interface ConfiguracoesRouteChildren {
+  ConfiguracoesNavegadorRoute: typeof ConfiguracoesNavegadorRoute
+}
+
+const ConfiguracoesRouteChildren: ConfiguracoesRouteChildren = {
+  ConfiguracoesNavegadorRoute: ConfiguracoesNavegadorRoute,
+}
+
+const ConfiguracoesRouteWithChildren = ConfiguracoesRoute._addFileChildren(
+  ConfiguracoesRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AcoesRoute: AcoesRoute,
   AgendamentosRoute: AgendamentosRoute,
   ClientesRoute: ClientesRoute,
-  ConfiguracoesRoute: ConfiguracoesRoute,
+  ConfiguracoesRoute: ConfiguracoesRouteWithChildren,
   DiagnosticoRoute: DiagnosticoRoute,
   EnsinarAcaoRoute: EnsinarAcaoRoute,
   ExecucaoRoute: ExecucaoRoute,

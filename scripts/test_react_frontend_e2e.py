@@ -110,6 +110,11 @@ def test_react_operational_smoke() -> None:
 
         page.get_by_role("link", name="Configurações", exact=True).click()
         page.wait_for_load_state("networkidle")
+        page.get_by_role("link", name="Abrir navegador", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        expect(page.locator("aside")).to_have_count(0)
+        expect(page.get_by_text("Conta", exact=True)).to_have_count(0)
+        expect(page.get_by_text("Sistema externo", exact=True)).to_have_count(0)
         page.get_by_role("button", name=re.compile(r"^(Abrir navegador|Renovar acesso)$")).click()
         frame = page.locator('iframe[title="Navegador CotaSync"]')
         expect(frame).to_be_visible(timeout=15_000)
@@ -119,6 +124,11 @@ def test_react_operational_smoke() -> None:
         expect(workspace).not_to_contain_text("403")
         expect(workspace).not_to_contain_text("502")
         expect(workspace).not_to_contain_text("nginx error")
+        page.get_by_role("link", name="Voltar", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        expect(page.get_by_role("heading", name="Configurações", exact=True)).to_be_visible(
+            timeout=10_000
+        )
 
         page.get_by_role("link", name="Clientes", exact=True).click()
         page.get_by_role("button", name="Importar CSV").click()
