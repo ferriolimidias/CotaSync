@@ -25,7 +25,7 @@ from backend.services.batch_runner import (
     list_batches,
     load_batch,
 )
-from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
+from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -39,9 +39,10 @@ from backend.services.clients_repository import (
 )
 from backend.services.demo_session import DemoSessionError, demo_session_manager
 from backend.services.desktop_view_tokens import create_token, validate_token
-from backend.services.external_systems import ExternalSystemConfigError, load_current_external_system
+from backend.services.external_systems import ExternalSystemConfigError, load_current_external_system, save_current_external_system
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.worker import latest_worker_status
+from playwright.async_api import async_playwright
 
 router = APIRouter(prefix="/api/v1", tags=["api-v1"])
 
@@ -74,6 +75,13 @@ class ActionRunPayload(BaseModel):
     requested_by: str = "api-v1"
     session_id: str | None = None
     run_origin: str = "operational"
+
+
+class ExternalSystemConfigPayload(BaseModel):
+    external_system_name: str = ""
+    external_login_url: str = ""
+    access_profile_email_or_identifier: str = ""
+    expected_system_host: str = ""
 
 
 class ClientsCsvPayload(BaseModel):
@@ -347,6 +355,34 @@ def _external_session_payload(config: dict[str, Any]) -> dict[str, Any]:
         "expected_system_host_configured": bool(str(config.get("expected_system_host") or "").strip()),
         "updated_at": config.get("updated_at"),
     }
+
+
+def _external_system_config_payload(config: dict[str, Any]) -> dict[str, Any]:
+    system_name = str(config.get("external_system_name") or "").strip()
+    login_url = str(config.get("external_login_url") or "")
+    configured = bool(system_name and login_url.strip())
+    return {
+        "external_system_name": system_name,
+        "external_login_url": login_url,
+        "access_profile_email_or_identifier": str(
+            config.get("access_profile_email_or_identifier")
+            or config.get("microsoft_saved_account_identifier")
+            or "",
+        ).strip()
+        if configured
+        else "",
+        "expected_system_host": str(config.get("expected_system_host") or "").strip() if configured else "",
+        "updated_at": config.get("updated_at"),
+    }
+
+
+async def _navigate_desktop_browser(url: str) -> None:
+    playwright = await async_playwright().start()
+    try:
+        connection = await browser_provider("desktop_browser").connect(playwright, "external-login")
+        await connection.page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+    finally:
+        await playwright.stop()
 
 
 def _action_executable(action: Any) -> bool:
@@ -728,6 +764,44 @@ async def browser_ensure_ready(_user: AuthUser = Depends(require_user)) -> dict[
     return {"status": "ok", "browser": health}
 
 
+@router.get("/external-system/config", summary="Configuração do sistema externo")
+async def external_system_config(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        config = load_current_external_system()
+    except ExternalSystemConfigError as exc:
+        raise _error(500, "EXTERNAL_SYSTEM_CONFIG_UNAVAILABLE", str(exc)) from exc
+    return {"status": "ok", "external_system": _external_system_config_payload(config)}
+
+
+@router.put("/external-system/config", summary="Salva configuração do sistema externo")
+async def external_system_config_save(
+    payload: ExternalSystemConfigPayload,
+    _admin: AuthUser = Depends(require_admin),
+) -> dict[str, Any]:
+    raw_login_url = str(payload.external_login_url or "")
+    expected_host = str(payload.expected_system_host or "").strip()
+    if raw_login_url and not expected_host:
+        try:
+            from urllib.parse import urlsplit
+
+            expected_host = (urlsplit(raw_login_url.strip()).hostname or "").strip()
+        except Exception:
+            expected_host = ""
+    try:
+        config = save_current_external_system(
+            {
+                "external_system_name": payload.external_system_name,
+                "external_login_url": raw_login_url,
+                "access_profile_email_or_identifier": payload.access_profile_email_or_identifier,
+                "microsoft_saved_account_identifier": payload.access_profile_email_or_identifier,
+                "expected_system_host": expected_host,
+            }
+        )
+    except ExternalSystemConfigError as exc:
+        raise _error(422, "EXTERNAL_SYSTEM_CONFIG_INVALID", str(exc)) from exc
+    return {"status": "ok", "external_system": _external_system_config_payload(config)}
+
+
 @router.get("/external-session/status", summary="Status de sessão externa")
 async def external_session_status(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
@@ -743,7 +817,14 @@ async def external_session_open_login(_user: AuthUser = Depends(require_user)) -
     login_url = str(config.get("external_login_url") or "")
     if not login_url:
         raise _error(422, "EXTERNAL_LOGIN_URL_MISSING", "URL de login externa nao configurada.")
-    return {"status": "ok", "login_url": login_url, "manual_login_required": True}
+    health = await desktop_browser_health()
+    if not health.get("cdp_reachable"):
+        raise _error(503, "BROWSER_UNAVAILABLE", "Desktop browser indisponivel.")
+    try:
+        await _navigate_desktop_browser(login_url)
+    except Exception as exc:
+        raise _error(503, "BROWSER_NAVIGATION_FAILED", "Nao foi possivel abrir a URL de login no navegador.") from exc
+    return {"status": "ok", "login_url": login_url, "manual_login_required": True, "browser_opened": True}
 
 
 @router.post("/external-session/validate", summary="Valida configuração de sessão externa")

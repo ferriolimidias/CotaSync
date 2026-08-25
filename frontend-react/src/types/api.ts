@@ -194,6 +194,14 @@ export type ExternalSessionStatus = {
   updated_at?: string | null;
 };
 
+export type ExternalSystemConfig = {
+  external_system_name: string;
+  external_login_url: string;
+  access_profile_email_or_identifier: string;
+  expected_system_host: string;
+  updated_at?: string | null;
+};
+
 export type LearningSession = {
   id?: string;
   session_id?: string;

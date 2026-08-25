@@ -1,7 +1,8 @@
-import { Link, Outlet, createFileRoute, useLocation } from "@tanstack/react-router";
+import { Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ExternalLink, Monitor, ShieldCheck } from "lucide-react";
+import { ExternalLink, Save, ShieldCheck } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -11,11 +12,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   getExternalSessionStatus,
+  getExternalSystemConfig,
   openExternalLogin,
+  saveExternalSystemConfig,
   validateExternalSession,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
 import { externalSessionStatusLabel, loginModeLabel } from "@/lib/status-labels";
+import type { ExternalSystemConfig } from "@/types/api";
 
 export const Route = createFileRoute("/configuracoes")({
   head: () => ({ meta: [{ title: "Configurações — CotaSync" }] }),
@@ -25,21 +29,48 @@ export const Route = createFileRoute("/configuracoes")({
 function ConfigPage() {
   const { user } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [form, setForm] = useState<ExternalSystemConfig>({
+    external_system_name: "",
+    external_login_url: "",
+    access_profile_email_or_identifier: "",
+    expected_system_host: "",
+  });
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
     refetchInterval: 5000,
     retry: 1,
   });
+  const externalConfig = useQuery({
+    queryKey: ["external-system-config"],
+    queryFn: getExternalSystemConfig,
+    retry: 1,
+  });
+  const saveConfig = useMutation({
+    mutationFn: saveExternalSystemConfig,
+    onSuccess: (saved) => {
+      setForm(saved);
+      toast.success("Configuração do sistema externo salva.");
+      void queryClient.invalidateQueries({ queryKey: ["external-system-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Não foi possível salvar a configuração.",
+      ),
+  });
   const openLogin = useMutation({
     mutationFn: openExternalLogin,
     onSuccess: (result) => {
-      toast.message("URL de login obtida. Use o navegador ao lado para autenticar manualmente.");
+      toast.message("Navegador aberto na URL de login configurada.");
       void queryClient.invalidateQueries({ queryKey: ["external-session"] });
       void queryClient.invalidateQueries({ queryKey: ["browser"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      window.open(result.login_url, "_blank", "noopener,noreferrer");
+      void navigate({ to: "/configuracoes/navegador" });
+      void result;
     },
     onError: (error) =>
       toast.error(
@@ -57,6 +88,24 @@ function ConfigPage() {
       toast.error(error instanceof Error ? error.message : "Não foi possível validar a sessão."),
   });
 
+  useEffect(() => {
+    if (externalConfig.data) {
+      setForm({
+        external_system_name: externalConfig.data.external_system_name || "",
+        external_login_url: externalConfig.data.external_login_url || "",
+        access_profile_email_or_identifier:
+          externalConfig.data.access_profile_email_or_identifier || "",
+        expected_system_host: externalConfig.data.expected_system_host || "",
+      });
+    }
+  }, [externalConfig.data]);
+
+  function updateForm(key: keyof ExternalSystemConfig, value: string) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  const loginConfigured = Boolean(form.external_login_url.trim());
+
   if (location.pathname === "/configuracoes/navegador") {
     return <Outlet />;
   }
@@ -64,58 +113,6 @@ function ConfigPage() {
   return (
     <AppShell title="Configurações" subtitle="Conta, sessão do navegador e parâmetros operacionais">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Monitor className="h-4 w-4" />
-              Navegador do sistema externo
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <CompactRow label="Browser">
-                <BadgeStatus tone="success">Disponível</BadgeStatus>
-              </CompactRow>
-              <CompactRow label="Sessão">
-                <BadgeStatus
-                  tone={
-                    external.data?.session_status === "authenticated"
-                      ? "success"
-                      : external.data?.external_system_configured
-                        ? "warning"
-                        : "neutral"
-                  }
-                >
-                  {externalSessionStatusLabel(external.data?.session_status)}
-                </BadgeStatus>
-              </CompactRow>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button asChild>
-                <Link to="/configuracoes/navegador">
-                  <Monitor className="h-4 w-4" /> Abrir navegador
-                </Link>
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => openLogin.mutate()}
-                disabled={openLogin.isPending}
-              >
-                <ExternalLink className="h-4 w-4" /> Abrir sessão para login
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => validate.mutate()}
-                disabled={validate.isPending}
-              >
-                <ShieldCheck className="h-4 w-4" /> Validar sessão
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Conta</CardTitle>
@@ -134,39 +131,107 @@ function ConfigPage() {
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Sistema externo</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2">
-            <CompactRow label="Nome">
-              <span className="truncate text-right">
-                {external.data?.external_system_name || "Não configurado"}
-              </span>
-            </CompactRow>
-            <CompactRow label="Configuração">
-              <BadgeStatus tone={external.data?.external_system_configured ? "success" : "warning"}>
-                {external.data?.external_system_configured ? "Configurado" : "Não configurado"}
-              </BadgeStatus>
-            </CompactRow>
-            <CompactRow label="Sessão">
-              <BadgeStatus
-                tone={
-                  external.data?.session_status === "authenticated"
-                    ? "success"
-                    : external.data?.external_system_configured
-                      ? "warning"
-                      : "neutral"
-                }
+          <CardContent className="space-y-4">
+            <div className="grid gap-3">
+              <div className="grid gap-2">
+                <Label htmlFor="external-system-name">Nome do sistema</Label>
+                <Input
+                  id="external-system-name"
+                  value={form.external_system_name}
+                  onChange={(event) => updateForm("external_system_name", event.target.value)}
+                  placeholder="Sistema Priscila e Jonatan"
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="external-login-url">URL de login</Label>
+                <Input
+                  id="external-login-url"
+                  value={form.external_login_url}
+                  onChange={(event) => updateForm("external_login_url", event.target.value)}
+                  placeholder="https://..."
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="external-identifier">Usuário / identificador</Label>
+                <Input
+                  id="external-identifier"
+                  value={form.access_profile_email_or_identifier}
+                  onChange={(event) =>
+                    updateForm("access_profile_email_or_identifier", event.target.value)
+                  }
+                  placeholder="email, login, matrícula ou identificador"
+                />
+              </div>
+              <details className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <summary className="cursor-pointer text-sm font-medium text-foreground">
+                  Configurações avançadas
+                </summary>
+                <div className="mt-3 grid gap-2">
+                  <Label htmlFor="external-expected-host">Host esperado após login</Label>
+                  <Input
+                    id="external-expected-host"
+                    value={form.expected_system_host}
+                    onChange={(event) => updateForm("expected_system_host", event.target.value)}
+                    placeholder="nwcweb.randonconsorcios.com.br"
+                  />
+                </div>
+              </details>
+              <Button
+                className="w-fit"
+                onClick={() => saveConfig.mutate(form)}
+                disabled={saveConfig.isPending}
               >
-                {externalSessionStatusLabel(external.data?.session_status)}
-              </BadgeStatus>
-            </CompactRow>
-            <CompactRow label="Login configurado">
-              <BadgeStatus tone={external.data?.login_url_configured ? "success" : "warning"}>
-                {external.data?.login_url_configured ? "Sim" : "Não"}
-              </BadgeStatus>
-            </CompactRow>
-            <Row
-              label="Login"
-              value={loginModeLabel(external.data?.login_mode || external.data?.automation)}
-            />
+                <Save className="h-4 w-4" /> Salvar configuração
+              </Button>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              <CompactRow label="Configuração">
+                <BadgeStatus
+                  tone={external.data?.external_system_configured ? "success" : "warning"}
+                >
+                  {external.data?.external_system_configured ? "Configurado" : "Não configurado"}
+                </BadgeStatus>
+              </CompactRow>
+              <CompactRow label="Sessão">
+                <BadgeStatus
+                  tone={
+                    external.data?.session_status === "authenticated"
+                      ? "success"
+                      : external.data?.external_system_configured
+                        ? "warning"
+                        : "neutral"
+                  }
+                >
+                  {externalSessionStatusLabel(external.data?.session_status)}
+                </BadgeStatus>
+              </CompactRow>
+              <CompactRow label="Login configurado">
+                <BadgeStatus tone={external.data?.login_url_configured ? "success" : "warning"}>
+                  {external.data?.login_url_configured ? "Sim" : "Não"}
+                </BadgeStatus>
+              </CompactRow>
+              <Row
+                label="Login"
+                value={loginModeLabel(external.data?.login_mode || external.data?.automation)}
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                onClick={() => openLogin.mutate()}
+                disabled={openLogin.isPending || !loginConfigured}
+              >
+                <ExternalLink className="h-4 w-4" /> Abrir sessão para login
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => validate.mutate()}
+                disabled={validate.isPending}
+              >
+                <ShieldCheck className="h-4 w-4" /> Validar sessão
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

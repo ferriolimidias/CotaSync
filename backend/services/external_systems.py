@@ -35,12 +35,12 @@ def empty_external_system() -> dict[str, Any]:
         "validation": "",
         "auth_success_text": "",
         "auth_success_selector": "",
-        "access_profile_name": DEFAULT_ACCESS_PROFILE["access_profile_name"],
-        "access_profile_email_or_identifier": DEFAULT_ACCESS_PROFILE["microsoft_saved_account_identifier"],
-        "microsoft_saved_account_identifier": DEFAULT_ACCESS_PROFILE["microsoft_saved_account_identifier"],
+        "access_profile_name": "",
+        "access_profile_email_or_identifier": "",
+        "microsoft_saved_account_identifier": "",
         "microsoft_saved_account_selector": "",
-        "microsoft_saved_account_text": DEFAULT_ACCESS_PROFILE["microsoft_saved_account_text"],
-        "expected_system_host": DEFAULT_ACCESS_PROFILE["expected_system_host"],
+        "microsoft_saved_account_text": "",
+        "expected_system_host": "",
         "microsoft_hosts": list(DEFAULT_ACCESS_PROFILE["microsoft_hosts"]),
         "updated_at": None,
     }
@@ -114,9 +114,6 @@ def load_current_external_system() -> dict[str, Any]:
                     result[key] = str(payload.get(key) or "")
                 result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
                 _normalize_access_profile_fields(result)
-                for key, value in DEFAULT_ACCESS_PROFILE.items():
-                    if key != "microsoft_hosts" and not result.get(key):
-                        result[key] = str(value)
                 result["updated_at"] = payload.get("updated_at")
                 return result
     except Exception as exc:
@@ -137,12 +134,6 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
         result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]
     if not result["access_profile_email_or_identifier"]:
         result["access_profile_email_or_identifier"] = result["microsoft_saved_account_identifier"]
-    for key, value in DEFAULT_ACCESS_PROFILE.items():
-        if key == "microsoft_hosts":
-            continue
-        if not result.get(key):
-            result[key] = str(value)
-
     login_url = result["external_login_url"]
     login_url_for_validation = login_url.strip()
     system_name = result["external_system_name"]

@@ -11,6 +11,7 @@ import type {
   BrowserStatus,
   DashboardPayload,
   DiagnosticsPayload,
+  ExternalSystemConfig,
   ExternalSessionStatus,
   LearningSession,
   WorkerStatus,
@@ -400,8 +401,26 @@ export async function getExternalSessionStatus() {
   return payload.external_session;
 }
 
+export async function getExternalSystemConfig() {
+  const payload = await apiFetch<{ external_system: ExternalSystemConfig }>(
+    "/api/v1/external-system/config",
+  );
+  return payload.external_system;
+}
+
+export async function saveExternalSystemConfig(input: ExternalSystemConfig) {
+  const payload = await apiFetch<{ external_system: ExternalSystemConfig }>(
+    "/api/v1/external-system/config",
+    {
+      method: "PUT",
+      body: JSON.stringify(input),
+    },
+  );
+  return payload.external_system;
+}
+
 export async function openExternalLogin() {
-  return apiFetch<{ login_url: string; manual_login_required: boolean }>(
+  return apiFetch<{ login_url: string; manual_login_required: boolean; browser_opened?: boolean }>(
     "/api/v1/external-session/open-login",
     { method: "POST" },
   );

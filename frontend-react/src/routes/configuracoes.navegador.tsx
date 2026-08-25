@@ -1,15 +1,12 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ExternalLink, ShieldCheck } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
-import { OperatorAssistant } from "@/components/cotasync/OperatorAssistant";
 import { Button } from "@/components/ui/button";
 import {
-  createLearningSession,
   getExternalSessionStatus,
   openExternalLogin,
   validateExternalSession,
@@ -23,34 +20,19 @@ export const Route = createFileRoute("/configuracoes/navegador")({
 
 function BrowserWorkspacePage() {
   const queryClient = useQueryClient();
-  const [operatorSessionId, setOperatorSessionId] = useState<string | null>(null);
-  const operatorSessionRequested = useRef(false);
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
     refetchInterval: 5000,
     retry: 1,
   });
-  const operatorSession = useMutation({
-    mutationFn: createLearningSession,
-    onSuccess: (created) => {
-      const id = String(created.session_id || created.id || "");
-      setOperatorSessionId(id || null);
-      if (id) toast.message("Assistente do operador pronto.");
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Não foi possível preparar o assistente.",
-      ),
-  });
   const openLogin = useMutation({
     mutationFn: openExternalLogin,
-    onSuccess: (result) => {
-      toast.message("URL de login obtida. Use o navegador para autenticar manualmente.");
+    onSuccess: () => {
+      toast.message("Navegador direcionado para a URL de login configurada.");
       void queryClient.invalidateQueries({ queryKey: ["external-session"] });
       void queryClient.invalidateQueries({ queryKey: ["browser"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      window.open(result.login_url, "_blank", "noopener,noreferrer");
     },
     onError: (error) =>
       toast.error(
@@ -67,19 +49,15 @@ function BrowserWorkspacePage() {
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "Não foi possível validar a sessão."),
   });
-  const prepareOperatorSession = operatorSession.mutate;
-
-  useEffect(() => {
-    if (!operatorSessionRequested.current) {
-      operatorSessionRequested.current = true;
-      prepareOperatorSession();
-    }
-  }, [prepareOperatorSession]);
+  const systemName = external.data?.external_system_name || "Navegador externo";
 
   return (
     <main className="min-h-screen bg-muted/30 p-2">
       <BrowserWorkspace
+        accessButtonLabel="Renovar acesso"
+        autoOpen
         resizeMode="remote"
+        title={systemName}
         variant="workspace"
         leading={
           <Button size="sm" variant="ghost" asChild>
@@ -104,7 +82,7 @@ function BrowserWorkspacePage() {
         actions={
           <>
             <Button size="sm" onClick={() => openLogin.mutate()} disabled={openLogin.isPending}>
-              <ExternalLink className="h-4 w-4" /> Abrir sessão para login
+              <ExternalLink className="h-4 w-4" /> Abrir login
             </Button>
             <Button
               size="sm"
@@ -115,21 +93,6 @@ function BrowserWorkspacePage() {
               <ShieldCheck className="h-4 w-4" /> Validar sessão
             </Button>
           </>
-        }
-        footer={
-          <OperatorAssistant
-            collapsible
-            mode="operation"
-            sessionId={operatorSessionId}
-            statusText={
-              operatorSession.isPending
-                ? "Preparando controles..."
-                : operatorSessionId
-                  ? "Controles prontos"
-                  : "Controles indisponíveis"
-            }
-            variant="dock"
-          />
         }
       />
     </main>

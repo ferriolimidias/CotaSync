@@ -9,21 +9,28 @@ import { createBrowserViewToken, ensureBrowserReady, getBrowserStatus } from "@/
 
 export function BrowserWorkspace({
   actions,
+  autoOpen = false,
+  accessButtonLabel,
   footer,
   leading,
   resizeMode = "scale",
   sessionStatus,
+  title = "Navegador do sistema externo",
   variant = "embedded",
 }: {
   actions?: React.ReactNode;
+  autoOpen?: boolean;
+  accessButtonLabel?: string;
   footer?: React.ReactNode;
   leading?: React.ReactNode;
   resizeMode?: "scale" | "remote";
   sessionStatus?: React.ReactNode;
+  title?: string;
   variant?: "embedded" | "workspace";
 }) {
   const queryClient = useQueryClient();
   const rootRef = useRef<HTMLDivElement>(null);
+  const autoOpenRequested = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const status = useQuery({
     queryKey: ["browser"],
@@ -68,6 +75,13 @@ export function BrowserWorkspace({
     return () => document.removeEventListener("fullscreenchange", updateFullscreen);
   }, []);
 
+  useEffect(() => {
+    if (autoOpen && !autoOpenRequested.current && !viewUrl) {
+      autoOpenRequested.current = true;
+      ensure.mutate();
+    }
+  }, [autoOpen, ensure, viewUrl]);
+
   async function toggleFullscreen() {
     if (!rootRef.current) return;
     if (document.fullscreenElement === rootRef.current) {
@@ -97,7 +111,7 @@ export function BrowserWorkspace({
           {leading}
           <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
             <Monitor className="h-4 w-4 shrink-0" />
-            <span className="truncate">Navegador do sistema externo</span>
+            <span className="truncate">{title}</span>
           </div>
           {workspaceMode && (
             <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -120,7 +134,7 @@ export function BrowserWorkspace({
             onClick={() => ensure.mutate()}
             disabled={ensure.isPending || token.isPending}
           >
-            {viewUrl ? "Renovar acesso" : "Abrir navegador"}
+            {accessButtonLabel || (viewUrl ? "Renovar acesso" : "Abrir navegador")}
           </Button>
         </div>
       </div>
