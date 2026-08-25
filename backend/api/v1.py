@@ -329,6 +329,37 @@ def _runs_csv(runs: list[dict[str, Any]]) -> str:
     return output.getvalue()
 
 
+def _external_session_payload(config: dict[str, Any]) -> dict[str, Any]:
+    system_name = str(config.get("external_system_name") or "").strip()
+    login_url = str(config.get("external_login_url") or "").strip()
+    validation_mode = str(config.get("validation") or "").strip() or "manual_confirmation"
+    configured = bool(system_name and login_url)
+    return {
+        "external_system_name": system_name,
+        "external_system_configured": configured,
+        "login_url_configured": bool(login_url),
+        "login_configured": bool(login_url),
+        "manual_login_required": True,
+        "login_mode": "manual",
+        "automation": "manual_operator",
+        "validation_mode": validation_mode,
+        "session_status": "unknown" if configured else "not_configured",
+        "expected_system_host_configured": bool(str(config.get("expected_system_host") or "").strip()),
+        "updated_at": config.get("updated_at"),
+    }
+
+
+def _action_executable(action: Any) -> bool:
+    return bool(
+        getattr(action, "published_version", None) is not None
+        or (
+            getattr(action, "steps_count", 0) > 0
+            and getattr(action, "has_url", False)
+            and not getattr(action, "legacy_unconfigured", False)
+        )
+    )
+
+
 @router.get("/dashboard", summary="Resumo operacional para dashboard")
 async def dashboard(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     today_start = datetime.combine(datetime.now(UTC).date(), time.min, tzinfo=UTC)
@@ -338,19 +369,32 @@ async def dashboard(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
         last_run = session.query(DbRun).order_by(DbRun.created_at.desc()).first()
         queued = session.query(DbBatch).filter(DbBatch.status == "queued").count()
         running = session.query(DbBatch).filter(DbBatch.status.in_(["running", "cancel_requested"])).count()
+    alerts = []
+    try:
+        external_session = _external_session_payload(load_current_external_system())
+    except ExternalSystemConfigError:
+        external_session = _external_session_payload({})
+        external_session["session_status"] = "unknown"
+        alerts.append(
+            {
+                "level": "warning",
+                "code": "EXTERNAL_SESSION_UNAVAILABLE",
+                "message": "Configuracao externa indisponivel.",
+            }
+        )
     try:
         catalog = load_actions_catalog()
-        actions_ready = len(catalog.actions)
+        actions_ready = len([action for action in catalog.actions if _action_executable(action)])
     except ActionsRepositoryError:
         actions_ready = 0
     worker = latest_worker_status()
-    alerts = []
     if not worker.get("online"):
         alerts.append({"level": "warning", "code": "WORKER_OFFLINE", "message": "Worker offline."})
     return {
         "status": "ok",
         "dashboard": {
-            "session_status": "authenticated",
+            "session_status": external_session["session_status"],
+            "external_session": external_session,
             "clients_active": int(active_clients_count or 0),
             "actions_ready": actions_ready,
             "runs_today": runs_today,
@@ -681,15 +725,7 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
         config = load_current_external_system()
     except ExternalSystemConfigError as exc:
         raise _error(500, "EXTERNAL_SESSION_UNAVAILABLE", str(exc)) from exc
-    return {
-        "status": "ok",
-        "external_session": {
-            "external_system_name": config.get("external_system_name", ""),
-            "login_url_configured": bool(config.get("external_login_url")),
-            "manual_login_required": True,
-            "automation": "manual_operator",
-        },
-    }
+    return {"status": "ok", "external_session": _external_session_payload(config)}
 
 
 @router.post("/external-session/open-login", summary="Retorna URL de login configurada")
@@ -704,7 +740,15 @@ async def external_session_open_login(_user: AuthUser = Depends(require_user)) -
 @router.post("/external-session/validate", summary="Valida configuração de sessão externa")
 async def external_session_validate(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     config = load_current_external_system()
-    return {"status": "ok", "valid": bool(config.get("external_system_name")), "manual_login_required": True}
+    external_session = _external_session_payload(config)
+    return {
+        "status": "ok",
+        "valid": bool(external_session["external_system_configured"]),
+        "configuration_valid": bool(external_session["external_system_configured"]),
+        "session_status": external_session["session_status"],
+        "manual_login_required": True,
+        "external_session": external_session,
+    }
 
 
 @router.post("/batches", summary="Cria batch para worker")

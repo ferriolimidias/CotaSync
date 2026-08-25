@@ -25,6 +25,7 @@ import {
 } from "@/services/api";
 import type { ApiBatch, ApiRun } from "@/types/api";
 import { toast } from "sonner";
+import { batchStatusLabel, runStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/relatorios")({
   head: () => ({ meta: [{ title: "Relatórios — CotaSync" }] }),
@@ -34,18 +35,20 @@ export const Route = createFileRoute("/relatorios")({
 function RelatoriosPage() {
   const [actionId, setActionId] = useState("all");
   const [status, setStatus] = useState("all");
+  const [runOrigin, setRunOrigin] = useState("operational");
   const [clientFilter, setClientFilter] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [detail, setDetail] = useState<ApiRun | null>(null);
   const actions = useQuery({ queryKey: ["actions"], queryFn: () => getActions({ pageSize: 200 }) });
   const runs = useQuery({
-    queryKey: ["reports", "runs", actionId, status, clientFilter, dateFrom, dateTo],
+    queryKey: ["reports", "runs", actionId, status, runOrigin, clientFilter, dateFrom, dateTo],
     queryFn: () =>
       getReportsRuns({
         pageSize: 50,
         actionId: actionId === "all" ? undefined : actionId,
         status: status === "all" ? undefined : status,
+        runOrigin: runOrigin === "all" ? undefined : runOrigin,
         client: clientFilter || undefined,
         dateFrom: dateFrom || undefined,
         dateTo: dateTo || undefined,
@@ -66,7 +69,7 @@ function RelatoriosPage() {
         <BadgeStatus
           tone={run.status === "success" ? "success" : run.status === "error" ? "error" : "info"}
         >
-          {statusLabel(run.status)}
+          {runStatusLabel(run.status)}
         </BadgeStatus>
       ),
     },
@@ -102,6 +105,19 @@ function RelatoriosPage() {
                   {action.name}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+          <Select value={runOrigin} onValueChange={setRunOrigin}>
+            <SelectTrigger className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="operational">Operacionais</SelectItem>
+              <SelectItem value="all">Todas as origens</SelectItem>
+              <SelectItem value="validation">Validação</SelectItem>
+              <SelectItem value="automated_test">Teste automatizado</SelectItem>
+              <SelectItem value="migration">Migração</SelectItem>
+              <SelectItem value="smoke">Smoke</SelectItem>
             </SelectContent>
           </Select>
           <Select value={status} onValueChange={setStatus}>
@@ -141,6 +157,7 @@ function RelatoriosPage() {
                 const csvText = await exportReportsRunsCsv({
                   actionId: actionId === "all" ? undefined : actionId,
                   status: status === "all" ? undefined : status,
+                  runOrigin: runOrigin === "all" ? undefined : runOrigin,
                   client: clientFilter || undefined,
                   dateFrom: dateFrom || undefined,
                   dateTo: dateTo || undefined,
@@ -186,7 +203,7 @@ function RelatoriosPage() {
             <div className="space-y-3 text-sm">
               <Info label="Run" value={detail.id} />
               <Info label="Ação" value={detail.action_key || detail.action_id} />
-              <Info label="Status" value={statusLabel(detail.status)} />
+              <Info label="Status" value={runStatusLabel(detail.status)} />
               <Info
                 label="Resultado"
                 value={detail.operational_summary || detail.result_summary || "-"}
@@ -214,7 +231,7 @@ function BatchSummary({ batch }: { batch: ApiBatch }) {
                 : "info"
           }
         >
-          {batchStatus(batch.status)}
+          {batchStatusLabel(batch.status)}
         </BadgeStatus>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
@@ -231,32 +248,6 @@ function Info({ label, value }: { label: string; value: string }) {
       <p className="text-xs uppercase text-muted-foreground">{label}</p>
       <p className="mt-1 break-words text-foreground">{value}</p>
     </div>
-  );
-}
-
-function statusLabel(status: string) {
-  return (
-    (
-      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila" } as Record<
-        string,
-        string
-      >
-    )[status] || status
-  );
-}
-
-function batchStatus(status: string) {
-  return (
-    (
-      {
-        queued: "Na fila",
-        running: "Executando",
-        cancel_requested: "Cancelando",
-        completed: "Concluído",
-        completed_with_errors: "Concluído com erros",
-        cancelled: "Cancelado",
-      } as Record<string, string>
-    )[status] || status
   );
 }
 

@@ -126,6 +126,7 @@ export type WorkerStatus = {
 
 export type DashboardPayload = {
   session_status: string;
+  external_session?: ExternalSessionStatus;
   clients_active: number;
   actions_ready: number;
   runs_today: number;
@@ -169,14 +170,28 @@ export type ApiBatch = {
 
 export type BrowserStatus = {
   browser_mode: string;
-  desktop_browser: Record<string, unknown>;
+  desktop_browser: {
+    running?: boolean;
+    cdp_reachable?: boolean;
+    view_url?: string;
+    browser_product?: string;
+    error?: string;
+    [key: string]: unknown;
+  };
 };
 
 export type ExternalSessionStatus = {
   external_system_name: string;
+  external_system_configured: boolean;
   login_url_configured: boolean;
+  login_configured?: boolean;
   manual_login_required: boolean;
+  login_mode?: string;
   automation: string;
+  validation_mode?: string;
+  session_status: string;
+  expected_system_host_configured?: boolean;
+  updated_at?: string | null;
 };
 
 export type LearningSession = {

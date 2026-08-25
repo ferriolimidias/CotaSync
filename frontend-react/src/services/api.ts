@@ -314,6 +314,7 @@ export async function getReportsRuns(
     client?: string;
     dateFrom?: string;
     dateTo?: string;
+    runOrigin?: string;
   } = {},
 ) {
   const query = new URLSearchParams({
@@ -325,6 +326,7 @@ export async function getReportsRuns(
   if (params.client) query.set("client", params.client);
   if (params.dateFrom) query.set("date_from", params.dateFrom);
   if (params.dateTo) query.set("date_to", params.dateTo);
+  if (params.runOrigin) query.set("run_origin", params.runOrigin);
   const payload = await apiFetch<{ runs: ApiPage<ApiRun> }>(`/api/v1/reports/runs?${query}`);
   return payload.runs;
 }
@@ -336,6 +338,7 @@ export async function exportReportsRunsCsv(
     client?: string;
     dateFrom?: string;
     dateTo?: string;
+    runOrigin?: string;
   } = {},
 ) {
   const query = new URLSearchParams();
@@ -344,6 +347,7 @@ export async function exportReportsRunsCsv(
   if (params.client) query.set("client", params.client);
   if (params.dateFrom) query.set("date_from", params.dateFrom);
   if (params.dateTo) query.set("date_to", params.dateTo);
+  if (params.runOrigin) query.set("run_origin", params.runOrigin);
   const suffix = query.toString() ? `?${query}` : "";
   return apiFetch<string>(`/api/v1/reports/runs.csv${suffix}`);
 }

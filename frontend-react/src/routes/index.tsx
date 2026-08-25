@@ -22,6 +22,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getDashboard, getReportsRuns } from "@/services/api";
 import type { ApiRun } from "@/types/api";
+import {
+  externalSessionStatusLabel,
+  loginModeLabel,
+  runStatusLabel,
+  workerStatusLabel,
+} from "@/lib/status-labels";
 
 export const Route = createFileRoute("/")({
   head: () => ({ meta: [{ title: "Dashboard — CotaSync" }] }),
@@ -38,7 +44,7 @@ const columns: Column<ApiRun>[] = [
       <BadgeStatus
         tone={run.status === "success" ? "success" : run.status === "error" ? "error" : "info"}
       >
-        {statusLabel(run.status)}
+        {runStatusLabel(run.status)}
       </BadgeStatus>
     ),
   },
@@ -81,11 +87,12 @@ function Dashboard() {
   });
   const runs = useQuery({
     queryKey: ["reports", "runs", "dashboard"],
-    queryFn: () => getReportsRuns({ pageSize: 5 }),
+    queryFn: () => getReportsRuns({ pageSize: 5, runOrigin: "operational" }),
   });
   const data = dashboard.data;
   const workerOnline = Boolean(data?.worker_status?.online);
   const queueRunning = Number(data?.queue_status.running || 0);
+  const externalSession = data?.external_session;
 
   return (
     <AppShell title="Dashboard" subtitle="Visão geral do CotaSync">
@@ -118,10 +125,18 @@ function Dashboard() {
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <StatusCard
           label="Sessão externa"
-          value="Manual"
-          hint={data?.session_status || "Aguardando API"}
+          value={externalSessionStatusLabel(
+            externalSession?.session_status || data?.session_status,
+          )}
+          hint={loginModeLabel(externalSession?.login_mode || externalSession?.automation)}
           icon={Wifi}
-          tone="success"
+          tone={
+            (externalSession?.session_status || data?.session_status) === "authenticated"
+              ? "success"
+              : externalSession?.external_system_configured
+                ? "warning"
+                : "error"
+          }
         />
         <StatusCard
           label="Clientes ativos"
@@ -132,7 +147,7 @@ function Dashboard() {
         <StatusCard
           label="Ações prontas"
           value={dashboard.isLoading ? "..." : (data?.actions_ready ?? 0)}
-          hint="Versões publicadas"
+          hint="Executáveis pelo worker"
           icon={Zap}
         />
         <StatusCard
@@ -143,7 +158,7 @@ function Dashboard() {
         />
         <StatusCard
           label="Última execução"
-          value={data?.last_run ? statusLabel(data.last_run.status) : "Sem histórico"}
+          value={data?.last_run ? runStatusLabel(data.last_run.status) : "Sem histórico"}
           hint={
             data?.last_run ? formatDate(data.last_run.created_at) : "Nenhuma execução registrada"
           }
@@ -153,7 +168,7 @@ function Dashboard() {
         <StatusCard
           label="Sistema de execução"
           value={workerOnline ? "Online" : "Offline"}
-          hint={data?.worker_status?.status || "Sem heartbeat"}
+          hint={workerStatusLabel(data?.worker_status?.status)}
           icon={Shield}
           tone={workerOnline ? "success" : "warning"}
         />
@@ -222,17 +237,6 @@ function Dashboard() {
         </Card>
       </div>
     </AppShell>
-  );
-}
-
-function statusLabel(status: string) {
-  return (
-    (
-      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila" } as Record<
-        string,
-        string
-      >
-    )[status] || status
   );
 }
 

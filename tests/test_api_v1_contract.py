@@ -61,7 +61,14 @@ class ApiV1ContractTests(unittest.TestCase):
             token = client.post("/api/v1/browser/view-token")
             self.assertEqual(token.status_code, 200)
             self.assertIn("view_url", token.json())
-            self.assertEqual(client.get("/api/v1/external-session/status").status_code, 200)
+            external = client.get("/api/v1/external-session/status")
+            self.assertEqual(external.status_code, 200)
+            body = external.json()["external_session"]
+            self.assertIn(body["session_status"], {"unknown", "not_configured"})
+            self.assertIn("external_system_configured", body)
+            validated = client.post("/api/v1/external-session/validate")
+            self.assertEqual(validated.status_code, 200)
+            self.assertIn("external_session", validated.json())
 
     def test_batches_v1_idempotency_conflict_and_polling(self) -> None:
         payload = {

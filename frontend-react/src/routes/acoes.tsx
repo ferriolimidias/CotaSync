@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { getActions, getActionVersions } from "@/services/api";
 import type { ApiAction } from "@/types/api";
+import { actionIsExecutable, runStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/acoes")({
   head: () => ({ meta: [{ title: "Ações — CotaSync" }] }),
@@ -52,9 +53,8 @@ function AcoesPage() {
 
 function ActionCard({ action }: { action: ApiAction }) {
   const [open, setOpen] = useState(false);
-  const attention = Boolean(action.needs_attention || action.legacy_unconfigured);
-  const versionLabel =
-    action.published_version?.status === "published" ? "Publicada" : "Sem versão publicada";
+  const executable = actionIsExecutable(action);
+  const versionLabel = executable ? "Publicada" : "Não executável";
   return (
     <Card className="border-border/70 shadow-sm">
       <CardHeader className="space-y-3">
@@ -65,8 +65,8 @@ function ActionCard({ action }: { action: ApiAction }) {
               {action.description || "Sem descrição operacional."}
             </p>
           </div>
-          <BadgeStatus tone={attention ? "warning" : "success"}>
-            {attention ? "Precisa de atenção" : "Pronta"}
+          <BadgeStatus tone={executable ? "success" : "warning"}>
+            {executable ? "Pronta" : "Precisa de atenção"}
           </BadgeStatus>
         </div>
       </CardHeader>
@@ -76,7 +76,7 @@ function ActionCard({ action }: { action: ApiAction }) {
           <Info label="Passos" value={String(action.steps_count ?? 0)} />
           <Info
             label="Última execução"
-            value={action.last_run ? statusLabel(action.last_run.status) : "Sem histórico"}
+            value={action.last_run ? runStatusLabel(action.last_run.status) : "Sem histórico"}
           />
           <Info
             label="Variáveis"
@@ -90,11 +90,17 @@ function ActionCard({ action }: { action: ApiAction }) {
           </div>
         )}
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" asChild>
-            <a href="/execucao">
+          {executable ? (
+            <Button size="sm" variant="outline" asChild>
+              <a href="/execucao">
+                <Play className="h-4 w-4" /> Executar
+              </a>
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" disabled>
               <Play className="h-4 w-4" /> Executar
-            </a>
-          </Button>
+            </Button>
+          )}
           <Button size="sm" variant="ghost" onClick={() => setOpen(true)}>
             <History className="h-4 w-4" /> Versões
           </Button>
@@ -159,16 +165,5 @@ function Info({ label, value }: { label: string; value: string }) {
       <p className="text-xs uppercase text-muted-foreground">{label}</p>
       <p className="mt-1 truncate text-foreground">{value}</p>
     </div>
-  );
-}
-
-function statusLabel(status: string) {
-  return (
-    (
-      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila" } as Record<
-        string,
-        string
-      >
-    )[status] || status
   );
 }

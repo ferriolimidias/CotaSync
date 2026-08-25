@@ -44,6 +44,7 @@ export function LoginScreen() {
                 id="username"
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
+                placeholder="Seu usuário"
                 autoComplete="username"
               />
             </div>

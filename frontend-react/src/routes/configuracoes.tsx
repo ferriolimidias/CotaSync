@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ExternalLink, ShieldCheck } from "lucide-react";
 
@@ -16,6 +16,7 @@ import {
   validateExternalSession,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
+import { externalSessionStatusLabel, loginModeLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/configuracoes")({
   head: () => ({ meta: [{ title: "Configurações — CotaSync" }] }),
@@ -24,15 +25,20 @@ export const Route = createFileRoute("/configuracoes")({
 
 function ConfigPage() {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
     refetchInterval: 5000,
+    retry: 1,
   });
   const openLogin = useMutation({
     mutationFn: openExternalLogin,
     onSuccess: (result) => {
       toast.message("URL de login obtida. Use o navegador ao lado para autenticar manualmente.");
+      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
+      void queryClient.invalidateQueries({ queryKey: ["browser"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       window.open(result.login_url, "_blank", "noopener,noreferrer");
     },
     onError: (error) =>
@@ -42,8 +48,11 @@ function ConfigPage() {
   });
   const validate = useMutation({
     mutationFn: validateExternalSession,
-    onSuccess: (result) =>
-      toast.success(result.valid ? "Configuração de sessão válida." : "Configuração incompleta."),
+    onSuccess: (result) => {
+      toast.success(result.valid ? "Configuração externa válida." : "Configuração incompleta.");
+      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "Não foi possível validar a sessão."),
   });
@@ -73,7 +82,29 @@ function ConfigPage() {
             <CardContent className="space-y-3">
               <div className="grid gap-2">
                 <Label>Nome</Label>
-                <Input value={external.data?.external_system_name || ""} readOnly />
+                <Input value={external.data?.external_system_name || "Não configurado"} readOnly />
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-border p-3">
+                <span className="text-sm text-muted-foreground">Configuração</span>
+                <BadgeStatus
+                  tone={external.data?.external_system_configured ? "success" : "warning"}
+                >
+                  {external.data?.external_system_configured ? "Configurado" : "Não configurado"}
+                </BadgeStatus>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-border p-3">
+                <span className="text-sm text-muted-foreground">Sessão</span>
+                <BadgeStatus
+                  tone={
+                    external.data?.session_status === "authenticated"
+                      ? "success"
+                      : external.data?.external_system_configured
+                        ? "warning"
+                        : "neutral"
+                  }
+                >
+                  {externalSessionStatusLabel(external.data?.session_status)}
+                </BadgeStatus>
               </div>
               <div className="flex items-center justify-between rounded-md border border-border p-3">
                 <span className="text-sm text-muted-foreground">Login configurado</span>
@@ -81,6 +112,10 @@ function ConfigPage() {
                   {external.data?.login_url_configured ? "Sim" : "Não"}
                 </BadgeStatus>
               </div>
+              <Row
+                label="Login"
+                value={loginModeLabel(external.data?.login_mode || external.data?.automation)}
+              />
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" onClick={() => openLogin.mutate()} disabled={openLogin.isPending}>
                   <ExternalLink className="h-4 w-4" /> Abrir sessão para login

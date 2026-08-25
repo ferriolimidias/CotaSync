@@ -1,12 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Server, Stethoscope, Wifi } from "lucide-react";
+import { Server, Shield, Stethoscope, Wifi } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { StatusCard } from "@/components/cotasync/StatusCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getBrowserStatus, getDiagnostics, getWorkerStatus } from "@/services/api";
+import {
+  getBrowserStatus,
+  getDiagnostics,
+  getExternalSessionStatus,
+  getWorkerStatus,
+} from "@/services/api";
+import { externalSessionStatusLabel, workerStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/diagnostico")({
   head: () => ({ meta: [{ title: "Diagnóstico técnico — CotaSync" }] }),
@@ -30,33 +36,48 @@ function DiagPage() {
     queryFn: getBrowserStatus,
     refetchInterval: 5000,
   });
+  const external = useQuery({
+    queryKey: ["external-session"],
+    queryFn: getExternalSessionStatus,
+    refetchInterval: 5000,
+  });
+  const apiAvailable = Boolean(worker.data || browser.data || diagnostics.data || external.data);
 
   return (
     <AppShell
       title="Diagnóstico técnico"
       subtitle="Visão administrativa de API, worker e navegador"
     >
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <StatusCard
           label="API"
-          value="Online"
-          hint="Endpoint v1 respondendo"
+          value={apiAvailable ? "Online" : "Indisponível"}
+          hint={apiAvailable ? "Endpoint v1 respondendo" : "Sem resposta da API v1"}
           icon={Server}
-          tone="success"
+          tone={apiAvailable ? "success" : "warning"}
         />
         <StatusCard
           label="Worker"
           value={worker.data?.online ? "Online" : "Offline"}
-          hint={worker.data?.status || "Sem status"}
+          hint={workerStatusLabel(worker.data?.status)}
           icon={Stethoscope}
           tone={worker.data?.online ? "success" : "warning"}
         />
         <StatusCard
           label="Browser"
-          value={browser.data ? "Respondendo" : "Indisponível"}
+          value={browser.data?.desktop_browser?.cdp_reachable ? "Pronto" : "Indisponível"}
           hint={browser.data?.browser_mode || "Aguardando status"}
           icon={Wifi}
-          tone={browser.data ? "success" : "warning"}
+          tone={browser.data?.desktop_browser?.cdp_reachable ? "success" : "warning"}
+        />
+        <StatusCard
+          label="Sessão externa"
+          value={externalSessionStatusLabel(external.data?.session_status)}
+          hint={
+            external.data?.external_system_configured ? "Sistema configurado" : "Não configurado"
+          }
+          icon={Shield}
+          tone={external.data?.external_system_configured ? "warning" : "default"}
         />
       </div>
 
@@ -74,7 +95,7 @@ function DiagPage() {
                 </BadgeStatus>
               }
             />
-            <Row label="Status" value={worker.data?.status || "-"} />
+            <Row label="Status" value={workerStatusLabel(worker.data?.status)} />
             <Row label="Heartbeat" value={worker.data?.heartbeat_at || "-"} />
             <Row label="Batch atual" value={worker.data?.current_batch_id || "-"} />
           </CardContent>
@@ -104,6 +125,23 @@ function DiagPage() {
                   browser.data?.desktop_browser?.view_url ?? diagnostics.data?.browser?.view_url,
                 ),
               )}
+            />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Sessão externa</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <Row label="Sistema" value={external.data?.external_system_name || "Não configurado"} />
+            <Row
+              label="Configuração"
+              value={external.data?.external_system_configured ? "Configurada" : "Incompleta"}
+            />
+            <Row label="Sessão" value={externalSessionStatusLabel(external.data?.session_status)} />
+            <Row
+              label="Login"
+              value={external.data?.login_url_configured ? "Configurado" : "Não configurado"}
             />
           </CardContent>
         </Card>

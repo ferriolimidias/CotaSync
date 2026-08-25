@@ -31,6 +31,7 @@ import {
   runAction,
 } from "@/services/api";
 import type { ApiBatch, ApiClient, ApiRun } from "@/types/api";
+import { actionIsExecutable, batchStatusLabel, runStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/execucao")({
   head: () => ({ meta: [{ title: "Execução — CotaSync" }] }),
@@ -85,6 +86,10 @@ function ExecucaoPage() {
   const selectedSingleClient = useMemo(
     () => (clients.data?.items ?? []).find((client) => client.id === singleClientId),
     [clients.data, singleClientId],
+  );
+  const executableActions = useMemo(
+    () => (actions.data?.items ?? []).filter(actionIsExecutable),
+    [actions.data],
   );
 
   const runSingle = useMutation({
@@ -156,7 +161,7 @@ function ExecucaoPage() {
                   <SelectValue placeholder="Selecione uma ação" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(actions.data?.items ?? []).map((action) => (
+                  {executableActions.map((action) => (
                     <SelectItem key={action.id} value={action.id}>
                       {action.name}
                     </SelectItem>
@@ -215,7 +220,7 @@ function ExecucaoPage() {
             ) : (
               <div className="space-y-3 text-sm">
                 <Info label="Run" value={currentRun.data.id} />
-                <Info label="Status" value={runStatus(currentRun.data.status)} />
+                <Info label="Status" value={runStatusLabel(currentRun.data.status)} />
                 <Info
                   label="Resultado"
                   value={
@@ -244,7 +249,7 @@ function ExecucaoPage() {
                   <SelectValue placeholder="Selecione uma ação" />
                 </SelectTrigger>
                 <SelectContent>
-                  {(actions.data?.items ?? []).map((action) => (
+                  {executableActions.map((action) => (
                     <SelectItem key={action.id} value={action.id}>
                       {action.name}
                     </SelectItem>
@@ -311,7 +316,7 @@ function ExecucaoPage() {
                       : "info"
                 }
               >
-                {batchStatus(batch.status)}
+                {batchStatusLabel(batch.status)}
               </BadgeStatus>
             )}
           </CardHeader>
@@ -390,7 +395,7 @@ function RunProgress({ run, loading }: { run: ApiRun; loading: boolean }) {
         <BadgeStatus
           tone={run.status === "success" ? "success" : run.status === "error" ? "error" : "info"}
         >
-          {runStatus(run.status)}
+          {runStatusLabel(run.status)}
         </BadgeStatus>
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
@@ -419,7 +424,7 @@ const itemColumns: Column<{
       <BadgeStatus
         tone={item.status === "success" ? "success" : item.status === "error" ? "error" : "info"}
       >
-        {batchStatus(item.status || "queued")}
+        {batchStatusLabel(item.status || "queued")}
       </BadgeStatus>
     ),
   },
@@ -439,24 +444,6 @@ function Info({ label, value }: { label: string; value: number | string }) {
   );
 }
 
-function batchStatus(status: string) {
-  return (
-    (
-      {
-        queued: "Na fila",
-        running: "Executando",
-        cancel_requested: "Cancelamento solicitado",
-        completed: "Concluído",
-        completed_with_errors: "Concluído com erros",
-        cancelled: "Cancelado",
-        interrupted: "Interrompido",
-        error: "Erro",
-        success: "Concluído",
-      } as Record<string, string>
-    )[status] || status
-  );
-}
-
 function isFinalBatch(batch?: ApiBatch) {
   return Boolean(
     batch &&
@@ -468,17 +455,6 @@ function isFinalBatch(batch?: ApiBatch) {
 
 function isFinalRun(run?: ApiRun) {
   return Boolean(run && ["success", "error"].includes(run.status));
-}
-
-function runStatus(status: string) {
-  return (
-    (
-      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila" } as Record<
-        string,
-        string
-      >
-    )[status] || status
-  );
 }
 
 function variablesFromClient(client: ApiClient) {

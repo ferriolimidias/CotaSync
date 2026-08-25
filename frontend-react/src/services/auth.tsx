@@ -53,7 +53,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(authenticated);
           toast.success("Login realizado.");
         } catch (error) {
-          const message = error instanceof ApiError ? error.message : "Não foi possível entrar.";
+          const message =
+            error instanceof ApiError && error.status === 401
+              ? "Usuário ou senha inválidos."
+              : error instanceof ApiError
+                ? error.message
+                : "Não foi possível entrar.";
           toast.error(message);
           throw error;
         }
