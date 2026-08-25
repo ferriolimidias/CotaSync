@@ -1,12 +1,15 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ExternalLink, ShieldCheck } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
+import { OperatorAssistant } from "@/components/cotasync/OperatorAssistant";
 import { Button } from "@/components/ui/button";
 import {
+  createLearningSession,
   getExternalSessionStatus,
   openExternalLogin,
   validateExternalSession,
@@ -20,11 +23,25 @@ export const Route = createFileRoute("/configuracoes/navegador")({
 
 function BrowserWorkspacePage() {
   const queryClient = useQueryClient();
+  const [operatorSessionId, setOperatorSessionId] = useState<string | null>(null);
+  const operatorSessionRequested = useRef(false);
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
     refetchInterval: 5000,
     retry: 1,
+  });
+  const operatorSession = useMutation({
+    mutationFn: createLearningSession,
+    onSuccess: (created) => {
+      const id = String(created.session_id || created.id || "");
+      setOperatorSessionId(id || null);
+      if (id) toast.message("Assistente do operador pronto.");
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Não foi possível preparar o assistente.",
+      ),
   });
   const openLogin = useMutation({
     mutationFn: openExternalLogin,
@@ -50,6 +67,14 @@ function BrowserWorkspacePage() {
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "Não foi possível validar a sessão."),
   });
+  const prepareOperatorSession = operatorSession.mutate;
+
+  useEffect(() => {
+    if (!operatorSessionRequested.current) {
+      operatorSessionRequested.current = true;
+      prepareOperatorSession();
+    }
+  }, [prepareOperatorSession]);
 
   return (
     <main className="min-h-screen bg-muted/30 p-2">
@@ -90,6 +115,21 @@ function BrowserWorkspacePage() {
               <ShieldCheck className="h-4 w-4" /> Validar sessão
             </Button>
           </>
+        }
+        footer={
+          <OperatorAssistant
+            collapsible
+            mode="operation"
+            sessionId={operatorSessionId}
+            statusText={
+              operatorSession.isPending
+                ? "Preparando controles..."
+                : operatorSessionId
+                  ? "Controles prontos"
+                  : "Controles indisponíveis"
+            }
+            variant="dock"
+          />
         }
       />
     </main>

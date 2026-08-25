@@ -151,10 +151,19 @@ function EnsinarPage() {
           </CardContent>
         </Card>
 
-        <BrowserWorkspace />
+        <BrowserWorkspace
+          footer={
+            <OperatorAssistant
+              collapsible
+              mode="learning"
+              sessionId={sessionId}
+              statusText={sessionId ? "Controles prontos" : "Inicie o ensino para usar"}
+              variant="dock"
+            />
+          }
+        />
 
         <div className="space-y-4">
-          <OperatorAssistant sessionId={sessionId} />
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Resultado da ação</CardTitle>

@@ -9,12 +9,14 @@ import { createBrowserViewToken, ensureBrowserReady, getBrowserStatus } from "@/
 
 export function BrowserWorkspace({
   actions,
+  footer,
   leading,
   resizeMode = "scale",
   sessionStatus,
   variant = "embedded",
 }: {
   actions?: React.ReactNode;
+  footer?: React.ReactNode;
   leading?: React.ReactNode;
   resizeMode?: "scale" | "remote";
   sessionStatus?: React.ReactNode;
@@ -153,6 +155,7 @@ export function BrowserWorkspace({
             : "Navegador indisponível."}
         </div>
       )}
+      {footer}
     </div>
   );
 }
