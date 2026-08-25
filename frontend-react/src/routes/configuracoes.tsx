@@ -112,8 +112,8 @@ function ConfigPage() {
 
   return (
     <AppShell title="Configurações" subtitle="Conta, sessão do navegador e parâmetros operacionais">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
-        <Card>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <Card className="xl:col-start-2 xl:row-start-1">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Conta</CardTitle>
           </CardHeader>
@@ -127,7 +127,7 @@ function ConfigPage() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="xl:col-start-1 xl:row-span-2 xl:row-start-1">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Sistema externo</CardTitle>
           </CardHeader>
@@ -177,7 +177,7 @@ function ConfigPage() {
                 </div>
               </details>
               <Button
-                className="w-fit"
+                className="w-full sm:w-fit"
                 onClick={() => saveConfig.mutate(form)}
                 disabled={saveConfig.isPending}
               >
@@ -185,15 +185,16 @@ function ConfigPage() {
               </Button>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
-              <CompactRow label="Configuração">
+            <div className="space-y-2 border-t border-border pt-4">
+              <h3 className="text-xs font-semibold uppercase text-muted-foreground">Status</h3>
+              <StatusRow label="Configuração">
                 <BadgeStatus
                   tone={external.data?.external_system_configured ? "success" : "warning"}
                 >
                   {external.data?.external_system_configured ? "Configurado" : "Não configurado"}
                 </BadgeStatus>
-              </CompactRow>
-              <CompactRow label="Sessão">
+              </StatusRow>
+              <StatusRow label="Sessão">
                 <BadgeStatus
                   tone={
                     external.data?.session_status === "authenticated"
@@ -205,26 +206,25 @@ function ConfigPage() {
                 >
                   {externalSessionStatusLabel(external.data?.session_status)}
                 </BadgeStatus>
-              </CompactRow>
-              <CompactRow label="Login configurado">
-                <BadgeStatus tone={external.data?.login_url_configured ? "success" : "warning"}>
-                  {external.data?.login_url_configured ? "Sim" : "Não"}
-                </BadgeStatus>
-              </CompactRow>
-              <Row
-                label="Login"
-                value={loginModeLabel(external.data?.login_mode || external.data?.automation)}
-              />
+              </StatusRow>
+              <StatusRow label="Login">
+                <span className="whitespace-nowrap text-sm text-foreground">
+                  {loginModeLabel(external.data?.login_mode || external.data?.automation)}
+                </span>
+              </StatusRow>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-col gap-2 border-t border-border pt-4 sm:flex-row sm:flex-wrap">
               <Button
+                className="w-full sm:w-auto"
                 onClick={() => openLogin.mutate()}
                 disabled={openLogin.isPending || !loginConfigured}
+                title={!loginConfigured ? "Salve uma URL de login primeiro." : undefined}
               >
                 <ExternalLink className="h-4 w-4" /> Abrir sessão para login
               </Button>
               <Button
+                className="w-full sm:w-auto"
                 variant="outline"
                 onClick={() => validate.mutate()}
                 disabled={validate.isPending}
@@ -235,7 +235,7 @@ function ConfigPage() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="xl:col-start-2 xl:row-start-2">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Configurações operacionais</CardTitle>
           </CardHeader>
@@ -261,11 +261,11 @@ function ConfigPage() {
   );
 }
 
-function CompactRow({ label, children }: { label: string; children: React.ReactNode }) {
+function StatusRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex min-h-10 items-center justify-between gap-3 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm">
+    <div className="flex min-h-10 flex-col gap-1 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-4">
       <span className="shrink-0 text-muted-foreground">{label}</span>
-      <div className="min-w-0 text-foreground">{children}</div>
+      <div className="min-w-0 sm:text-right">{children}</div>
     </div>
   );
 }
