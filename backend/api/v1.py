@@ -38,7 +38,7 @@ from backend.services.clients_repository import (
     update_client,
 )
 from backend.services.demo_session import DemoSessionError, demo_session_manager
-from backend.services.desktop_view_tokens import create_token
+from backend.services.desktop_view_tokens import create_token, validate_token
 from backend.services.external_systems import ExternalSystemConfigError, load_current_external_system
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.worker import latest_worker_status
@@ -709,6 +709,15 @@ async def browser_view_token(response: Response, _user: AuthUser = Depends(requi
     created = create_token()
     response.headers["Cache-Control"] = "no-store"
     return {"status": "ok", "view_url": _public_view_url(created.token), "expires_at": created.expires_at.isoformat(), "ttl_seconds": created.ttl_seconds}
+
+
+@router.get("/browser/validate-view-token", summary="Valida token interno de visualizacao noVNC")
+async def browser_validate_view_token(
+    x_desktop_view_token: str | None = Header(default=None, alias="X-Desktop-View-Token"),
+) -> FastAPIResponse:
+    if not validate_token(x_desktop_view_token):
+        raise _error(401, "DESKTOP_VIEW_TOKEN_INVALID", "Acesso nao autorizado.")
+    return FastAPIResponse(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/browser/ensure-ready", summary="Verifica prontidão do browser")

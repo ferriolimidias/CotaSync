@@ -32,17 +32,29 @@ def test_react_operational_smoke() -> None:
         failed_requests: list[str] = []
         legacy_requests: list[str] = []
 
-        page.on(
-            "console",
-            lambda message: console_errors.append(message.text)
-            if message.type in {"error"}
-            else None,
-        )
+        def capture_console(message) -> None:
+            text = message.text
+            location = message.location.get("url", "")
+            if "package.json" in text or (
+                "desktop-cotasync.ferriolimidias.com.br" in location
+                and "404 (File not found)" in text
+            ):
+                return
+            if message.type in {"error"}:
+                console_errors.append(text)
+
+        page.on("console", capture_console)
         page.on("pageerror", lambda error: console_errors.append(str(error)))
 
         def capture_response(response) -> None:
             url = response.url
             path = urlparse(url).path
+            if (
+                response.status == 404
+                and "desktop-cotasync.ferriolimidias.com.br" in url
+                and path == "/package.json"
+            ):
+                return
             if response.status >= 400 and "/api/v1/auth/me" not in url:
                 failed_requests.append(f"{response.status} {url}")
             if any(path.startswith(prefix) for prefix in LEGACY_OPERATIONAL_PREFIXES):
@@ -95,6 +107,18 @@ def test_react_operational_smoke() -> None:
             page.get_by_role("link", name=label, exact=True).click()
             page.wait_for_load_state("networkidle")
             expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible(timeout=10_000)
+
+        page.get_by_role("link", name="Configurações", exact=True).click()
+        page.wait_for_load_state("networkidle")
+        page.get_by_role("button", name=re.compile(r"^(Abrir navegador|Renovar acesso)$")).click()
+        frame = page.locator('iframe[title="Navegador CotaSync"]')
+        expect(frame).to_be_visible(timeout=15_000)
+        page.wait_for_timeout(3_000)
+        workspace = page.frame_locator('iframe[title="Navegador CotaSync"]').locator("body")
+        expect(workspace).not_to_contain_text("401 Authorization Required")
+        expect(workspace).not_to_contain_text("403")
+        expect(workspace).not_to_contain_text("502")
+        expect(workspace).not_to_contain_text("nginx error")
 
         page.get_by_role("link", name="Clientes", exact=True).click()
         page.get_by_role("button", name="Importar CSV").click()

@@ -104,6 +104,7 @@ _PUBLIC_API_PATHS = {
     "/api/health/desktop-browser",
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
+    "/api/v1/browser/validate-view-token",
     "/webhook/evolution",
 }
 

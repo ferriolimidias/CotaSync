@@ -61,6 +61,14 @@ class ApiV1ContractTests(unittest.TestCase):
             token = client.post("/api/v1/browser/view-token")
             self.assertEqual(token.status_code, 200)
             self.assertIn("view_url", token.json())
+            view_token = token.json()["view_url"].split("token=", 1)[1].split("&", 1)[0]
+            self.assertEqual(
+                TestClient(app).get(
+                    "/api/v1/browser/validate-view-token",
+                    headers={"X-Desktop-View-Token": view_token},
+                ).status_code,
+                204,
+            )
             external = client.get("/api/v1/external-session/status")
             self.assertEqual(external.status_code, 200)
             body = external.json()["external_session"]

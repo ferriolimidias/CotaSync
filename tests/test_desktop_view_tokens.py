@@ -10,10 +10,13 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException, Response
+from fastapi.testclient import TestClient
 
 from backend.api.desktop_browser import create_desktop_view_token, validate_desktop_view_token
 from backend.db import DesktopViewToken as DbDesktopViewToken, SessionLocal
+from backend.main import app
 from backend.services.desktop_view_tokens import create_token, mask_token, validate_token
+from tests.auth_helpers import authenticated_client
 
 
 class DesktopViewTokensTest(unittest.TestCase):
@@ -72,6 +75,28 @@ class DesktopViewTokensTest(unittest.TestCase):
             digests = [row.digest for row in session.query(DbDesktopViewToken).all()]
         self.assertTrue(digests)
         self.assertNotIn(created.token, digests)
+
+    def test_v1_validation_accepts_header_without_cotasync_session(self) -> None:
+        with authenticated_client("operator") as client:
+            created = client.post("/api/v1/browser/view-token")
+        self.assertEqual(created.status_code, 200, created.text)
+        query = parse_qs(urlsplit(created.json()["view_url"]).query)
+        token = query["token"][0]
+
+        public_client = TestClient(app)
+        valid = public_client.get(
+            "/api/v1/browser/validate-view-token",
+            headers={"X-Desktop-View-Token": token},
+        )
+        self.assertEqual(valid.status_code, 204, valid.text)
+        self.assertEqual(valid.text, "")
+
+        invalid = public_client.get(
+            "/api/v1/browser/validate-view-token",
+            headers={"X-Desktop-View-Token": "A" * 43},
+        )
+        self.assertEqual(invalid.status_code, 401)
+        self.assertEqual(invalid.json()["error"]["code"], "DESKTOP_VIEW_TOKEN_INVALID")
 
 
 if __name__ == "__main__":
