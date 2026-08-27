@@ -60,8 +60,8 @@ services:
       DESKTOP_BROWSER_CDP_URL: ${DESKTOP_BROWSER_CDP_URL:-http://cotasync_test_desktop_browser:9222}
       DESKTOP_BROWSER_VIEW_URL: ${DESKTOP_BROWSER_VIEW_URL:-http://127.0.0.1:3200/vnc.html?autoconnect=1&resize=scale}
       DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
-      COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
-      COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-}
+      COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-https://cotasync.ferriolimidias.com.br}
+      COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-https://desktop-cotasync.ferriolimidias.com.br}
       COTASYNC_DESKTOP_VIEW_TOKEN_TTL_SECONDS: ${COTASYNC_DESKTOP_VIEW_TOKEN_TTL_SECONDS:-1800}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
@@ -126,8 +126,8 @@ services:
       DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
       BACKEND_URL: http://cotasync_test_backend:8000
       COTASYNC_API_BASE_URL: http://cotasync_test_backend:8000
-      COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-http://127.0.0.1:3100}
-      COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-}
+      COTASYNC_PUBLIC_BASE_URL: ${COTASYNC_PUBLIC_BASE_URL:-https://cotasync.ferriolimidias.com.br}
+      COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL: ${COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL:-https://desktop-cotasync.ferriolimidias.com.br}
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
       COTASYNC_COOKIE_SECURE: ${COTASYNC_COOKIE_SECURE:-false}
       COTASYNC_ADMIN_USERNAME: ${COTASYNC_ADMIN_USERNAME:-admin}

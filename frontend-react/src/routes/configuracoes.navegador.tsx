@@ -1,16 +1,12 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, ShieldCheck } from "lucide-react";
+import { ArrowLeft, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
 import { Button } from "@/components/ui/button";
-import {
-  getExternalSessionStatus,
-  openExternalLogin,
-  validateExternalSession,
-} from "@/services/api";
+import { getExternalSessionStatus, validateExternalSession } from "@/services/api";
 import { externalSessionStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/configuracoes/navegador")({
@@ -25,19 +21,6 @@ function BrowserWorkspacePage() {
     queryFn: getExternalSessionStatus,
     refetchInterval: 5000,
     retry: 1,
-  });
-  const openLogin = useMutation({
-    mutationFn: openExternalLogin,
-    onSuccess: () => {
-      toast.message("Navegador direcionado para a URL de login configurada.");
-      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
-      void queryClient.invalidateQueries({ queryKey: ["browser"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Não foi possível abrir a sessão externa.",
-      ),
   });
   const validate = useMutation({
     mutationFn: validateExternalSession,
@@ -80,19 +63,14 @@ function BrowserWorkspacePage() {
           </BadgeStatus>
         }
         actions={
-          <>
-            <Button size="sm" onClick={() => openLogin.mutate()} disabled={openLogin.isPending}>
-              <ExternalLink className="h-4 w-4" /> Abrir login
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => validate.mutate()}
-              disabled={validate.isPending}
-            >
-              <ShieldCheck className="h-4 w-4" /> Validar sessão
-            </Button>
-          </>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => validate.mutate()}
+            disabled={validate.isPending}
+          >
+            <ShieldCheck className="h-4 w-4" /> Validar sessão
+          </Button>
         }
       />
     </main>

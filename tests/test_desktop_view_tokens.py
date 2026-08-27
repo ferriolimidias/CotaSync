@@ -67,6 +67,12 @@ class DesktopViewTokensTest(unittest.TestCase):
         self.assertTrue(validate_token(token))
         self.assertEqual(response.headers["cache-control"], "no-store")
 
+    def test_endpoint_rejects_internal_view_url_without_public_base(self) -> None:
+        with patch.dict(os.environ, {"COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL": ""}, clear=False):
+            with self.assertRaises(HTTPException) as raised:
+                create_desktop_view_token(Response())
+        self.assertEqual(raised.exception.status_code, 500)
+
     def test_token_is_masked_and_not_stored_in_clear(self) -> None:
         created = create_token()
         report_line = f"view_token={mask_token(created.token)}"

@@ -13,11 +13,27 @@ from backend.services.browser_providers import desktop_view_url
 
 router = APIRouter(prefix="/api/desktop-browser", tags=["desktop-browser"])
 
+_INTERNAL_VIEW_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0"}
+
+
+def _is_internal_view_host(host: str) -> bool:
+    normalized = host.strip().lower().rstrip(".")
+    return (
+        normalized in _INTERNAL_VIEW_HOSTS
+        or normalized.endswith(".local")
+        or normalized.startswith("cotasync_")
+    )
+
 
 def _public_view_url(token: str) -> str:
     public_base = os.getenv("COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL", "").strip().rstrip("/")
     raw_url = f"{public_base}/vnc.html" if public_base else desktop_view_url()
     parsed = urlsplit(raw_url)
+    if _is_internal_view_host(parsed.hostname or ""):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="COTASYNC_DESKTOP_VIEW_PUBLIC_BASE_URL deve apontar para o dominio publico do noVNC.",
+        )
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
     query.update({"token": token, "autoconnect": "1", "resize": "scale"})
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/vnc.html", urlencode(query), ""))
