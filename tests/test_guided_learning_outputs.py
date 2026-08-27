@@ -234,12 +234,12 @@ class GuidedLearningSaveTests(unittest.TestCase):
         action = captured["acoes_conhecidas"]["Tela atual"]  # type: ignore[index]
         self.assertEqual(action["url_inicial"], current_url)
 
-    def test_default_access_profile_exists_for_demo_external_system(self) -> None:
+    def test_empty_external_system_has_no_real_access_profile_defaults(self) -> None:
         config = load_current_external_system()
-        self.assertEqual(config["access_profile_name"], "Priscila")
-        self.assertEqual(config["microsoft_saved_account_text"], "Priscila Susin")
-        self.assertEqual(config["microsoft_saved_account_identifier"], "D0004267@rdmz.com.br")
-        self.assertEqual(config["expected_system_host"], "nwcweb.randonconsorcios.com.br")
+        self.assertEqual(config["access_profile_name"], "")
+        self.assertEqual(config["microsoft_saved_account_text"], "")
+        self.assertEqual(config["microsoft_saved_account_identifier"], "")
+        self.assertEqual(config["expected_system_host"], "")
         self.assertIn("m365.cloud.microsoft", config["microsoft_hosts"])
 
     def test_learning_can_start_with_only_action_name(self) -> None:

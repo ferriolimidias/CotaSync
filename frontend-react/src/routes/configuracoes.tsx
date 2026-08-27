@@ -139,7 +139,7 @@ function ConfigPage() {
                   id="external-system-name"
                   value={form.external_system_name}
                   onChange={(event) => updateForm("external_system_name", event.target.value)}
-                  placeholder="Sistema Priscila e Jonatan"
+                  placeholder="Nome do sistema externo"
                 />
               </div>
               <div className="grid gap-2">
@@ -172,7 +172,7 @@ function ConfigPage() {
                     id="external-expected-host"
                     value={form.expected_system_host}
                     onChange={(event) => updateForm("expected_system_host", event.target.value)}
-                    placeholder="nwcweb.randonconsorcios.com.br"
+                    placeholder="sistema.exemplo.com.br"
                   />
                 </div>
               </details>

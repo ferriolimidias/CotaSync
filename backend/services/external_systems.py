@@ -9,10 +9,6 @@ from backend.db import ExternalSystem, SessionLocal
 
 
 DEFAULT_ACCESS_PROFILE = {
-    "access_profile_name": "Priscila",
-    "microsoft_saved_account_text": "Priscila Susin",
-    "microsoft_saved_account_identifier": "D0004267@rdmz.com.br",
-    "expected_system_host": "nwcweb.randonconsorcios.com.br",
     "microsoft_hosts": ["login.microsoftonline.com", "m365.cloud.microsoft"],
 }
 MICROSOFT_HOST_SUFFIXES = (
