@@ -209,7 +209,27 @@ export type LearningSession = {
   recording?: boolean;
   learning_events_count?: number;
   variables?: string[];
+  result_selection?: Record<string, unknown>;
+  extraction_review?: Record<string, unknown>;
   [key: string]: unknown;
+};
+
+export type ResultSelectionCandidate = {
+  label?: string;
+  value?: string;
+  type?: string;
+  candidate_type?: string;
+  selected_element?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type LearningResultSelection = {
+  status?: string;
+  captured?: Record<string, unknown> | null;
+  candidates?: ResultSelectionCandidate[];
+  reason?: string;
+  message?: string;
+  extraction_review?: Record<string, unknown>;
 };
 
 export type DiagnosticsPayload = {

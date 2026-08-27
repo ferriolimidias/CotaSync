@@ -115,6 +115,8 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         last_operator_result={},
         last_backend_recorded_event={},
         last_recorded_event_session_id="",
+        result_selection={},
+        extraction_review={},
         observer_tasks=set(),
         context=SimpleNamespace(pages=[]),
         storage_state_path=Path(tempfile.gettempdir()) / "cotasync-unit" / "storage_state.json",
@@ -420,6 +422,69 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(extraction_step["nome"], "Qtd. Pcls. Pagas")
         self.assertEqual(extraction_step["seletor"], "")
         self.assertEqual(extraction_step["extraction_strategy"], "near_label")
+
+    def test_confirmed_visual_result_is_saved_with_learned_action(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.extraction_review = {
+            "source": "visual_result_selection",
+            "target_name": "Qtd. Pcls. Pagas",
+            "screen_label": "Qtd. Pcls. Pagas",
+            "selection_type": "field_value",
+            "example_value": "040",
+            "expected_example": "040",
+            "normalization": {"type": "digits_only"},
+            "selector_data": {"primary": "#parcelas"},
+            "anchor_data": {"context_label": "Qtd. Pcls. Pagas"},
+            "summary_instruction": "Retorne somente o valor do resultado selecionado.",
+        }
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch("backend.services.demo_session.save_learned_action", side_effect=lambda action_key, learned_action: captured.update({"acoes_conhecidas": {action_key: learned_action}})), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Consultar parcelas pagas", "Consulta.", {}))
+        action = captured["acoes_conhecidas"]["Consultar parcelas pagas"]  # type: ignore[index]
+
+        self.assertEqual(action["extraction_review"]["expected_example"], "040")
+        self.assertEqual(action["extraction_review"]["normalization"]["type"], "digits_only")
+        self.assertEqual(action["reviewed_overlay"]["extraction"]["screen_label"], "Qtd. Pcls. Pagas")
+        self.assertIn("Qtd. Pcls. Pagas", action["extraction_targets"])
+
+    def test_confirming_result_twice_replaces_session_contract(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.result_selection = {
+            "status": "captured",
+            "candidates": [{"label": "Qtd. Pcls. Pagas", "value": "040", "type": "field_value"}],
+        }
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+
+        first = asyncio.run(
+            manager.confirm_result_selection(
+                "session",
+                target_name="Qtd. Pcls. Pagas",
+                screen_label="Qtd. Pcls. Pagas",
+                normalization="digits_only",
+            )
+        )
+        session.result_selection = {
+            "status": "captured",
+            "candidates": [{"label": "Qtd. Pcls. Pagas", "value": "041", "type": "field_value"}],
+        }
+        second = asyncio.run(
+            manager.confirm_result_selection(
+                "session",
+                target_name="Qtd. Pcls. Pagas",
+                screen_label="Qtd. Pcls. Pagas",
+                normalization="digits_only",
+            )
+        )
+
+        self.assertEqual(first["extraction_review"]["expected_example"], "040")
+        self.assertEqual(second["extraction_review"]["expected_example"], "041")
+        self.assertEqual(session.extraction_review["expected_example"], "041")
 
     def test_variable_names_are_suggested_as_friendly_schema_and_renamable(self) -> None:
         manager = DemoSessionManager()

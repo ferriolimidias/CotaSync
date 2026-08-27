@@ -14,6 +14,8 @@ import type {
   ExternalSystemConfig,
   ExternalSessionStatus,
   LearningSession,
+  LearningResultSelection,
+  ResultSelectionCandidate,
   WorkerStatus,
 } from "@/types/api";
 
@@ -466,6 +468,48 @@ export async function stopLearningRecording(id: string) {
       method: "POST",
     },
   );
+}
+
+export async function startLearningResultSelection(id: string) {
+  const payload = await apiFetch<{ selection: LearningResultSelection }>(
+    `/api/v1/learning/sessions/${id}/result-selection/start`,
+    { method: "POST" },
+  );
+  return payload.selection;
+}
+
+export async function captureLearningResultSelection(
+  id: string,
+  input: { target_name: string; screen_label: string },
+) {
+  return apiFetch<LearningResultSelection>(`/api/v1/learning/sessions/${id}/result-selection/capture`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function confirmLearningResultSelection(
+  id: string,
+  input: {
+    target_name: string;
+    screen_label: string;
+    selection_type: string;
+    candidate: ResultSelectionCandidate;
+    normalization: "exact_text" | "digits_only";
+  },
+) {
+  return apiFetch<LearningResultSelection>(`/api/v1/learning/sessions/${id}/result-selection/confirm`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function cancelLearningResultSelection(id: string) {
+  const payload = await apiFetch<{ selection: LearningResultSelection }>(
+    `/api/v1/learning/sessions/${id}/result-selection/cancel`,
+    { method: "POST" },
+  );
+  return payload.selection;
 }
 
 export async function saveLearnedAction(

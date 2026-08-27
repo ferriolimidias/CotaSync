@@ -14,6 +14,7 @@ from backend.services.extraction_targets import normalize_label_key
 
 
 SELECTION_TYPES = {"field_value", "table_footer_total", "table_cell", "block_text"}
+NORMALIZATION_TYPES = {"exact_text", "digits_only"}
 HEADER_WORDS = {
     "ocorrencia",
     "valor pagar",
@@ -49,6 +50,18 @@ def clean_text(value: Any) -> str:
 
 def clean_label(value: Any) -> str:
     return re.sub(r"[\s:;|\-–—]+$", "", clean_text(value)).strip()
+
+
+def normalize_extracted_value(value: Any, normalization: str = "exact_text") -> dict[str, Any]:
+    text = clean_text(value)
+    if normalization != "digits_only":
+        return {"value": text, "needs_attention": False, "reason": ""}
+    groups = re.findall(r"\d+", text)
+    if len(groups) == 1:
+        return {"value": groups[0], "needs_attention": False, "reason": ""}
+    if not groups:
+        return {"value": "", "needs_attention": True, "reason": "digits_not_found"}
+    return {"value": "", "needs_attention": True, "reason": "multiple_numeric_groups", "groups": groups}
 
 
 def infer_value_type(target_name: Any, screen_label: Any, value: Any = "") -> str:
@@ -170,6 +183,43 @@ def _parse_tables(html_text: Any) -> list[list[list[dict[str, Any]]]]:
     return parser.tables
 
 
+def _strip_tags(value: str) -> str:
+    return clean_text(re.sub(r"<[^>]+>", " ", value))
+
+
+def _adjacent_label_value_candidates(source: str, *, wanted: str, target_name: str = "") -> list[dict[str, Any]]:
+    if not wanted:
+        return []
+    candidates: list[dict[str, Any]] = []
+    block_pattern = re.compile(
+        r"<(?P<label_tag>label|span|td|th|div)\b[^>]*>(?P<label>[^<>]{2,120}:?)</(?P=label_tag)>\s*"
+        r"<(?P<value_tag>span|strong|b|td|input|textarea|select)\b(?P<attrs>[^>]*)>"
+        r"(?P<value>[^<>]{0,160})",
+        flags=re.I | re.S,
+    )
+    for match in block_pattern.finditer(source):
+        label = _strip_tags(match.group("label"))
+        if wanted not in normalize_label_key(label):
+            continue
+        attrs = match.group("attrs") or ""
+        value = _strip_tags(match.group("value"))
+        value_attr = re.search(r"\bvalue\s*=\s*(['\"])(.*?)\1", attrs, flags=re.I | re.S)
+        if value_attr:
+            value = clean_text(value_attr.group(2))
+        if value:
+            candidates.append(
+                _candidate(
+                    label,
+                    value,
+                    "field_value",
+                    0.9,
+                    target_name=target_name,
+                    nearby_text=f"{label} | {value}",
+                )
+            )
+    return candidates
+
+
 def _headers_for(table: list[list[dict[str, Any]]]) -> list[str]:
     for row in table[:3]:
         if row and any(cell.get("tag") == "th" for cell in row):
@@ -210,6 +260,8 @@ def detect_extraction_candidates(
     source = re.sub(r"<(?:script|style|head|meta|link)\b[^>]*>.*?</(?:script|style|head|meta|link)>", " ", str(final_page_dom_or_text or ""), flags=re.I | re.S)
     wanted = normalize_label_key(screen_label or target_name)
     candidates: list[dict[str, Any]] = []
+
+    candidates.extend(_adjacent_label_value_candidates(source, wanted=wanted, target_name=target_name))
 
     if selected_element:
         selected = dict(selected_element)
@@ -303,9 +355,18 @@ def build_extraction_contract(
         ctype = "table_cell" if "table" in ctype else "field_value"
     label = clean_text(screen_label or selected.get("label") or selected.get("candidate_label") or target_name)
     value = clean_text(selected.get("value") or selected.get("candidate_value") or selected.get("selected_text") or "")
+    read_mode = str(selected.get("read_mode") or ("value" if str(selected.get("tag_name") or selected.get("tag") or "").lower() in {"input", "textarea", "select"} else "text")).strip()
+    normalization = str(selected.get("normalization") or selected.get("normalization_type") or "").strip()
+    if normalization not in NORMALIZATION_TYPES:
+        normalization = "digits_only" if re.fullmatch(r"\d+", value) else "exact_text"
+    normalized = normalize_extracted_value(value, normalization)
     value_type = str(selected.get("value_type") or infer_value_type(target_name, label, value))
     avoid_labels = ["Ocorrência", "Valor Pagar", "Parcela Paga", "Modalidad.", "NA", "PR", "RT"]
     validation = validate_candidate_value(value, value_type, avoid_labels)
+    if normalized.get("needs_attention"):
+        validation = {"valid": False, "needs_attention": True, "reason": normalized.get("reason") or "normalization_failed"}
+    if str(selected.get("input_type") or selected.get("type_attr") or "").casefold() == "password":
+        validation = {"valid": False, "needs_attention": True, "reason": "password_field"}
     if not is_candidate_text_valid(label, value, value_type, avoid_labels):
         validation = {
             "valid": False,
@@ -320,6 +381,27 @@ def build_extraction_contract(
         "example_value": value,
         "expected_example": value,
         "value_type": value_type,
+        "read_mode": read_mode if read_mode in {"value", "text"} else "text",
+        "normalization": {"type": normalization},
+        "selector_data": {
+            "primary": clean_text(selected.get("selector") or selected.get("css_path") or selected.get("selector_hint") or ""),
+            "candidates": selected.get("locator_candidates") if isinstance(selected.get("locator_candidates"), list) else [],
+            "tag": clean_text(selected.get("tag_name") or selected.get("tag") or ""),
+            "id": clean_text(selected.get("id") or ""),
+            "name": clean_text(selected.get("name") or ""),
+            "aria_label": clean_text(selected.get("aria_label") or ""),
+            "placeholder": clean_text(selected.get("placeholder") or ""),
+            "stable_attributes": selected.get("stable_attributes") if isinstance(selected.get("stable_attributes"), dict) else {},
+        },
+        "anchor_data": {
+            "context_label": label,
+            "nearby_text": clean_text(selected.get("nearby_text") or ""),
+            "nearby_text_before": selected.get("nearby_text_before") if isinstance(selected.get("nearby_text_before"), list) else [],
+            "nearby_text_after": selected.get("nearby_text_after") if isinstance(selected.get("nearby_text_after"), list) else [],
+            "parent_text": clean_text(selected.get("parent_text") or "")[:1200],
+            "row_context": clean_text(selected.get("row_context") or selected.get("row_text") or ""),
+            "column_header": clean_text(selected.get("column_header") or ""),
+        },
         "selector_hint": clean_text(selected.get("selector") or selected.get("css_path") or selected.get("selector_hint") or ""),
         "label_selector": clean_text(selected.get("label_selector") or ""),
         "value_selector": clean_text(selected.get("value_selector") or selected.get("selector") or ""),
@@ -393,13 +475,26 @@ def extract_with_contract(final_page_dom: Any, final_page_text: Any, contract: d
             if normalize_label_key(label) in normalize_label_key(item.get("label")):
                 best = item
                 break
-    if best is None and candidates:
-        best = candidates[0]
     value = clean_text(best.get("value") if isinstance(best, dict) else "")
+    normalization_type = "exact_text"
+    normalization = contract.get("normalization") if isinstance(contract.get("normalization"), dict) else {}
+    if isinstance(normalization, dict):
+        normalization_type = str(normalization.get("type") or "exact_text")
+    normalized = normalize_extracted_value(value, normalization_type)
+    if not best:
+        return {
+            "value": "",
+            "needs_attention": True,
+            "validation": {"valid": False, "needs_attention": True, "reason": "locator_not_found"},
+            "candidate": {},
+            "source": "visual_contract",
+        }
     value_type = str(contract.get("value_type") or infer_value_type(target, label, value))
     validation = validate_candidate_value(value, value_type, contract.get("avoid_labels") if isinstance(contract.get("avoid_labels"), list) else None)
+    if normalized.get("needs_attention"):
+        validation = {"valid": False, "needs_attention": True, "reason": normalized.get("reason") or "normalization_failed"}
     return {
-        "value": value,
+        "value": str(normalized.get("value") if normalization_type == "digits_only" else value),
         "needs_attention": bool(validation["needs_attention"]),
         "validation": validation,
         "candidate": best or {},

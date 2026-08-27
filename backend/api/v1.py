@@ -723,6 +723,81 @@ async def learning_stop_recording(session_id: str, _user: AuthUser = Depends(req
     return {"status": "ok", **result}
 
 
+class LearningResultSelectionRequest(BaseModel):
+    target_name: str = ""
+    screen_label: str = ""
+
+
+class LearningResultSelectionConfirmRequest(BaseModel):
+    target_name: str
+    screen_label: str = ""
+    selection_type: str = ""
+    candidate: dict[str, Any] = Field(default_factory=dict)
+    normalization: str = "exact_text"
+
+
+@router.post("/learning/sessions/{session_id}/result-selection/start", summary="Inicia seleção visual do resultado")
+async def learning_start_result_selection(
+    session_id: str,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.start_result_selection(session_id)
+    except DemoSessionError as exc:
+        raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
+    return {"status": "ok", "selection": result}
+
+
+@router.post("/learning/sessions/{session_id}/result-selection/capture", summary="Captura seleção visual do resultado")
+async def learning_capture_result_selection(
+    session_id: str,
+    payload: LearningResultSelectionRequest | None = None,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    request = payload or LearningResultSelectionRequest()
+    try:
+        result = await demo_session_manager.capture_result_selection(
+            session_id,
+            target_name=request.target_name,
+            screen_label=request.screen_label,
+        )
+    except DemoSessionError as exc:
+        raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/learning/sessions/{session_id}/result-selection/confirm", summary="Confirma resultado selecionado")
+async def learning_confirm_result_selection(
+    session_id: str,
+    payload: LearningResultSelectionConfirmRequest,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.confirm_result_selection(
+            session_id,
+            target_name=payload.target_name,
+            screen_label=payload.screen_label,
+            candidate=payload.candidate,
+            selection_type=payload.selection_type,
+            normalization=payload.normalization,
+        )
+    except DemoSessionError as exc:
+        raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
+    return {"status": "ok", **result}
+
+
+@router.post("/learning/sessions/{session_id}/result-selection/cancel", summary="Cancela seleção visual do resultado")
+async def learning_cancel_result_selection(
+    session_id: str,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    try:
+        result = await demo_session_manager.cancel_result_selection(session_id)
+    except DemoSessionError as exc:
+        raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
+    return {"status": "ok", "selection": result}
+
+
 @router.post("/learning/sessions/{session_id}/actions", summary="Publica ação aprendida")
 async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:

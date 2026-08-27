@@ -51,6 +51,7 @@ from backend.services.actions_repository import enrich_action_access_profile, sa
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
 from backend.services.result_selection import (
+    build_extraction_contract,
     detect_extraction_candidates,
     extraction_contract_from_action,
     extract_with_contract,
@@ -288,7 +289,30 @@ _RECORDER_SCRIPT = r"""
 _RESULT_SELECTION_SCRIPT = r"""
 () => {
   const attrValue = (value) => String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  const textOf = (el) => String(el?.innerText || el?.textContent || el?.value || '').replace(/\s+/g, ' ').trim();
+  const isField = (el) => el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName || '');
+  const textOf = (el) => {
+    if (!el) return '';
+    if (isField(el)) {
+      if (el.tagName === 'SELECT') return String(el.selectedOptions?.[0]?.text || el.value || '').replace(/\s+/g, ' ').trim();
+      return String(el.value || '').replace(/\s+/g, ' ').trim();
+    }
+    return String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  };
+  const labelFor = (el) => {
+    if (!el || !el.ownerDocument) return '';
+    const id = el.id ? String(el.id) : '';
+    if (id) {
+      const explicit = el.ownerDocument.querySelector(`label[for="${attrValue(id)}"]`);
+      if (explicit) return textOf(explicit).slice(0, 160);
+    }
+    const wrapping = el.closest && el.closest('label');
+    if (wrapping) return textOf(wrapping).slice(0, 160);
+    const aria = el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder');
+    if (aria) return String(aria).slice(0, 160);
+    const parentText = textOf(el.parentElement);
+    const current = textOf(el);
+    return parentText.replace(current, '').replace(/[:;|\-–—\s]+$/g, '').slice(0, 160);
+  };
   const selectorFor = (el) => {
     if (!el || !el.tagName) return '';
     const tag = el.tagName.toLowerCase();
@@ -303,6 +327,42 @@ _RESULT_SELECTION_SCRIPT = r"""
     const siblings = Array.from(parent.children).filter((item) => item.tagName === el.tagName);
     const position = siblings.indexOf(el) + 1;
     return `${selectorFor(parent)} > ${tag}:nth-of-type(${Math.max(position, 1)})`;
+  };
+  const locatorCandidates = (el) => {
+    const tag = String(el?.tagName || '').toLowerCase();
+    const items = [];
+    if (!tag) return items;
+    if (el.id) items.push(`#${CSS.escape(el.id)}`);
+    ['data-testid', 'data-test', 'data-cy', 'data-qa', 'name', 'aria-label', 'placeholder', 'title'].forEach((attr) => {
+      const value = el.getAttribute && el.getAttribute(attr);
+      if (value) items.push(`${tag}[${attr}="${attrValue(value)}"]`);
+    });
+    const label = labelFor(el);
+    if (label) items.push(`${tag}:near-label("${attrValue(label)}")`);
+    items.push(selectorFor(el));
+    return Array.from(new Set(items)).slice(0, 8);
+  };
+  const stableAttributes = (el) => {
+    const attrs = {};
+    if (!el || !el.getAttributeNames) return attrs;
+    el.getAttributeNames().forEach((name) => {
+      if (/^(id|name|aria-label|placeholder|title|role|data-testid|data-test|data-cy|data-qa)$/i.test(name)) {
+        attrs[name] = String(el.getAttribute(name) || '').slice(0, 240);
+      }
+    });
+    return attrs;
+  };
+  const usableElementAt = (event) => {
+    const items = document.elementsFromPoint(event.clientX, event.clientY)
+      .filter((item) => item && item !== document.documentElement && item !== document.body)
+      .filter((item) => textOf(item) || isField(item));
+    if (!items.length) return event.target;
+    return items
+      .map((item) => {
+        const rect = item.getBoundingClientRect();
+        return {item, area: Math.max(1, rect.width) * Math.max(1, rect.height)};
+      })
+      .sort((a, b) => a.area - b.area)[0].item;
   };
   const tableInfo = (el) => {
     const cell = el.closest && el.closest('td,th');
@@ -332,28 +392,53 @@ _RESULT_SELECTION_SCRIPT = r"""
       next_numeric_text: numeric || ''
     };
   };
-  window.__cotasyncResultSelection = {active: true, captured: null};
+  const cleanup = () => {
+    clear();
+    const label = document.getElementById('__cotasync_result_selection_label');
+    if (label) label.remove();
+    document.documentElement.classList.remove('__cotasync-result-selecting');
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+  };
+  window.__cotasyncResultSelection = {active: true, captured: null, cancelled: false};
+  window.__cotasyncCancelResultSelection = () => {
+    if (window.__cotasyncResultSelection) {
+      window.__cotasyncResultSelection.active = false;
+      window.__cotasyncResultSelection.cancelled = true;
+    }
+    cleanup();
+    return {status: 'cancelled'};
+  };
   if (!document.getElementById('__cotasync_result_selection_style')) {
     const style = document.createElement('style');
     style.id = '__cotasync_result_selection_style';
-    style.textContent = '.__cotasync-result-hover{outline:3px solid #0ea5e9!important;cursor:crosshair!important;}';
+    style.textContent = '.__cotasync-result-selecting,.__cotasync-result-selecting *{cursor:crosshair!important;}.__cotasync-result-hover{outline:3px solid #f59e0b!important;outline-offset:2px!important;background-color:rgba(245,158,11,.12)!important;}#__cotasync_result_selection_label{position:fixed;z-index:2147483647;max-width:360px;border-radius:6px;background:#111827;color:#fff;padding:6px 8px;font:12px/1.35 system-ui,-apple-system,Segoe UI,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.25);pointer-events:none;}';
     document.documentElement.appendChild(style);
   }
   let last = null;
+  const hoverLabel = document.createElement('div');
+  hoverLabel.id = '__cotasync_result_selection_label';
+  document.documentElement.appendChild(hoverLabel);
   const clear = () => { if (last) last.classList.remove('__cotasync-result-hover'); last = null; };
   const onMove = (event) => {
     if (!window.__cotasyncResultSelection?.active) return;
-    const el = event.target;
+    const el = usableElementAt(event);
     if (!el || el === document.documentElement || el === document.body) return;
     if (last !== el) clear();
     last = el;
     el.classList.add('__cotasync-result-hover');
+    const preview = textOf(el).slice(0, 120) || labelFor(el) || String(el.tagName || '').toLowerCase();
+    hoverLabel.textContent = preview || 'Elemento sem texto';
+    hoverLabel.style.left = `${Math.min(event.clientX + 14, window.innerWidth - 380)}px`;
+    hoverLabel.style.top = `${Math.min(event.clientY + 14, window.innerHeight - 48)}px`;
   };
   const onClick = (event) => {
     if (!window.__cotasyncResultSelection?.active) return;
     event.preventDefault();
     event.stopPropagation();
-    const el = event.target;
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    const el = usableElementAt(event);
     const rect = el.getBoundingClientRect();
     const parent = el.parentElement;
     const before = [];
@@ -366,6 +451,8 @@ _RESULT_SELECTION_SCRIPT = r"""
     }
     const table = tableInfo(el);
     const selectedText = textOf(el);
+    const inputType = String(el.getAttribute?.('type') || '').toLowerCase();
+    const semanticLabel = labelFor(el);
     const candidateLabel = table.column_header || before.filter(Boolean).slice(-1)[0] || selectedText;
     const selectedKey = selectedText.toLowerCase().replace(/[^a-z0-9à-ÿ%]+/g, ' ').trim();
     const headerKey = String(table.column_header || '').toLowerCase().replace(/[^a-z0-9à-ÿ%]+/g, ' ').trim();
@@ -379,32 +466,49 @@ _RESULT_SELECTION_SCRIPT = r"""
         selector: selectorFor(el),
         css_path: selectorFor(el),
         tag_name: String(el.tagName || '').toLowerCase(),
+        input_type: inputType,
+        read_mode: isField(el) ? 'value' : 'text',
         id: String(el.id || ''),
         name: String(el.getAttribute('name') || ''),
         class: String(el.getAttribute('class') || ''),
         aria_label: String(el.getAttribute('aria-label') || ''),
+        placeholder: String(el.getAttribute('placeholder') || ''),
         title: String(el.getAttribute('title') || ''),
+        label: semanticLabel,
+        stable_attributes: stableAttributes(el),
+        locator_candidates: locatorCandidates(el),
         bounding_box: {x: rect.x, y: rect.y, width: rect.width, height: rect.height},
         nearby_text: [...before, selectedText, ...after].filter(Boolean).join(' | '),
         nearby_text_before: before.filter(Boolean),
         nearby_text_after: after.filter(Boolean),
         parent_text: textOf(parent).slice(0, 1200),
-        candidate_label: clickedLooksLikeLabel ? selectedText : candidateLabel,
+        candidate_label: semanticLabel || (clickedLooksLikeLabel ? selectedText : candidateLabel),
         candidate_value: table.table_headers ? tableValue : selectedText,
         candidate_type: table.table_headers ? (table.table_is_footer ? 'table_footer_total' : 'table_cell') : 'block_text',
+        normalization: /^\d+$/.test(selectedText) ? 'digits_only' : 'exact_text',
+        blocked_reason: inputType === 'password' ? 'password_field' : '',
         current_url: String(location.href || '').split(/[?#]/, 1)[0],
         current_host: String(location.host || ''),
         page_title: String(document.title || ''),
         ...table
       }
     };
-    clear();
-    document.removeEventListener('mousemove', onMove, true);
-    document.removeEventListener('click', onClick, true);
+    cleanup();
     return false;
   };
+  const onKeyDown = (event) => {
+    if (event.key !== 'Escape' || !window.__cotasyncResultSelection?.active) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    window.__cotasyncResultSelection.active = false;
+    window.__cotasyncResultSelection.cancelled = true;
+    cleanup();
+  };
+  document.documentElement.classList.add('__cotasync-result-selecting');
   document.addEventListener('mousemove', onMove, true);
   document.addEventListener('click', onClick, true);
+  document.addEventListener('keydown', onKeyDown, true);
   return {status: 'active', current_url: String(location.href || '').split(/[?#]/, 1)[0], page_title: String(document.title || '')};
 }
 """
@@ -756,6 +860,8 @@ class DemoBrowserSession:
     last_operator_result: dict[str, Any] = field(default_factory=dict)
     last_backend_recorded_event: dict[str, Any] = field(default_factory=dict)
     last_recorded_event_session_id: str = ""
+    result_selection: dict[str, Any] = field(default_factory=dict)
+    extraction_review: dict[str, Any] = field(default_factory=dict)
 
 
 class DemoSessionManager:
@@ -772,7 +878,16 @@ class DemoSessionManager:
         session = self._get(session_id)
         if session.page.is_closed():
             raise DemoSessionError("Pagina da sessao nao esta disponivel para selecao.")
-        result = await session.page.evaluate(_RESULT_SELECTION_SCRIPT)
+        try:
+            result = await asyncio.wait_for(session.page.evaluate(_RESULT_SELECTION_SCRIPT), timeout=5)
+        except TimeoutError as exc:
+            raise DemoSessionError("Nao foi possivel ativar a selecao visual na pagina atual.") from exc
+        session.result_selection = {
+            "status": "active",
+            "captured": None,
+            "candidates": [],
+            "started_at": _utc_now(),
+        }
         return result if isinstance(result, dict) else {"status": "active"}
 
     async def capture_result_selection(
@@ -785,11 +900,35 @@ class DemoSessionManager:
         session = self._get(session_id)
         if session.page.is_closed():
             raise DemoSessionError("Pagina da sessao nao esta disponivel para captura.")
-        captured = await session.page.evaluate(
-            "() => window.__cotasyncResultSelection && window.__cotasyncResultSelection.captured"
-        )
+        try:
+            captured = await asyncio.wait_for(
+                session.page.evaluate(
+                    "() => window.__cotasyncResultSelection && window.__cotasyncResultSelection.captured"
+                ),
+                timeout=5,
+            )
+            cancelled = await asyncio.wait_for(
+                session.page.evaluate(
+                    "() => Boolean(window.__cotasyncResultSelection && window.__cotasyncResultSelection.cancelled)"
+                ),
+                timeout=5,
+            )
+        except TimeoutError as exc:
+            raise DemoSessionError("Nao foi possivel ler a selecao visual na pagina atual.") from exc
+        if cancelled:
+            session.result_selection = {"status": "cancelled", "captured": None, "candidates": []}
+            return session.result_selection
         if not isinstance(captured, dict) or not captured:
             return {"captured": None, "candidates": [], "status": "waiting"}
+        if str(captured.get("blocked_reason") or "") == "password_field":
+            session.result_selection = {
+                "captured": None,
+                "candidates": [],
+                "status": "blocked",
+                "reason": "password_field",
+                "message": "Campos de senha não podem ser usados como resultado.",
+            }
+            return session.result_selection
         captured.setdefault("current_url", _safe_page_url(session.page.url))
         captured.setdefault("current_host", host_from_url(session.page.url))
         captured.setdefault("page_title", await self._current_title(session.page))
@@ -803,7 +942,91 @@ class DemoSessionManager:
             screen_label=screen_label,
             selected_element=captured,
         )
-        return {"captured": captured, "candidates": candidates, "status": "captured"}
+        if not candidates:
+            candidates = [
+                {
+                    "label": str(captured.get("candidate_label") or screen_label or target_name or "Campo selecionado"),
+                    "value": str(captured.get("candidate_value") or captured.get("selected_text") or ""),
+                    "type": str(captured.get("candidate_type") or "block_text"),
+                    "candidate_type": str(captured.get("candidate_type") or "block_text"),
+                    "needs_attention": True,
+                    "validation": {"valid": False, "needs_attention": True, "reason": "selected_context_not_specific"},
+                    "selected_element": captured,
+                }
+            ]
+        session.result_selection = {"captured": captured, "candidates": candidates, "status": "captured"}
+        return session.result_selection
+
+    async def confirm_result_selection(
+        self,
+        session_id: str,
+        *,
+        target_name: str,
+        screen_label: str = "",
+        candidate: dict[str, Any] | None = None,
+        selection_type: str = "",
+        normalization: str = "",
+    ) -> dict[str, Any]:
+        session = self._get(session_id)
+        current_selection = session.result_selection if isinstance(session.result_selection, dict) else {}
+        selected_candidate = candidate if isinstance(candidate, dict) and candidate else None
+        if selected_candidate is None:
+            candidates = current_selection.get("candidates") if isinstance(current_selection.get("candidates"), list) else []
+            selected_candidate = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        if not selected_candidate:
+            raise DemoSessionError("Selecione no navegador qual informação esta ação deve retornar.")
+        selected_candidate = dict(selected_candidate)
+        if normalization:
+            selected_candidate["normalization"] = normalization
+        contract = build_extraction_contract(
+            target_name=target_name,
+            screen_label=screen_label,
+            candidate=selected_candidate,
+            selection_type=selection_type,
+            return_format="somente o valor",
+        )
+        if contract.get("validation", {}).get("reason") == "password_field":
+            raise DemoSessionError("Campos de senha não podem ser usados como resultado.")
+        if contract.get("needs_attention"):
+            reason = str(contract.get("validation", {}).get("reason") or "invalid_candidate")
+            messages = {
+                "multiple_numeric_groups": "O campo selecionado tem mais de um número. Selecione exatamente o valor desejado.",
+                "digits_not_found": "O campo selecionado não contém números.",
+                "selected_context_not_specific": "Selecione um campo mais específico para o resultado.",
+                "invalid_candidate": "Selecione um campo mais específico para o resultado.",
+                "locator_not_found": "Não consegui identificar esse campo com segurança.",
+            }
+            raise DemoSessionError(messages.get(reason, "Resultado selecionado não é confiável para extração."))
+        session.extraction_review = contract
+        session.result_selection = {
+            "status": "confirmed",
+            "captured": current_selection.get("captured") if isinstance(current_selection.get("captured"), dict) else {},
+            "candidates": [selected_candidate],
+            "contract": contract,
+            "confirmed_at": _utc_now(),
+        }
+        return {"status": "confirmed", "extraction_review": contract, "result_selection": session.result_selection}
+
+    async def cancel_result_selection(self, session_id: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        if not session.page.is_closed():
+            try:
+                await asyncio.wait_for(
+                    session.page.evaluate(
+                        "() => window.__cotasyncCancelResultSelection ? window.__cotasyncCancelResultSelection() : {status: 'cancelled'}"
+                    ),
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        previous_contract = dict(session.extraction_review) if isinstance(session.extraction_review, dict) else {}
+        session.result_selection = {
+            "status": "cancelled",
+            "captured": None,
+            "candidates": [],
+            "contract": previous_contract,
+        }
+        return session.result_selection
 
     async def detect_result_candidates(
         self,
@@ -1596,6 +1819,8 @@ class DemoSessionManager:
             "manual_confirmed": session.manual_login_confirmed,
             "confirmed_page_url": session.confirmed_page_url,
             "confirmed_page_title": session.confirmed_page_title,
+            "result_selection": dict(session.result_selection),
+            "extraction_review": dict(session.extraction_review),
         }
 
     async def operator_diagnostics(self, session_id: str) -> dict[str, Any]:
@@ -2242,6 +2467,8 @@ class DemoSessionManager:
         session.last_operator_result = {}
         session.last_backend_recorded_event = {}
         session.last_recorded_event_session_id = ""
+        session.result_selection = {}
+        session.extraction_review = {}
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -2550,6 +2777,9 @@ class DemoSessionManager:
                 variables.append({"key": variable, "label": _title_label(variable), "required": True})
 
         requested_extractions = extraction_targets if isinstance(extraction_targets, list) else []
+        selected_extraction_contract = (
+            dict(session.extraction_review) if isinstance(session.extraction_review, dict) and session.extraction_review else {}
+        )
         if requested_extractions or extract_visible_text:
             steps = [step for step in steps if str(step.get("tipo") or "") != "extrair_texto"]
             for index, raw_target in enumerate(requested_extractions):
@@ -2636,6 +2866,14 @@ class DemoSessionManager:
             if str(step.get("tipo") or "").strip().lower() == "extrair_texto"
             and str(step.get("nome") or "").strip()
         ]
+        if selected_extraction_contract:
+            selected_target = str(
+                selected_extraction_contract.get("target_name")
+                or selected_extraction_contract.get("screen_label")
+                or "resultado"
+            ).strip()
+            if selected_target and selected_target not in extraction_targets:
+                extraction_targets.append(selected_target)
         output_schema = {target: {"type": "string"} for target in extraction_targets}
         guided = session.guided_learning
         objective_text = str(objective or guided.get("objective") or "").strip()
@@ -2685,7 +2923,7 @@ class DemoSessionManager:
             "reviewed_overlay": {},
             "ai_review_summary": "",
             "final_summary_instruction": "",
-            "extraction_review": {},
+            "extraction_review": selected_extraction_contract,
             "objective": objective_text,
             "input_description": input_description_text,
             "expected_result": expected_result_text,
@@ -2732,12 +2970,37 @@ class DemoSessionManager:
             "microsoft_hosts": microsoft_hosts,
             "session_guardian_enabled": bool(session.external_login_url or session.browser_mode == "desktop_browser"),
         }
+        if selected_extraction_contract:
+            learned_action["reviewed_overlay"] = {
+                "review_status": "approved",
+                "reviewed_at": _utc_now(),
+                "extraction": selected_extraction_contract,
+                "summary_instruction": selected_extraction_contract.get("summary_instruction") or "",
+            }
+            learned_action["final_summary_instruction"] = str(
+                selected_extraction_contract.get("summary_instruction") or ""
+            )
+            learned_action["review_status"] = "approved"
+            learned_action["ai_review_summary"] = "Contrato visual de extração salvo durante o ensino."
         from backend.services.ai_observer import analyze_recorded_action_with_ai
 
         # A síntese final inclui nomes de variáveis e saídas editados após a
         # gravação; a pré-síntese de stop_recording continua disponível na UI.
         ai_review = await analyze_recorded_action_with_ai(learned_action)
         learned_action.update(ai_review)
+        if selected_extraction_contract:
+            learned_action["extraction_review"] = selected_extraction_contract
+            learned_action["reviewed_overlay"] = {
+                **(learned_action.get("reviewed_overlay") if isinstance(learned_action.get("reviewed_overlay"), dict) else {}),
+                "review_status": "approved",
+                "reviewed_at": _utc_now(),
+                "extraction": selected_extraction_contract,
+                "summary_instruction": selected_extraction_contract.get("summary_instruction") or "",
+            }
+            learned_action["final_summary_instruction"] = str(
+                selected_extraction_contract.get("summary_instruction") or learned_action.get("final_summary_instruction") or ""
+            )
+            learned_action["review_status"] = "approved"
         reviewed_variables = learned_action.get("variable_schema")
         if isinstance(reviewed_variables, list) and reviewed_variables:
             by_key = {str(item.get("key") or ""): item for item in reviewed_variables if isinstance(item, dict)}
