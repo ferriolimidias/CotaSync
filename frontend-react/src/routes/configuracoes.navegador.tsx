@@ -39,7 +39,7 @@ function BrowserWorkspacePage() {
       <BrowserWorkspace
         accessButtonLabel="Renovar acesso"
         autoOpen
-        resizeMode="remote"
+        resizeMode="scale"
         title={systemName}
         variant="workspace"
         leading={
