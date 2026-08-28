@@ -27,7 +27,7 @@ from backend.api.desktop_browser import router as desktop_browser_router
 from backend.api.external_systems import router as external_systems_router
 from backend.api.runs import actions_run_router, runs_router
 from backend.api.v1 import router as api_v1_router
-from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf
+from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf, validate_session_user
 from backend.services.demo_session import demo_session_manager
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
@@ -114,6 +114,8 @@ async def cotasync_auth_middleware(request: Request, call_next):
     path = request.url.path.rstrip("/") or "/"
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         user = parse_session_token(request.cookies.get(SESSION_COOKIE, ""))
+        if user is not None:
+            user = validate_session_user(user)
         if user is None:
             if path.startswith("/api/v1/"):
                 return JSONResponse({"error": {"code": "AUTH_REQUIRED", "message": "Authentication required."}}, status_code=401)

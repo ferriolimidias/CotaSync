@@ -29,6 +29,7 @@ logger = logging.getLogger("cotasync.auth")
 class AuthUser:
     username: str
     role: Role
+    auth_version: int = 1
 
 
 def _secret() -> bytes:
@@ -98,14 +99,14 @@ def authenticate(username: str, password: str) -> AuthUser | None:
                 if not db_user.active or not verify_password(password, db_user.password_hash):
                     return None
                 db_user.last_login_at = datetime.now(UTC)
-                return AuthUser(username=db_user.username, role=db_user.role)  # type: ignore[arg-type]
+                return AuthUser(username=db_user.username, role=db_user.role, auth_version=int(db_user.auth_version or 1))  # type: ignore[arg-type]
             if session.scalar(select(User.id).limit(1)) is None:
                 configured = _configured_users()
                 configured_user = configured.get(wanted)
                 if configured_user and verify_password(password, configured_user[1]):
                     role, stored_hash = configured_user
-                    session.add(User(id=secrets.token_urlsafe(16), username=wanted, role=role, password_hash=stored_hash, active=True))
-                    return AuthUser(username=wanted, role=role)
+                    session.add(User(id=secrets.token_urlsafe(16), username=wanted, role=role, password_hash=stored_hash, active=True, auth_version=1))
+                    return AuthUser(username=wanted, role=role, auth_version=1)
     except Exception:
         logger.debug("PostgreSQL auth indisponivel; usando configuracao de ambiente.", exc_info=True)
     configured = _configured_users()
@@ -116,6 +117,18 @@ def authenticate(username: str, password: str) -> AuthUser | None:
     if not verify_password(password, stored_hash):
         return None
     return AuthUser(username=str(username).strip(), role=role)
+
+
+def reset_user_password(username: str, password: str) -> User:
+    new_hash = hash_password(password)
+    with SessionLocal.begin() as session:
+        user = session.scalar(select(User).where(User.username == str(username or "").strip()))
+        if user is None:
+            raise LookupError(f"User not found: {username}")
+        user.password_hash = new_hash
+        user.auth_version = int(user.auth_version or 1) + 1
+        session.flush()
+        return user
 
 
 def _b64(data: bytes) -> str:
@@ -132,6 +145,7 @@ def create_session_token(user: AuthUser, *, now: datetime | None = None) -> str:
     payload = {
         "sub": user.username,
         "role": user.role,
+        "auth_version": int(user.auth_version),
         "iat": int(issued.timestamp()),
         "exp": int((issued + timedelta(seconds=SESSION_TTL_SECONDS)).timestamp()),
         "nonce": secrets.token_urlsafe(16),
@@ -154,8 +168,27 @@ def parse_session_token(token: str, *, now: datetime | None = None) -> AuthUser 
         role = str(payload.get("role") or "").strip()
         if role not in {"admin", "operator"} or not username:
             return None
-        return AuthUser(username=username, role=role)  # type: ignore[arg-type]
+        auth_version = int(payload.get("auth_version") or 0)
+        if auth_version < 1:
+            return None
+        return AuthUser(username=username, role=role, auth_version=auth_version)  # type: ignore[arg-type]
     except Exception:
+        return None
+
+
+def validate_session_user(user: AuthUser) -> AuthUser | None:
+    try:
+        with SessionLocal() as session:
+            db_user = session.scalar(select(User).where(User.username == user.username))
+            if db_user is None:
+                return None
+            if not db_user.active:
+                return None
+            if int(db_user.auth_version or 1) != int(user.auth_version):
+                return None
+            return AuthUser(username=db_user.username, role=db_user.role, auth_version=int(db_user.auth_version or 1))  # type: ignore[arg-type]
+    except Exception:
+        logger.debug("Nao foi possivel validar a sessao no PostgreSQL.", exc_info=True)
         return None
 
 
@@ -197,13 +230,9 @@ def user_from_request(request: Request) -> AuthUser | None:
     token = request.cookies.get(SESSION_COOKIE)
     user = parse_session_token(token or "")
     if user is not None:
-        try:
-            with SessionLocal() as session:
-                db_user = session.scalar(select(User).where(User.username == user.username))
-                if db_user is not None and (not db_user.active or db_user.role != user.role):
-                    return None
-        except Exception:
-            logger.debug("Nao foi possivel validar a sessao no PostgreSQL.", exc_info=True)
+        user = validate_session_user(user)
+        if user is None:
+            return None
         request.state.auth_user = user
     return user
 
