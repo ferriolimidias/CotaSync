@@ -826,6 +826,18 @@ async def acionar_ia_cartografa(
     }
 
 
+async def verify_postcondition(page: Any, selector: str, step_index: int, *, timeout_ms: int = 15000) -> None:
+    expected_selector = str(selector or "").strip()
+    if not expected_selector:
+        return
+    try:
+        await page.locator(expected_selector).first.wait_for(state="visible", timeout=timeout_ms)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Pós-condição não alcançada após o passo {step_index}: {expected_selector}"
+        ) from exc
+
+
 async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
@@ -1219,11 +1231,57 @@ async def executar_acao_rapida(
                 passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None,
                 0,
             )
-            await run_session_checkpoint(page, "before_action_auth_check", first_step)
+            observation = await guardian.observe_workflow_state(
+                page,
+                action_config,
+                authenticated=await is_authenticated(page),
+            )
+            workflow_state = str(observation.get("workflow_state") or "unknown")
+            if workflow_state == "auth_continue":
+                initial_plan = await guardian.plan_resume_index(page, action_config, observation)
+            elif workflow_state in {"auth_secret_required", "microsoft_password_required", "microsoft_mfa_required"} or workflow_state.startswith("microsoft_"):
+                await run_session_checkpoint(page, "before_action_auth_check", first_step)
+                initial_plan = {"resume_index": None, "reason": workflow_state}
+            else:
+                initial_plan = await guardian.plan_resume_index(page, action_config, observation)
+            stateful_replay = bool(observation.get("stateful", True))
+            last_session_state = workflow_state
+            initial_evidence = observation.get("evidence") or {}
+            last_page_title = str(initial_evidence.get("title") or "")
+            current_host = str(initial_evidence.get("current_host") or "")
+            if initial_plan.get("resume_index") is None and stateful_replay:
+                diagnostics = dict(observation.get("evidence") or {})
+                diagnostics.update(
+                    {
+                        "reason": initial_plan.get("reason") or "unknown_browser_state",
+                        "workflow_state": workflow_state,
+                        "operator_action_required": workflow_state in {"auth_secret_required", "unknown"},
+                        "retryable": workflow_state == "unknown",
+                    }
+                )
+                raise SessionGuardianError(
+                    "Não foi possível determinar com segurança a próxima etapa do navegador.",
+                    diagnostics,
+                )
+            resume_index = int(initial_plan.get("resume_index") or 0)
+            skipped_steps = list(range(resume_index))
+            checkpoint_diagnostics.append(
+                {
+                    "checkpoint": "workflow_observation",
+                    "workflow_state": workflow_state,
+                    "resume_index": resume_index,
+                    "skipped_steps": skipped_steps,
+                    "current_host": observation.get("evidence", {}).get("current_host", ""),
+                    "current_url": observation.get("evidence", {}).get("current_url", ""),
+                    "result": "planned",
+                }
+            )
             _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
             for step_index, passo in enumerate(passos_playwright):
                 if not isinstance(passo, dict):
+                    continue
+                if step_index < resume_index:
                     continue
                 next_step = (
                     passos_playwright[step_index + 1]
@@ -1364,6 +1422,17 @@ async def executar_acao_rapida(
                         metadata = runtime_file_metadata(caminho_arquivo)
                         downloaded_files.append(metadata)
                         arquivos_baixados.append(str(metadata["path"]))
+                    expected_selector = str(
+                        passo.get("expected_selector_after")
+                        or (next_step.get("seletor") if isinstance(next_step, dict) else "")
+                        or ""
+                    ).strip()
+                    if not expected_selector and isinstance(next_step, dict) and str(next_step.get("tipo") or "").strip().lower() == "extrair_texto":
+                        contract = extraction_contract_from_action(action_config)
+                        selector_data = contract.get("selector_data") if isinstance(contract, dict) else {}
+                        expected_selector = str(selector_data.get("primary") or "").strip() if isinstance(selector_data, dict) else ""
+                    if expected_selector and tipo_acao != "extrair_texto":
+                        await verify_postcondition(page, expected_selector, step_index)
                     after_state = await current_browser_state(page)
                     overlay_waits_applied = await apply_reviewed_overlay_waits(page, step_index)
                     trace_item.update(
@@ -1494,7 +1563,9 @@ async def executar_acao_rapida(
                 "downloaded_files": downloaded_files,
                 "main_file": downloaded_files[0] if downloaded_files else None,
                 "dados_extraidos": dados_extraidos,
-                "passos_executados": len(passos_playwright),
+                "passos_executados": sum(1 for item in step_trace if item.get("status") == "success"),
+                "passos_pulados": skipped_steps,
+                "workflow_state_initial": workflow_state,
                 "final_page": {"title": final_title, "url": _safe_result_url(page.url)},
                 "final_page_text": final_page_text,
                 "final_page_dom": final_page_dom,

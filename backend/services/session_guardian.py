@@ -137,6 +137,11 @@ def _metadata(action: Any, key: str, default: Any = None) -> Any:
     return getattr(action, key, default)
 
 
+def _action_steps(action: Any) -> list[dict[str, Any]]:
+    raw = _metadata(action, "robust_steps", None) or _metadata(action, "passos_playwright", [])
+    return [step for step in raw if isinstance(step, dict)] if isinstance(raw, list) else []
+
+
 def _matches_any(text: str, words: tuple[str, ...]) -> bool:
     lowered = text.casefold()
     return any(word in lowered for word in words)
@@ -415,6 +420,133 @@ class SessionGuardian:
             retryable=not bool(host),
             reason="host_matches_expected" if host else "no_host",
         )
+
+    async def observe_workflow_state(
+        self,
+        page: Any,
+        action: Any,
+        *,
+        authenticated: bool | None = None,
+    ) -> dict[str, Any]:
+        """Observe a known action state without taking navigation decisions."""
+        session_state = await self.classify(page, action, authenticated=authenticated)
+        steps = _action_steps(action)
+        evidence: dict[str, Any] = {
+            "current_url": session_state.current_url,
+            "current_host": session_state.current_host,
+            "title": session_state.title,
+            "session_state": session_state.state,
+            "visible_selectors": [],
+        }
+
+        async def visible(selector: str) -> bool:
+            if not selector:
+                return False
+            try:
+                locator = page.locator(selector).first
+                return await locator.count() > 0 and await locator.is_visible()
+            except Exception:
+                return False
+
+        if session_state.state in MICROSOFT_CREDENTIAL_STATES:
+            return {"workflow_state": "auth_secret_required", "session": session_state, "evidence": evidence}
+        if _is_microsoft_auth_url(session_state.current_url, session_state.current_host):
+            for index, step in enumerate(steps):
+                if _step_type(step) != "clicar":
+                    continue
+                expected = _step_expected_url_or_host(step)
+                if expected and not _expected_host_matches_current(expected, session_state.current_host):
+                    continue
+                selector = _step_selector(step)
+                if await visible(selector):
+                    evidence["visible_selectors"].append(selector)
+                    return {
+                        "workflow_state": "auth_continue",
+                        "resume_index": index,
+                        "session": session_state,
+                        "evidence": evidence,
+                    }
+            return {"workflow_state": session_state.state, "session": session_state, "evidence": evidence}
+
+        if session_state.state != "authenticated_system":
+            return {"workflow_state": session_state.state, "session": session_state, "evidence": evidence}
+
+        result_selectors: list[str] = []
+        for source in (action,):
+            overlay = _metadata(source, "reviewed_overlay", {})
+            review = _metadata(source, "extraction_review", {})
+            for contract in (
+                overlay.get("extraction") if isinstance(overlay, dict) else {},
+                review if isinstance(review, dict) else {},
+            ):
+                selector_data = contract.get("selector_data") if isinstance(contract, dict) else {}
+                selector = selector_data.get("primary") if isinstance(selector_data, dict) else ""
+                if str(selector or "").strip():
+                    result_selectors.append(str(selector).strip())
+        result_selectors.extend(
+            _step_selector(step)
+            for step in steps
+            if _step_type(step) == "extrair_texto" and _step_selector(step)
+        )
+        for selector in dict.fromkeys(result_selectors):
+            if await visible(selector):
+                evidence["visible_selectors"].append(selector)
+                return {
+                    "workflow_state": "result_ready",
+                    "session": session_state,
+                    "evidence": evidence,
+                }
+
+        fill_indexes = [index for index, step in enumerate(steps) if _step_type(step) == "preencher"]
+        visible_fill_indexes = [index for index in fill_indexes if await visible(_step_selector(steps[index]))]
+        if fill_indexes and len(visible_fill_indexes) == len(fill_indexes):
+            evidence["visible_selectors"].extend(_step_selector(steps[index]) for index in visible_fill_indexes)
+            return {
+                "workflow_state": "consulta_ready",
+                "resume_index": fill_indexes[0],
+                "session": session_state,
+                "evidence": evidence,
+            }
+
+        for index, step in enumerate(steps):
+            expected_host = _step_expected_url_or_host(step)
+            if _step_type(step) != "clicar" or _is_microsoft_host(expected_host):
+                continue
+            selector = _step_selector(step)
+            if await visible(selector):
+                evidence["visible_selectors"].append(selector)
+                return {
+                    "workflow_state": "home_ready",
+                    "resume_index": index,
+                    "stateful": bool(fill_indexes or result_selectors),
+                    "session": session_state,
+                    "evidence": evidence,
+                }
+        return {
+            "workflow_state": "unknown",
+            "reason": "unknown_browser_state",
+            "stateful": bool(fill_indexes or result_selectors),
+            "session": session_state,
+            "evidence": evidence,
+        }
+
+    async def plan_resume_index(self, page: Any, action: Any, observation: dict[str, Any]) -> dict[str, Any]:
+        state = str(observation.get("workflow_state") or "unknown")
+        steps = _action_steps(action)
+        if state == "auth_continue":
+            return {"resume_index": observation.get("resume_index", 0), "reason": "auth_transition_pending"}
+        if state in {"home_ready", "consulta_ready"}:
+            return {"resume_index": observation.get("resume_index"), "reason": f"resume_from_{state}"}
+        if state == "result_ready":
+            fill_indexes = [index for index, step in enumerate(steps) if _step_type(step) == "preencher"]
+            for index in fill_indexes:
+                try:
+                    if await page.locator(_step_selector(steps[index])).first.is_visible():
+                        return {"resume_index": index, "reason": "result_to_consulta_fields_visible"}
+                except Exception:
+                    continue
+            return {"resume_index": None, "reason": "result_to_consulta_transition_not_learned"}
+        return {"resume_index": None, "reason": observation.get("reason") or state}
 
     async def _classify_microsoft_page(
         self,

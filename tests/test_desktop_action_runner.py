@@ -27,6 +27,7 @@ from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
+from backend.motor_browser import verify_postcondition
 from tests.auth_helpers import authenticated_client
 
 
@@ -428,6 +429,83 @@ class SessionGuardianTests(unittest.TestCase):
         )
         state = asyncio.run(self._guardian().classify(page, desktop_action().model_dump()))
         self.assertEqual(state.state, "microsoft_pick_account")
+
+    def _stateful_action(self) -> dict[str, object]:
+        return {
+            "expected_system_host": "nwcweb.randonconsorcios.com.br",
+            "robust_steps": [
+                {"tipo": "clicar", "seletor": "#account", "expected_url_before": "https://login.microsoftonline.com/authorize"},
+                {"tipo": "clicar", "seletor": "#idSIButton9", "expected_url_before": "https://login.microsoftonline.com/authorize"},
+                {"tipo": "clicar", "seletor": "#ctl00_img_Atendimento", "expected_url_before": TARGET_URL},
+                {"tipo": "preencher", "seletor": "#grupo", "variavel": "grupo"},
+                {"tipo": "preencher", "seletor": "#cota", "variavel": "cota"},
+                {"tipo": "preencher", "seletor": "#versao", "variavel": "versao"},
+                {"tipo": "clicar", "seletor": "#localizar", "expected_url_before": TARGET_URL},
+                {"tipo": "extrair_texto", "seletor": "#resultado", "nome": "Resultado"},
+            ],
+            "extraction_review": {"selector_data": {"primary": "#resultado"}},
+        }
+
+    def test_observes_auth_continue_and_resumes_at_visible_transition(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/authorize",
+            "Pick an account",
+            visible_selectors={"#idSIButton9"},
+        )
+        observation = asyncio.run(self._guardian().observe_workflow_state(page, self._stateful_action()))
+        plan = asyncio.run(self._guardian().plan_resume_index(page, self._stateful_action(), observation))
+        self.assertEqual(observation["workflow_state"], "auth_continue")
+        self.assertEqual(plan["resume_index"], 1)
+
+    def test_observes_home_and_skips_microsoft_steps(self) -> None:
+        page = FakeGuardianPage(TARGET_URL, "Intranet Newcon", visible_selectors={"#ctl00_img_Atendimento"})
+        observation = asyncio.run(self._guardian().observe_workflow_state(page, self._stateful_action(), authenticated=True))
+        plan = asyncio.run(self._guardian().plan_resume_index(page, self._stateful_action(), observation))
+        self.assertEqual(observation["workflow_state"], "home_ready")
+        self.assertEqual(plan["resume_index"], 2)
+
+    def test_observes_consulta_and_result_resume_states(self) -> None:
+        action = self._stateful_action()
+        consulta = FakeGuardianPage(TARGET_URL, "Consulta", visible_selectors={"#grupo", "#cota", "#versao"})
+        consulta_observation = asyncio.run(self._guardian().observe_workflow_state(consulta, action, authenticated=True))
+        consulta_plan = asyncio.run(self._guardian().plan_resume_index(consulta, action, consulta_observation))
+        self.assertEqual(consulta_observation["workflow_state"], "consulta_ready")
+        self.assertEqual(consulta_plan["resume_index"], 3)
+
+        result = FakeGuardianPage(TARGET_URL, "Resultado", visible_selectors={"#resultado", "#grupo", "#cota", "#versao"})
+        result_observation = asyncio.run(self._guardian().observe_workflow_state(result, action, authenticated=True))
+        result_plan = asyncio.run(self._guardian().plan_resume_index(result, action, result_observation))
+        self.assertEqual(result_observation["workflow_state"], "result_ready")
+        self.assertEqual(result_plan["resume_index"], 3)
+
+    def test_result_without_consulta_transition_stops_safely(self) -> None:
+        action = self._stateful_action()
+        result = FakeGuardianPage(TARGET_URL, "Resultado", visible_selectors={"#resultado"})
+        observation = asyncio.run(self._guardian().observe_workflow_state(result, action, authenticated=True))
+        plan = asyncio.run(self._guardian().plan_resume_index(result, action, observation))
+        self.assertEqual(observation["workflow_state"], "result_ready")
+        self.assertIsNone(plan["resume_index"])
+        self.assertEqual(plan["reason"], "result_to_consulta_transition_not_learned")
+
+    def test_secret_and_unknown_states_stop_without_automation(self) -> None:
+        action = self._stateful_action()
+        password = FakeGuardianPage(
+            "https://login.microsoftonline.com/authorize",
+            "Enter password",
+            password_visible=True,
+        )
+        password_observation = asyncio.run(self._guardian().observe_workflow_state(password, action))
+        self.assertEqual(password_observation["workflow_state"], "auth_secret_required")
+
+        unknown = FakeGuardianPage(TARGET_URL, "Tela desconhecida")
+        unknown_observation = asyncio.run(self._guardian().observe_workflow_state(unknown, action, authenticated=True))
+        self.assertEqual(unknown_observation["workflow_state"], "unknown")
+        self.assertEqual(unknown_observation["reason"], "unknown_browser_state")
+
+    def test_postcondition_failure_stops_transition(self) -> None:
+        page = FakeGuardianPage(TARGET_URL, "Consulta", visible_selectors=set())
+        with self.assertRaisesRegex(RuntimeError, "Pós-condição não alcançada"):
+            asyncio.run(verify_postcondition(page, "#next", 3, timeout_ms=1))
 
     def test_m365_host_classifies_as_unknown_microsoft_auth_not_empty(self) -> None:
         page = FakeGuardianPage("https://m365.cloud.microsoft/", "", title="Microsoft 365")
