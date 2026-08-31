@@ -133,6 +133,8 @@ def _batch_summary(batch: dict[str, Any]) -> dict[str, Any]:
         "id": batch.get("batch_id"),
         "status": batch.get("status"),
         "action_id": batch.get("action_id"),
+        "action_key": batch.get("action_key"),
+        "action_name": batch.get("action_name"),
         "total_items": batch.get("total_items"),
         "processed_items": batch.get("processed_items"),
         "success_items": batch.get("success_items"),
@@ -626,7 +628,7 @@ async def actions_get(action_id: str, _user: AuthUser = Depends(require_user)) -
     return {"status": "ok", "action": payload}
 
 
-@router.delete("/actions/{action_id}", summary="Exclui ou arquiva ação")
+@router.delete("/actions/{action_id}", summary="Exclui ação definitivamente")
 async def actions_delete(action_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
         result = delete_or_archive_action(action_id)

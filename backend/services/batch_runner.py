@@ -270,6 +270,7 @@ def _batch_final_status(items: list[BatchItem], *, cancel_requested: bool = Fals
 
 
 def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem]) -> dict[str, Any]:
+    metadata = db_batch.metadata_json or {}
     current = next((item for item in items if item.status == ITEM_STATUS_RUNNING), None)
     return {
         "batch_id": db_batch.id,
@@ -296,9 +297,11 @@ def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem]) -> dict[str, Any]:
         "cancelled_items": db_batch.cancelled_items,
         "current_position": current.position if current else None,
         "current_client_id": current.client_id if current else None,
-        "metadata": db_batch.metadata_json or {},
-        "source": (db_batch.metadata_json or {}).get("source", ""),
-        "client_ids": (db_batch.metadata_json or {}).get("client_ids", []),
+        "metadata": metadata,
+        "source": metadata.get("source", ""),
+        "action_key": metadata.get("action_key", ""),
+        "action_name": metadata.get("action_name", metadata.get("action_key", "")),
+        "client_ids": metadata.get("client_ids", []),
         "rows": [
             {
                 "index": item.position,
@@ -453,7 +456,7 @@ def create_batch(
                 idempotency_user_id=normalized_user_id if normalized_key else None,
                 idempotency_operation=operation if normalized_key else None,
                 idempotency_fingerprint=fingerprint if normalized_key else None,
-                metadata_json={"source": source, "action_key": action.key, "client_ids": batch["client_ids"]},
+                metadata_json={"source": source, "action_key": action.key, "action_name": action.name, "client_ids": batch["client_ids"]},
             )
             session.add(db_batch)
             session.flush()

@@ -66,14 +66,10 @@ function ActionCard({ action }: { action: ApiAction }) {
   const queryClient = useQueryClient();
   const remove = useMutation({
     mutationFn: () => deleteAction(action.id),
-    onSuccess: (result) => {
+    onSuccess: () => {
       setDeleteOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["actions"] });
-      toast.success(
-        result.status === "archived"
-          ? "Ação removida das ações disponíveis. O histórico foi preservado."
-          : "Ação excluída.",
-      );
+      toast.success("Ação excluída.");
     },
     onError: (error) => toast.error(error instanceof ApiError ? error.message : "Não foi possível excluir a ação."),
   });
@@ -150,7 +146,7 @@ function ActionCard({ action }: { action: ApiAction }) {
           <DialogHeader>
             <DialogTitle>Excluir “{action.name}”?</DialogTitle>
             <DialogDescription>
-              “{action.name}” será removida das ações disponíveis. Se houver histórico, ele será preservado.
+              “{action.name}” e todo o aprendizado serão excluídos permanentemente. Execuções e relatórios já concluídos não serão apagados.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

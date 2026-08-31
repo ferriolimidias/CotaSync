@@ -407,18 +407,15 @@ def find_action(action_id: str, path: Path | None = None) -> ActionDetail | None
 
 
 def delete_or_archive_action(action_id: str) -> dict[str, str]:
-    """Remove uma definicao sem perder referencias historicas."""
+    """Exclui a definicao da acao sem remover historico operacional terminal."""
     wanted = str(action_id or "").strip()
     with SessionLocal.begin() as session:
         action = session.get(DbAction, wanted)
         if action is None:
             raise ActionDeletionError("ACTION_NOT_FOUND", "Acao nao encontrada.", 404)
-        if action.status == "archived":
-            raise ActionDeletionError("ACTION_ALREADY_ARCHIVED", "Esta acao ja foi removida das acoes disponiveis.")
-
         active_run = session.query(DbRun.id).filter(
             DbRun.action_id == action.id,
-            DbRun.status.in_(["pending", "running"]),
+            DbRun.status.in_(["queued", "pending", "running"]),
         ).first()
         if active_run:
             raise ActionDeletionError(
@@ -445,18 +442,6 @@ def delete_or_archive_action(action_id: str) -> dict[str, str]:
                 "ACTION_SCHEDULE_ACTIVE",
                 "Esta acao possui um agendamento ativo. Desative-o antes de excluir a acao.",
             )
-
-        has_history = any(
-            (
-                session.query(DbRun.id).filter(DbRun.action_id == action.id).first(),
-                session.query(DbBatch.id).filter(DbBatch.action_id == action.id).first(),
-                session.query(BatchItem.id).join(DbBatch, DbBatch.id == BatchItem.batch_id).filter(DbBatch.action_id == action.id).first(),
-                session.query(Schedule.id).filter(Schedule.action_id == action.id).first(),
-            )
-        )
-        if has_history:
-            action.status = "archived"
-            return {"status": "archived", "action_id": action.id}
 
         version_ids = [row[0] for row in session.query(ActionVersion.id).filter(ActionVersion.action_id == action.id).all()]
         if version_ids:
