@@ -35,7 +35,7 @@ function BrowserWorkspacePage() {
   const systemName = external.data?.external_system_name || "Navegador externo";
 
   return (
-    <main className="min-h-screen bg-muted/30 p-2">
+    <main className="flex h-dvh flex-col overflow-hidden bg-muted/30">
       <BrowserWorkspace
         accessButtonLabel="Renovar acesso"
         autoOpen

@@ -96,14 +96,14 @@ export function BrowserWorkspace({
       ref={rootRef}
       className={
         workspaceMode
-          ? "flex h-[calc(100vh-1rem)] min-h-[720px] flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm fullscreen:h-screen fullscreen:min-h-screen fullscreen:rounded-none fullscreen:border-0"
+          ? "flex h-full min-h-0 flex-col overflow-hidden border border-border bg-card shadow-sm fullscreen:h-screen fullscreen:min-h-screen fullscreen:rounded-none fullscreen:border-0"
           : "flex min-h-[700px] flex-col overflow-hidden rounded-lg border border-border bg-card lg:min-h-[75vh]"
       }
     >
       <div
         className={
           workspaceMode
-            ? "flex min-h-12 flex-wrap items-center gap-2 border-b border-border bg-background/95 px-3 py-2 fullscreen:absolute fullscreen:left-3 fullscreen:right-3 fullscreen:top-3 fullscreen:z-10 fullscreen:rounded-md fullscreen:border fullscreen:bg-background/90 fullscreen:shadow-sm fullscreen:backdrop-blur"
+            ? "z-10 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-background/95 px-3 py-2 fullscreen:absolute fullscreen:left-3 fullscreen:right-3 fullscreen:top-3 fullscreen:h-auto fullscreen:min-h-12 fullscreen:rounded-md fullscreen:border fullscreen:bg-background/90 fullscreen:shadow-sm fullscreen:backdrop-blur"
             : "flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2"
         }
       >
@@ -138,30 +138,28 @@ export function BrowserWorkspace({
           </Button>
         </div>
       </div>
-      {iframeUrl ? (
-        <iframe
-          title="Navegador CotaSync"
-          src={iframeUrl}
-          className={
-            workspaceMode
-              ? "h-full min-h-0 w-full flex-1 bg-background"
-              : "min-h-[640px] flex-1 bg-background lg:min-h-[calc(75vh-3rem)]"
-          }
-        />
-      ) : (
-        <div
-          className={
-            workspaceMode
-              ? "grid min-h-0 flex-1 place-items-center bg-muted/30 p-6 text-center"
-              : "grid min-h-[640px] flex-1 place-items-center bg-muted/30 p-6 text-center lg:min-h-[calc(75vh-3rem)]"
-          }
-        >
-          <div>
-            <p className="text-sm font-medium text-foreground">{state.title}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{state.description}</p>
+      <div
+        className={
+          workspaceMode
+            ? "relative min-h-0 flex-1 overflow-hidden"
+            : "relative flex min-h-[640px] flex-1 overflow-hidden lg:min-h-[calc(75vh-3rem)]"
+        }
+      >
+        {iframeUrl ? (
+          <iframe
+            title="Navegador CotaSync"
+            src={iframeUrl}
+            className="h-full w-full border-0 bg-background"
+          />
+        ) : (
+          <div className="grid h-full place-items-center bg-muted/30 p-6 text-center">
+            <div>
+              <p className="text-sm font-medium text-foreground">{state.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{state.description}</p>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
       {(status.error || ensure.error || token.error) && (
         <div className="border-t border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {(status.error || ensure.error || token.error) instanceof Error
