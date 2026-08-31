@@ -90,6 +90,10 @@ function EnsinarPage() {
         toast.error("Não foi possível publicar a versão: resultado da ação incompleto.");
         return;
       }
+      if (error instanceof ApiError && error.status >= 500) {
+        toast.error("Não foi possível publicar a versão. O ensino foi preservado; tente novamente.");
+        return;
+      }
       toast.error(error instanceof Error ? error.message : "Não foi possível publicar a ação.");
     },
   });

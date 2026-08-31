@@ -479,9 +479,11 @@ class GuidedLearningSaveTests(unittest.TestCase):
                     "label": "Número de parcelas",
                     "value": "040",
                     "type": "field_value",
-                    "selector": "#numero-parcelas",
-                    "tag_name": "span",
-                    "nearby_text_before": ["Número de parcelas"],
+                    "selected_element": {
+                        "selector": "#numero-parcelas",
+                        "tag_name": "span",
+                        "nearby_text_before": ["Número de parcelas"],
+                    },
                 }
             ],
         }

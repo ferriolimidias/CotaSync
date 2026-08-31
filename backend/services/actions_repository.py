@@ -191,16 +191,16 @@ def enrich_action_access_profile(data: dict[str, Any]) -> dict[str, Any]:
         or ""
     ).strip()
     defaults = {
-        "access_profile_name": profile.get("access_profile_name") or DEFAULT_ACCESS_PROFILE["access_profile_name"],
+        "access_profile_name": profile.get("access_profile_name") or DEFAULT_ACCESS_PROFILE.get("access_profile_name", ""),
         "access_profile_email_or_identifier": identifier,
         "microsoft_saved_account_identifier": identifier,
         "microsoft_saved_account_selector": profile.get("microsoft_saved_account_selector") or "",
         "microsoft_saved_account_text": (
             profile.get("microsoft_saved_account_text")
-            or DEFAULT_ACCESS_PROFILE["microsoft_saved_account_text"]
+            or DEFAULT_ACCESS_PROFILE.get("microsoft_saved_account_text", "")
         ),
         "expected_system_host": _clean_expected_system_host(profile.get("expected_system_host"))
-        or DEFAULT_ACCESS_PROFILE["expected_system_host"],
+        or DEFAULT_ACCESS_PROFILE.get("expected_system_host", ""),
         "microsoft_hosts": profile.get("microsoft_hosts") or DEFAULT_ACCESS_PROFILE["microsoft_hosts"],
         "requires_authenticated_session": True,
         "session_guardian_enabled": True,

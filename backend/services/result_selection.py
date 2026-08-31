@@ -350,6 +350,10 @@ def build_extraction_contract(
     return_format: str = "somente o valor",
 ) -> dict[str, Any]:
     selected = candidate if isinstance(candidate, dict) else {}
+    selected_element = selected.get("selected_element") if isinstance(selected.get("selected_element"), dict) else {}
+    # Captures from the browser keep locator metadata under selected_element;
+    # older callers may still provide those fields at the candidate root.
+    selected = {**selected_element, **selected}
     ctype = selection_type or str(selected.get("type") or selected.get("candidate_type") or "field_value")
     if ctype not in SELECTION_TYPES:
         ctype = "table_cell" if "table" in ctype else "field_value"
