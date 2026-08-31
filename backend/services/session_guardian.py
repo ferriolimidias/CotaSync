@@ -542,7 +542,33 @@ class SessionGuardian:
             for index in fill_indexes:
                 try:
                     if await page.locator(_step_selector(steps[index])).first.is_visible():
-                        return {"resume_index": index, "reason": "result_to_consulta_fields_visible"}
+                        return {
+                            "resume_index": index,
+                            "reason": "result_to_consulta_fields_visible",
+                            "reentry_strategy": "direct_fill",
+                            "target_workflow_state": "consulta_ready",
+                        }
+                except Exception:
+                    continue
+            first_fill_index = fill_indexes[0] if fill_indexes else len(steps)
+            for index, step in enumerate(steps[:first_fill_index]):
+                if _step_type(step) != "clicar":
+                    continue
+                expected = _step_expected_url_or_host(step)
+                if _is_microsoft_host(expected):
+                    continue
+                selector = _step_selector(step)
+                if not selector:
+                    continue
+                try:
+                    if await page.locator(selector).first.is_visible():
+                        return {
+                            "resume_index": index,
+                            "reason": "result_to_consulta_transition_learned",
+                            "reentry_strategy": "transition",
+                            "transition_index": index,
+                            "target_workflow_state": "consulta_ready",
+                        }
                 except Exception:
                     continue
             return {"resume_index": None, "reason": "result_to_consulta_transition_not_learned"}

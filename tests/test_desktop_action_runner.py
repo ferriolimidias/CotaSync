@@ -487,6 +487,16 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertIsNone(plan["resume_index"])
         self.assertEqual(plan["reason"], "result_to_consulta_transition_not_learned")
 
+    def test_result_reenters_consulta_through_learned_non_microsoft_transition(self) -> None:
+        action = self._stateful_action()
+        result = FakeGuardianPage(TARGET_URL, "Resultado", visible_selectors={"#resultado", "#ctl00_img_Atendimento"})
+        observation = asyncio.run(self._guardian().observe_workflow_state(result, action, authenticated=True))
+        plan = asyncio.run(self._guardian().plan_resume_index(result, action, observation))
+        self.assertEqual(observation["workflow_state"], "result_ready")
+        self.assertEqual(plan["resume_index"], 2)
+        self.assertEqual(plan["reentry_strategy"], "transition")
+        self.assertEqual(plan["target_workflow_state"], "consulta_ready")
+
     def test_secret_and_unknown_states_stop_without_automation(self) -> None:
         action = self._stateful_action()
         password = FakeGuardianPage(

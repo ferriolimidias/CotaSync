@@ -1271,6 +1271,8 @@ async def executar_acao_rapida(
                     "workflow_state": workflow_state,
                     "resume_index": resume_index,
                     "skipped_steps": skipped_steps,
+                    "reentry_strategy": initial_plan.get("reentry_strategy", ""),
+                    "target_workflow_state": initial_plan.get("target_workflow_state", ""),
                     "current_host": observation.get("evidence", {}).get("current_host", ""),
                     "current_url": observation.get("evidence", {}).get("current_url", ""),
                     "result": "planned",

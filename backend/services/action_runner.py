@@ -137,6 +137,8 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "input_variables",
         "variables_used",
         "session_state",
+        "reentry_strategy",
+        "target_workflow_state",
         "recovery_attempts",
         "recovery_steps",
         "recovery_attempted",
