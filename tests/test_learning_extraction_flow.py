@@ -111,6 +111,32 @@ class LearningExtractionFlowTests(unittest.TestCase):
         self.assertNotIn("WebKit", rendered)
         self.assertNotIn("Chrome", rendered)
 
+    def test_confirmed_locator_contract_returns_zero_padded_values(self) -> None:
+        contract = build_extraction_contract(
+            target_name="Qtd. Pcls. Pagas",
+            screen_label="Qtd. Pcls. Pagas",
+            candidate={
+                "selected_element": {
+                    "selector": "#ctl00_Conteudo_lblQT_Pcls_Paga",
+                    "tag_name": "span",
+                    "label": "Qtd. Pcls. Pagas",
+                    "nearby_text": "Qtd. Pcls. Pagas:",
+                    "value": "040",
+                },
+                "normalization": "digits_only",
+                "value_type": "integer",
+            },
+            selection_type="field_value",
+        )
+
+        self.assertEqual(contract["example_value"], "040")
+        self.assertEqual(contract["selector_data"]["primary"], "#ctl00_Conteudo_lblQT_Pcls_Paga")
+        self.assertEqual(contract["normalization"], {"type": "digits_only"})
+        for value in ("040", "027", "005"):
+            html = f'<span id="ctl00_Conteudo_lblQT_Pcls_Paga">Qtd. Pcls. Pagas: {value}</span>'
+            result = extract_with_contract(html, "", contract)
+            self.assertEqual(result["value"], value)
+
     def test_invalid_candidate_cannot_be_saved_as_success(self) -> None:
         empty = build_extraction_contract(
             target_name="Quantidade de parcelas",
