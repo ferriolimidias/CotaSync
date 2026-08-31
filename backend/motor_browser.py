@@ -27,6 +27,7 @@ from backend.services.action_pages import (
     validate_action_page_url,
 )
 from backend.services.browser_providers import browser_provider, normalize_browser_mode
+from backend.services.client_fields import canonical_client_field_key
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
@@ -1309,8 +1310,10 @@ async def executar_acao_rapida(
                             )
 
                     elif tipo_acao == "preencher":
-                        if "variavel" in passo and dados_variaveis and str(passo["variavel"]) in dados_variaveis:
-                            valor_final = str(dados_variaveis[str(passo["variavel"])])
+                        variable_key = str(passo.get("variavel") or "").strip()
+                        canonical_variable_key = canonical_client_field_key(variable_key) or variable_key
+                        if variable_key and dados_variaveis and canonical_variable_key in dados_variaveis:
+                            valor_final = str(dados_variaveis[canonical_variable_key])
                         else:
                             valor_final = str(passo.get("valor", ""))
                         elementos = page.locator(seletor)

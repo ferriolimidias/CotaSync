@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
 from backend.db import Action as DbAction, ActionStep, ActionVersion, ExtractionContract, SessionLocal
 from backend.services.action_pages import url_host
+from backend.services.client_fields import canonical_client_field_key, client_field_label
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
 
 logger = logging.getLogger("cotasync.actions")
@@ -61,15 +62,22 @@ def _normalize_variable(raw: Any) -> ActionVariable | None:
         key = raw.strip()
         if not key:
             return None
-        return ActionVariable(key=key, label=key, required=True)
+        canonical = canonical_client_field_key(key)
+        if canonical:
+            return ActionVariable(key=canonical, label=client_field_label(canonical), required=True, source="client")
+        return ActionVariable(key=key, label=key, required=True, source="runtime")
 
     if isinstance(raw, dict):
         key = str(raw.get("key") or raw.get("name") or raw.get("id") or "").strip()
         if not key:
             return None
-        label = str(raw.get("label") or raw.get("nome") or key).strip() or key
+        canonical = canonical_client_field_key(key)
+        if canonical:
+            key = canonical
+        label = client_field_label(key) if canonical else str(raw.get("label") or raw.get("nome") or key).strip() or key
         required_raw = raw.get("required", raw.get("obrigatorio", True))
-        return ActionVariable(key=key, label=label, required=bool(required_raw))
+        source = "client" if canonical else str(raw.get("source") or "runtime").strip() or "runtime"
+        return ActionVariable(key=key, label=label, required=bool(required_raw), source=source)
 
     return None
 

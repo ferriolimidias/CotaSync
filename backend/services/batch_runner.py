@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal
 from backend.services.actions_repository import find_action
-from backend.services.clients_repository import validate_clients_for_action
+from backend.services.clients_repository import resolve_variables_for_action, validate_clients_for_action
 
 logger = logging.getLogger("cotasync.batch_runner")
 
@@ -171,7 +171,10 @@ def _rows_from_clients(
     for client in ready if isinstance(ready, list) else []:
         if not isinstance(client, dict):
             continue
-        variables = client.get("variables") if isinstance(client.get("variables"), dict) else {}
+        variables = resolve_variables_for_action(
+            client,
+            getattr(action, "variables", []) or [],
+        )
         rows.append(
             {
                 "client_id": str(client.get("id") or ""),

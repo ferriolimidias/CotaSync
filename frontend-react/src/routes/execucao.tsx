@@ -94,6 +94,10 @@ function ExecucaoPage() {
     () => (actions.data?.items ?? []).filter(actionIsExecutable),
     [actions.data],
   );
+  const selectedSingleAction = useMemo(
+    () => executableActions.find((action) => action.id === singleActionId),
+    [executableActions, singleActionId],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedClientSearch(singleClientSearch), 250);
@@ -103,7 +107,17 @@ function ExecucaoPage() {
   const runSingle = useMutation({
     mutationFn: async () => {
       if (!singleClient) throw new Error("Selecione um cliente.");
-      return runAction(singleActionId, variablesFromClient(singleClient));
+      const variables = variablesFromClient(singleClient);
+      const missingClientField = (selectedSingleAction?.variables ?? []).find(
+        (variable) =>
+          ["grupo", "cota", "versao"].includes(variable.key) &&
+          !String(variables[variable.key as keyof typeof variables] || "").trim(),
+      );
+      if (missingClientField) {
+        const labels: Record<string, string> = { grupo: "Grupo", cota: "Cota", versao: "Versão" };
+        throw new Error(`O cliente ${singleClient.name} não possui ${labels[missingClientField.key] || missingClientField.label} cadastrada.`);
+      }
+      return runAction(singleActionId, variables);
     },
     onSuccess: (run) => {
       setCurrentRunId(run.id);

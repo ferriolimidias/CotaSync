@@ -40,6 +40,7 @@ from backend.services.browser_providers import (
     configured_browser_mode,
     desktop_profile_dir,
 )
+from backend.services.client_fields import canonical_client_field_key, client_field_label
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import (
     SessionGuardian,
@@ -695,6 +696,9 @@ def _suggest_variable_key(selector: str, index: int = 0, metadata: dict[str, Any
 
 def _normalize_variable_key(value: Any, fallback_selector: str = "", index: int = 0) -> str:
     candidate = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    canonical = canonical_client_field_key(value) or canonical_client_field_key(candidate)
+    if canonical:
+        return canonical
     if candidate.startswith("conteudo_edtgrupo") or candidate == "edtgrupo":
         return "grupo"
     if candidate.startswith("conteudo_edtcota") or candidate == "edtcota":
@@ -2769,12 +2773,20 @@ class DemoSessionManager:
                 variable_schema.append(
                     {
                         "key": variable,
-                        "label": _title_label(variable),
+                        "label": client_field_label(variable) if canonical_client_field_key(variable) else _title_label(variable),
                         "required": True,
+                        "source": "client" if canonical_client_field_key(variable) else "runtime",
                         "source_step_index": index,
                     }
                 )
-                variables.append({"key": variable, "label": _title_label(variable), "required": True})
+                variables.append(
+                    {
+                        "key": variable,
+                        "label": client_field_label(variable) if canonical_client_field_key(variable) else _title_label(variable),
+                        "required": True,
+                        "source": "client" if canonical_client_field_key(variable) else "runtime",
+                    }
+                )
 
         requested_extractions = extraction_targets if isinstance(extraction_targets, list) else []
         selected_extraction_contract = (

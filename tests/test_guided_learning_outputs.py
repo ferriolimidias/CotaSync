@@ -20,7 +20,7 @@ from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import run_action_sync
 from backend.services.actions_repository import load_actions_catalog
 from backend.services.actions_repository import slugify_action_id
-from backend.services.demo_session import DemoSessionManager
+from backend.services.demo_session import DemoSessionManager, _normalize_variable_key
 from backend.services.external_systems import load_current_external_system, save_current_external_system
 from backend.services.operational_summary import build_operational_summary
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
@@ -58,6 +58,12 @@ class FakePage:
 class FakeBrowser:
     def is_connected(self) -> bool:
         return True
+
+
+class CanonicalClientFieldTests(unittest.TestCase):
+    def test_version_label_and_legacy_alias_use_canonical_key(self) -> None:
+        self.assertEqual(_normalize_variable_key("Versão"), "versao")
+        self.assertEqual(_normalize_variable_key("vers_o"), "versao")
 
 
 class FakeLocator:
@@ -1049,7 +1055,10 @@ class GuidedLearningSaveTests(unittest.TestCase):
             new=AsyncMock(return_value=_review()),
         ):
             saved = asyncio.run(manager.save_action("session", "Consultar grupo", "Consulta.", {}))
-        self.assertEqual(saved["variables"], [{"key": "grupo", "label": "Grupo", "required": True}])
+        self.assertEqual(
+            saved["variables"],
+            [{"key": "grupo", "label": "Grupo", "required": True, "source": "client"}],
+        )
         action = captured["acoes_conhecidas"]["Consultar grupo"]  # type: ignore[index]
         self.assertEqual(action["passos_playwright"][0]["variavel"], "grupo")
         self.assertEqual(action["passos_playwright"][0]["value_template"], "{{grupo}}")

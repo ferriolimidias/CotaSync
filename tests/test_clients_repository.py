@@ -232,6 +232,24 @@ class ClientsRepositoryTests(unittest.TestCase):
 
         self.assertEqual(resolved, {"grupo": "935", "cota": "110", "vers_o": "00"})
 
+    def test_resolve_client_fields_is_canonical_and_does_not_read_runtime_variables(self) -> None:
+        client = {"variables": {"grupo": "935", "cota": "110", "versao": "00", "data": "2026-01-01"}}
+        action_variables = [
+            {"key": "grupo", "required": True},
+            {"key": "cota", "required": True},
+            {"key": "versao", "required": True},
+            {"key": "vers_o", "required": True},
+            {"key": "data", "required": True},
+        ]
+
+        resolved = resolve_variables_for_action(client, action_variables)
+
+        self.assertEqual(resolved["grupo"], "935")
+        self.assertEqual(resolved["cota"], "110")
+        self.assertEqual(resolved["versao"], "00")
+        self.assertEqual(resolved["vers_o"], "00")
+        self.assertEqual(resolved["data"], "")
+
     def test_missing_cota_is_incomplete_for_cota_alias(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "clients.json"

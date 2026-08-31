@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.db import Client as DbClient, SessionLocal
+from backend.services.client_fields import canonical_client_field_key
 
 from backend.services.actions_repository import project_root
 
@@ -131,8 +132,12 @@ def resolve_variables_for_action(client: dict[str, Any], action_variable_schema:
             key = str(variable.get("key") or "").strip()
         if not key:
             continue
-        aliases = VARIABLE_ALIASES.get(key, (key,))
-        resolved[key] = _first_variable_value(variables, aliases)
+        canonical = canonical_client_field_key(key)
+        if canonical:
+            aliases = VARIABLE_ALIASES.get(canonical, (canonical,))
+            resolved[key] = _first_variable_value(variables, aliases)
+        else:
+            resolved[key] = ""
     return resolved
 
 

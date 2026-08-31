@@ -9,6 +9,7 @@ class ActionVariable(BaseModel):
     key: str
     label: str
     required: bool = True
+    source: str = "runtime"
 
 
 class ActionSummary(BaseModel):

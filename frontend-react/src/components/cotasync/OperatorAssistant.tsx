@@ -25,6 +25,11 @@ import {
 import { operatorClearActive, operatorInsertActive, operatorPress } from "@/services/api";
 
 const canonicalVariables = ["grupo", "cota", "versao"];
+const canonicalVariableLabels: Record<string, string> = {
+  grupo: "Grupo",
+  cota: "Cota",
+  versao: "Versão",
+};
 
 type OperatorAssistantMode = "operation" | "learning";
 type OperatorAssistantVariant = "panel" | "dock";
@@ -190,7 +195,7 @@ export function OperatorAssistant({
               <SelectContent>
                 {canonicalVariables.map((item) => (
                   <SelectItem key={item} value={item}>
-                    {item}
+                    {canonicalVariableLabels[item]}
                   </SelectItem>
                 ))}
               </SelectContent>
