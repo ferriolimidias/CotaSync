@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -218,6 +219,7 @@ def list_clients(
     *,
     group: str | None = None,
     include_inactive: bool = True,
+    search: str | None = None,
     path: Path | None = None,
 ) -> list[dict[str, Any]]:
     clients = load_clients(path)
@@ -225,8 +227,33 @@ def list_clients(
         clients = [client for client in clients if str(client.get("group") or "") == group]
     if not include_inactive:
         clients = [client for client in clients if bool(client.get("active", True))]
+    if search and search.strip():
+        terms = _search_terms(search)
+        clients = [client for client in clients if _client_matches_search(client, terms)]
     clients.sort(key=lambda item: (str(item.get("group") or ""), str(item.get("name") or "")))
     return clients
+
+
+def _search_terms(value: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return [term for term in normalized.encode("ascii", "ignore").decode("ascii").casefold().split() if term]
+
+
+def _client_matches_search(client: dict[str, Any], terms: list[str]) -> bool:
+    display = client.get("display_variables") if isinstance(client.get("display_variables"), dict) else {}
+    searchable = " ".join(
+        str(value or "")
+        for value in (
+            client.get("name"),
+            client.get("group"),
+            display.get("grupo"),
+            display.get("cota"),
+            display.get("versao"),
+        )
+    )
+    normalized = unicodedata.normalize("NFKD", searchable)
+    haystack = normalized.encode("ascii", "ignore").decode("ascii").casefold()
+    return all(term in haystack for term in terms)
 
 
 def get_client(client_id: str, path: Path | None = None) -> dict[str, Any] | None:

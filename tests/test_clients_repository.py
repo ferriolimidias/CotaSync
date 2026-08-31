@@ -152,6 +152,31 @@ class ClientsRepositoryTests(unittest.TestCase):
 
             self.assertEqual(list_groups(path), ["Lista A", "Lista B"])
 
+    def test_search_clients_matches_accented_name_and_all_display_terms(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clients.json"
+            create_client(
+                {
+                    "name": "Árvore Azul",
+                    "group": "Lista Principal",
+                    "variables": {"grupo": "900", "cota": "136", "versao": "00"},
+                },
+                path,
+            )
+            create_client(
+                {
+                    "name": "Outro Cliente",
+                    "group": "Lista Principal",
+                    "variables": {"grupo": "900", "cota": "999", "versao": "01"},
+                },
+                path,
+            )
+
+            self.assertEqual([item["name"] for item in list_clients(search="arvore", path=path)], ["Árvore Azul"])
+            self.assertEqual([item["name"] for item in list_clients(search="900 136", path=path)], ["Árvore Azul"])
+            self.assertEqual([item["name"] for item in list_clients(search="136", path=path)], ["Árvore Azul"])
+            self.assertEqual([item["name"] for item in list_clients(search="01", path=path)], ["Outro Cliente"])
+
     def test_validate_clients_for_action_identifies_ready_incomplete_and_inactive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "clients.json"

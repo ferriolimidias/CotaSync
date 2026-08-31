@@ -497,11 +497,12 @@ async def clients_list(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     group: str | None = None,
+    search: str | None = None,
     include_inactive: bool = True,
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
-        clients = list_clients(group=group, include_inactive=include_inactive)
+        clients = list_clients(group=group, include_inactive=include_inactive, search=search)
     except ClientsRepositoryError as exc:
         raise _error(500, "CLIENTS_UNAVAILABLE", str(exc)) from exc
     return {"status": "ok", "clients": _paginate(clients, page, page_size)}

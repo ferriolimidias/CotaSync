@@ -1,11 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Download, Play, StopCircle } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
+import { ClientSearchCombobox } from "@/components/cotasync/ClientSearchCombobox";
 import { DataTable, type Column } from "@/components/cotasync/DataTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -56,7 +57,9 @@ function ExecucaoPage() {
   const [currentBatchId, setCurrentBatchId] = useState<string | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const [singleActionId, setSingleActionId] = useState("");
-  const [singleClientId, setSingleClientId] = useState("");
+  const [singleClient, setSingleClient] = useState<ApiClient | null>(null);
+  const [singleClientSearch, setSingleClientSearch] = useState("");
+  const [debouncedClientSearch, setDebouncedClientSearch] = useState("");
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const currentBatch = useQuery({
     queryKey: ["batch", currentBatchId],
@@ -83,19 +86,24 @@ function ExecucaoPage() {
     () => (clients.data?.items ?? []).filter((client) => !group || client.group === group),
     [clients.data, group],
   );
-  const selectedSingleClient = useMemo(
-    () => (clients.data?.items ?? []).find((client) => client.id === singleClientId),
-    [clients.data, singleClientId],
-  );
+  const singleClients = useQuery({
+    queryKey: ["clients", "single", debouncedClientSearch],
+    queryFn: () => getClients({ pageSize: 50, search: debouncedClientSearch, includeInactive: false }),
+  });
   const executableActions = useMemo(
     () => (actions.data?.items ?? []).filter(actionIsExecutable),
     [actions.data],
   );
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedClientSearch(singleClientSearch), 250);
+    return () => window.clearTimeout(timer);
+  }, [singleClientSearch]);
+
   const runSingle = useMutation({
     mutationFn: async () => {
-      if (!selectedSingleClient) throw new Error("Selecione um cliente.");
-      return runAction(singleActionId, variablesFromClient(selectedSingleClient));
+      if (!singleClient) throw new Error("Selecione um cliente.");
+      return runAction(singleActionId, variablesFromClient(singleClient));
     },
     onSuccess: (run) => {
       setCurrentRunId(run.id);
@@ -171,29 +179,28 @@ function ExecucaoPage() {
             </div>
             <div className="grid gap-2">
               <Label>Cliente</Label>
-              <Select value={singleClientId} onValueChange={setSingleClientId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Selecione um cliente ativo" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(clients.data?.items ?? []).map((client) => (
-                    <SelectItem key={client.id} value={client.id}>
-                      {client.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <ClientSearchCombobox
+                value={singleClient}
+                clients={singleClients.data?.items ?? []}
+                search={singleClientSearch}
+                loading={singleClients.isLoading || singleClients.isFetching}
+                onSearchChange={setSingleClientSearch}
+                onSelect={setSingleClient}
+                onClear={() => {
+                  setSingleClient(null);
+                  setSingleClientSearch("");
+                  setDebouncedClientSearch("");
+                }}
+              />
             </div>
-            {selectedSingleClient && (
+            {singleClient && (
               <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
-                Grupo {selectedSingleClient.display_variables.grupo || "-"} · Cota{" "}
-                {selectedSingleClient.display_variables.cota || "-"} · Versão{" "}
-                {selectedSingleClient.display_variables.versao || "-"}
+                Grupo {singleClient.display_variables.grupo || "-"} · Cota {singleClient.display_variables.cota || "-"} · Versão {singleClient.display_variables.versao || "-"}
               </div>
             )}
             <Button
               className="w-full"
-              disabled={!singleActionId || !singleClientId || runSingle.isPending}
+              disabled={!singleActionId || !singleClient || runSingle.isPending}
               onClick={() => runSingle.mutate()}
             >
               <Play className="h-4 w-4" />{" "}

@@ -156,7 +156,7 @@ export async function getDashboard() {
 }
 
 export async function getClients(
-  params: { page?: number; pageSize?: number; group?: string; includeInactive?: boolean } = {},
+  params: { page?: number; pageSize?: number; group?: string; search?: string; includeInactive?: boolean } = {},
 ) {
   const query = new URLSearchParams({
     page: String(params.page ?? 1),
@@ -164,6 +164,7 @@ export async function getClients(
     include_inactive: String(params.includeInactive ?? true),
   });
   if (params.group) query.set("group", params.group);
+  if (params.search?.trim()) query.set("search", params.search.trim());
   const payload = await apiFetch<{ clients: ApiPage<ApiClient> }>(`/api/v1/clients?${query}`);
   return payload.clients;
 }
