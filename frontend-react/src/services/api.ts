@@ -75,9 +75,15 @@ async function parseError(response: Response): Promise<ApiError> {
       message = String(payload.error.message || message);
     } else if (payload?.detail) {
       if (typeof payload.detail === "string") message = payload.detail;
-      if (typeof payload.detail === "object") {
+      if (Array.isArray(payload.detail)) {
+        const firstDetail = payload.detail.find(
+          (item: unknown): item is { msg?: string; type?: string } =>
+            Boolean(item && typeof item === "object"),
+        );
+        if (firstDetail?.msg) message = String(firstDetail.msg);
+      } else if (typeof payload.detail === "object") {
         code = String(payload.detail.code || code);
-        message = String(payload.detail.message || payload.detail.message || message);
+        message = String(payload.detail.message || message);
       }
     }
   } catch {
@@ -519,7 +525,7 @@ export async function saveLearnedAction(
     description: string;
     objective: string;
     expected_result: string;
-    variable_names: string[];
+    variable_names: Record<string, string>;
   },
 ) {
   const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/learning/sessions/${id}/actions`, {

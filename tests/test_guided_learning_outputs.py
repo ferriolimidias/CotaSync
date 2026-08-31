@@ -7,14 +7,19 @@ import json
 import os
 import tempfile
 import unittest
+from uuid import uuid4
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from sqlalchemy import delete
+
 from backend.schemas.actions import ActionDetail
+from backend.db import Action, ActionStep, ActionVersion, ExtractionContract, SessionLocal
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import run_action_sync
 from backend.services.actions_repository import load_actions_catalog
+from backend.services.actions_repository import slugify_action_id
 from backend.services.demo_session import DemoSessionManager
 from backend.services.external_systems import load_current_external_system, save_current_external_system
 from backend.services.operational_summary import build_operational_summary
@@ -451,6 +456,103 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["extraction_review"]["normalization"]["type"], "digits_only")
         self.assertEqual(action["reviewed_overlay"]["extraction"]["screen_label"], "Qtd. Pcls. Pagas")
         self.assertIn("Qtd. Pcls. Pagas", action["extraction_targets"])
+
+    def test_visual_result_publish_persists_steps_and_contract_in_postgres(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()  # type: ignore[assignment]
+        session.steps = [
+            {"tipo": "preencher", "seletor": "#grupo", "valor": ""},
+            {"tipo": "preencher", "seletor": "#cota", "valor": ""},
+            {"tipo": "selecionar", "seletor": "#versao", "valor": ""},
+            *({"tipo": "clicar", "seletor": f"#passo-{index}", "valor": ""} for index in range(4, 9)),
+        ]
+        session.learning_events = [
+            {"step_index": index, "event_type": "fill" if index < 2 else "click", "selector": step["seletor"]}
+            for index, step in enumerate(session.steps)
+        ]
+        session.recording = False
+        session.status = "finalizado"
+        session.result_selection = {
+            "status": "captured",
+            "candidates": [
+                {
+                    "label": "Número de parcelas",
+                    "value": "040",
+                    "type": "field_value",
+                    "selector": "#numero-parcelas",
+                    "tag_name": "span",
+                    "nearby_text_before": ["Número de parcelas"],
+                }
+            ],
+        }
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        asyncio.run(
+            manager.confirm_result_selection(
+                "session",
+                target_name="Número de parcelas",
+                screen_label="Número de parcelas",
+                normalization="digits_only",
+            )
+        )
+
+        action_name = f"Teste publicação visual {uuid4().hex[:8]}"
+        action_id = slugify_action_id(action_name)
+        try:
+            with patch(
+                "backend.services.ai_observer.analyze_recorded_action_with_ai",
+                new=AsyncMock(return_value=_review()),
+            ), patch("backend.services.actions_repository.find_action", return_value=None):
+                asyncio.run(
+                    manager.save_action(
+                        "session",
+                        action_name,
+                        "Consulta.",
+                        {"0": "grupo", "1": "cota", "2": "versao"},
+                        objective="Consultar quantidade de parcelas",
+                        expected_result="Número de parcelas",
+                    )
+                )
+
+            with SessionLocal() as db:
+                action = db.get(Action, action_id)
+                self.assertIsNotNone(action)
+                version = db.get(ActionVersion, action.published_version_id)
+                self.assertIsNotNone(version)
+                steps = db.query(ActionStep).filter(ActionStep.action_version_id == version.id).all()
+                contract = db.query(ExtractionContract).filter(ExtractionContract.action_version_id == version.id).one()
+                self.assertEqual(len(steps), 8)
+                self.assertEqual(contract.example_value, "040")
+                self.assertEqual(contract.selector_data["primary"], "#numero-parcelas")
+                self.assertNotEqual(contract.selector_data["primary"], contract.example_value)
+        finally:
+            with SessionLocal.begin() as db:
+                version = db.query(ActionVersion).filter(ActionVersion.action_id == action_id).one_or_none()
+                if version is not None:
+                    db.execute(delete(ExtractionContract).where(ExtractionContract.action_version_id == version.id))
+                    db.execute(delete(ActionStep).where(ActionStep.action_version_id == version.id))
+                    db.execute(delete(ActionVersion).where(ActionVersion.id == version.id))
+                existing_action = db.get(Action, action_id)
+                if existing_action is not None:
+                    db.execute(delete(Action).where(Action.id == action_id))
+
+    def test_publish_without_visual_extraction_keeps_contract_optional(self) -> None:
+        manager = DemoSessionManager()
+        manager._sessions["session"] = _session()  # type: ignore[attr-defined]
+        captured: dict[str, object] = {}
+        with patch(
+            "backend.services.demo_session.save_learned_action",
+            side_effect=lambda action_key, learned_action: captured.update(
+                {"acoes_conhecidas": {action_key: learned_action}}
+            ),
+        ), patch(
+            "backend.services.ai_observer.analyze_recorded_action_with_ai",
+            new=AsyncMock(return_value=_review()),
+        ):
+            asyncio.run(manager.save_action("session", "Ação sem extração", "Consulta.", {}))
+
+        action = captured["acoes_conhecidas"]["Ação sem extração"]  # type: ignore[index]
+        self.assertEqual(action["extraction_review"], {})
+        self.assertFalse(any(step.get("tipo") == "extrair_texto" for step in action["passos_playwright"]))
 
     def test_confirming_result_twice_replaces_session_contract(self) -> None:
         manager = DemoSessionManager()

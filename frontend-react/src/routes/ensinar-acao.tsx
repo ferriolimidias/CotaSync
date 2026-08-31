@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  ApiError,
   createLearningSession,
   cancelLearningResultSelection,
   captureLearningResultSelection,
@@ -77,11 +78,20 @@ function EnsinarPage() {
         description: objective,
         objective,
         expected_result: expected,
-        variable_names: ["grupo", "cota", "versao"],
+        variable_names: {
+          grupo: "Grupo",
+          cota: "Cota",
+          versao: "Versão",
+        },
       }),
     onSuccess: () => toast.success("Ação publicada."),
-    onError: (error) =>
-      toast.error(error instanceof Error ? error.message : "Não foi possível publicar a ação."),
+    onError: (error) => {
+      if (error instanceof ApiError && error.status === 422) {
+        toast.error("Não foi possível publicar a versão: resultado da ação incompleto.");
+        return;
+      }
+      toast.error(error instanceof Error ? error.message : "Não foi possível publicar a ação.");
+    },
   });
   const targetName = useMemo(
     () => expected.trim() || objective.trim() || name.trim() || "resultado",
