@@ -12,7 +12,17 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
-from backend.db import Action as DbAction, ActionStep, ActionVersion, ExtractionContract, SessionLocal
+from backend.db import (
+    Action as DbAction,
+    ActionStep,
+    ActionVersion,
+    Batch as DbBatch,
+    BatchItem,
+    ExtractionContract,
+    Run as DbRun,
+    Schedule,
+    SessionLocal,
+)
 from backend.services.action_pages import url_host
 from backend.services.client_fields import canonical_client_field_key, client_field_label
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
@@ -31,6 +41,15 @@ _MICROSOFT_HOST_SUFFIXES = (
 
 class ActionsRepositoryError(Exception):
     """Erro seguro de leitura/parsing do catalogo de acoes."""
+
+
+class ActionDeletionError(ActionsRepositoryError):
+    """Impedimento de negocio para excluir ou arquivar uma acao."""
+
+    def __init__(self, code: str, message: str, status_code: int = 409):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -344,7 +363,7 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
         with SessionLocal() as session:
             rows = session.query(DbAction, ActionVersion).join(
                 ActionVersion, ActionVersion.id == DbAction.published_version_id
-            ).order_by(DbAction.name).all()
+            ).filter(DbAction.status != "archived").order_by(DbAction.name).all()
             actions: list[ActionDetail] = []
             used_ids: set[str] = set()
             for db_action, version in rows:
@@ -385,6 +404,69 @@ def find_action(action_id: str, path: Path | None = None) -> ActionDetail | None
         if wanted in candidates or wanted_slug in candidates:
             return action
     return None
+
+
+def delete_or_archive_action(action_id: str) -> dict[str, str]:
+    """Remove uma definicao sem perder referencias historicas."""
+    wanted = str(action_id or "").strip()
+    with SessionLocal.begin() as session:
+        action = session.get(DbAction, wanted)
+        if action is None:
+            raise ActionDeletionError("ACTION_NOT_FOUND", "Acao nao encontrada.", 404)
+        if action.status == "archived":
+            raise ActionDeletionError("ACTION_ALREADY_ARCHIVED", "Esta acao ja foi removida das acoes disponiveis.")
+
+        active_run = session.query(DbRun.id).filter(
+            DbRun.action_id == action.id,
+            DbRun.status.in_(["pending", "running"]),
+        ).first()
+        if active_run:
+            raise ActionDeletionError(
+                "ACTION_RUN_ACTIVE",
+                "Esta acao possui uma execucao em andamento e nao pode ser excluida agora.",
+            )
+
+        active_batch = session.query(DbBatch.id).filter(
+            DbBatch.action_id == action.id,
+            DbBatch.status.in_(["queued", "running", "cancel_requested", "pending"]),
+        ).first()
+        if active_batch:
+            raise ActionDeletionError(
+                "ACTION_BATCH_ACTIVE",
+                "Esta acao possui um lote em andamento e nao pode ser excluida agora.",
+            )
+
+        active_schedule = session.query(Schedule.id).filter(
+            Schedule.action_id == action.id,
+            Schedule.active.is_(True),
+        ).first()
+        if active_schedule:
+            raise ActionDeletionError(
+                "ACTION_SCHEDULE_ACTIVE",
+                "Esta acao possui um agendamento ativo. Desative-o antes de excluir a acao.",
+            )
+
+        has_history = any(
+            (
+                session.query(DbRun.id).filter(DbRun.action_id == action.id).first(),
+                session.query(DbBatch.id).filter(DbBatch.action_id == action.id).first(),
+                session.query(BatchItem.id).join(DbBatch, DbBatch.id == BatchItem.batch_id).filter(DbBatch.action_id == action.id).first(),
+                session.query(Schedule.id).filter(Schedule.action_id == action.id).first(),
+            )
+        )
+        if has_history:
+            action.status = "archived"
+            return {"status": "archived", "action_id": action.id}
+
+        version_ids = [row[0] for row in session.query(ActionVersion.id).filter(ActionVersion.action_id == action.id).all()]
+        if version_ids:
+            action.published_version_id = None
+            session.flush()
+            session.execute(delete(ActionStep).where(ActionStep.action_version_id.in_(version_ids)))
+            session.execute(delete(ExtractionContract).where(ExtractionContract.action_version_id.in_(version_ids)))
+            session.execute(delete(ActionVersion).where(ActionVersion.id.in_(version_ids)))
+        session.delete(action)
+        return {"status": "deleted", "action_id": action.id}
 
 
 def _action_contracts_from_payload(action_id: str, version_id: str, data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -458,6 +540,8 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             )
             session.add(action)
         else:
+            if action.status == "archived":
+                raise ActionsRepositoryError("Acao arquivada nao pode receber nova versao.")
             action.name = action_name
             action.description = str(learned_action.get("descricao") or learned_action.get("description") or action.description)
             action.status = str(learned_action.get("status") or action.status or "published")

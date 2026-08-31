@@ -251,6 +251,12 @@ export async function getActionVersions(id: string) {
   return payload.versions;
 }
 
+export async function deleteAction(id: string) {
+  return apiFetch<{ status: string; action_id: string }>(`/api/v1/actions/${id}`, {
+    method: "DELETE",
+  });
+}
+
 export async function runAction(id: string, variables: Record<string, string>) {
   const payload = await apiFetch<{ run: ApiRun }>(`/api/v1/actions/${id}/run`, {
     method: "POST",

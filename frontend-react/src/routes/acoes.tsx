@@ -1,14 +1,23 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { History, Play, Plus } from "lucide-react";
+import { toast } from "sonner";
+import { History, MoreVertical, Play, Plus, Trash2 } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { getActions, getActionVersions } from "@/services/api";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { ApiError, deleteAction, getActions, getActionVersions } from "@/services/api";
 import type { ApiAction } from "@/types/api";
 import { actionIsExecutable, runStatusLabel } from "@/lib/status-labels";
 
@@ -53,21 +62,50 @@ function AcoesPage() {
 
 function ActionCard({ action }: { action: ApiAction }) {
   const [open, setOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const queryClient = useQueryClient();
+  const remove = useMutation({
+    mutationFn: () => deleteAction(action.id),
+    onSuccess: (result) => {
+      setDeleteOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["actions"] });
+      toast.success(
+        result.status === "archived"
+          ? "Ação removida das ações disponíveis. O histórico foi preservado."
+          : "Ação excluída.",
+      );
+    },
+    onError: (error) => toast.error(error instanceof ApiError ? error.message : "Não foi possível excluir a ação."),
+  });
   const executable = actionIsExecutable(action);
   const versionLabel = executable ? "Publicada" : "Não executável";
   return (
     <Card className="border-border/70 shadow-sm">
       <CardHeader className="space-y-3">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <CardTitle className="text-base">{action.name}</CardTitle>
             <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
               {action.description || "Sem descrição operacional."}
             </p>
           </div>
-          <BadgeStatus tone={executable ? "success" : "warning"}>
-            {executable ? "Pronta" : "Precisa de atenção"}
-          </BadgeStatus>
+          <div className="flex shrink-0 items-center gap-2">
+            <BadgeStatus tone={executable ? "success" : "warning"}>
+              {executable ? "Pronta" : "Precisa de atenção"}
+            </BadgeStatus>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" aria-label={`Opções de ${action.name}`}>
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
+                  <Trash2 className="h-4 w-4" /> Excluir ação
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -107,6 +145,24 @@ function ActionCard({ action }: { action: ApiAction }) {
         </div>
       </CardContent>
       <VersionsDialog action={action} open={open} onOpenChange={setOpen} />
+      <Dialog open={deleteOpen} onOpenChange={(nextOpen) => !remove.isPending && setDeleteOpen(nextOpen)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Excluir “{action.name}”?</DialogTitle>
+            <DialogDescription>
+              “{action.name}” será removida das ações disponíveis. Se houver histórico, ele será preservado.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={remove.isPending} onClick={() => setDeleteOpen(false)}>
+              Cancelar
+            </Button>
+            <Button variant="destructive" disabled={remove.isPending} onClick={() => remove.mutate()}>
+              <Trash2 className="h-4 w-4" /> {remove.isPending ? "Excluindo..." : "Excluir ação"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

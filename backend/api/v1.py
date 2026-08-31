@@ -15,7 +15,13 @@ from backend.api.demo import GuidedLearningRequest, OperatorInsertActiveRequest,
 from backend.api.desktop_browser import _public_view_url
 from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal
 from backend.services.action_pages import is_reauthentication_url, url_host
-from backend.services.actions_repository import ActionsRepositoryError, find_action, load_actions_catalog
+from backend.services.actions_repository import (
+    ActionDeletionError,
+    ActionsRepositoryError,
+    delete_or_archive_action,
+    find_action,
+    load_actions_catalog,
+)
 from backend.services.action_runner import finish_action_run, missing_required_variables, run_action_sync, start_action_run
 from backend.services.auth import AuthUser, require_admin, require_user
 from backend.services.batch_runner import (
@@ -618,6 +624,17 @@ async def actions_get(action_id: str, _user: AuthUser = Depends(require_user)) -
     payload["last_run"] = runs[0].model_dump() if runs else None
     payload["needs_attention"] = bool(action.learning_warnings or action.legacy_unconfigured)
     return {"status": "ok", "action": payload}
+
+
+@router.delete("/actions/{action_id}", summary="Exclui ou arquiva ação")
+async def actions_delete(action_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        result = delete_or_archive_action(action_id)
+    except ActionDeletionError as exc:
+        raise _error(exc.status_code, exc.code, str(exc)) from exc
+    except ActionsRepositoryError as exc:
+        raise _error(500, "ACTION_DELETE_FAILED", str(exc)) from exc
+    return {"status": "ok", **result}
 
 
 @router.get("/actions/{action_id}/versions", summary="Versões de uma ação")
