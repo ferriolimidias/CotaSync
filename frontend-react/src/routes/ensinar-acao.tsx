@@ -184,7 +184,7 @@ function EnsinarPage() {
       title="Ensinar ação"
       subtitle="Grave um fluxo no navegador remoto"
     >
-      <div className="grid gap-4 xl:grid-cols-[360px_1fr_280px]">
+      <div className="grid min-h-0 gap-4 xl:grid-cols-[360px_1fr_280px]">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Dados da ação</CardTitle>

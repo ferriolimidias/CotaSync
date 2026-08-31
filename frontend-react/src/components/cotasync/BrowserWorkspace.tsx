@@ -96,15 +96,15 @@ export function BrowserWorkspace({
       ref={rootRef}
       className={
         workspaceMode
-          ? "flex h-full min-h-0 flex-col overflow-hidden border border-border bg-card shadow-sm fullscreen:h-screen fullscreen:min-h-screen fullscreen:rounded-none fullscreen:border-0"
-          : "flex min-h-[700px] flex-col overflow-hidden rounded-lg border border-border bg-card lg:min-h-[75vh]"
+          ? "relative isolate flex h-full min-h-0 flex-col overflow-hidden border border-border bg-card shadow-sm fullscreen:h-screen fullscreen:min-h-screen fullscreen:rounded-none fullscreen:border-0"
+          : "relative isolate flex h-[min(760px,calc(100dvh-9rem))] min-h-[560px] flex-col overflow-hidden rounded-lg border border-border bg-card"
       }
     >
       <div
         className={
           workspaceMode
-            ? "z-10 flex h-14 shrink-0 items-center gap-2 border-b border-border bg-background/95 px-3 py-2 fullscreen:absolute fullscreen:left-3 fullscreen:right-3 fullscreen:top-3 fullscreen:h-auto fullscreen:min-h-12 fullscreen:rounded-md fullscreen:border fullscreen:bg-background/90 fullscreen:shadow-sm fullscreen:backdrop-blur"
-            : "flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2"
+            ? "relative z-20 flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3 py-2 shadow-sm fullscreen:absolute fullscreen:left-3 fullscreen:right-3 fullscreen:top-3 fullscreen:h-auto fullscreen:min-h-12 fullscreen:rounded-md fullscreen:border fullscreen:bg-background/90 fullscreen:shadow-sm fullscreen:backdrop-blur"
+            : "relative z-20 flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-2 shadow-sm"
         }
       >
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
@@ -141,15 +141,16 @@ export function BrowserWorkspace({
       <div
         className={
           workspaceMode
-            ? "relative min-h-0 flex-1 overflow-hidden"
-            : "relative flex min-h-[640px] flex-1 overflow-hidden lg:min-h-[calc(75vh-3rem)]"
+            ? "relative isolate min-h-0 flex-1 overflow-hidden bg-muted/20"
+            : "relative isolate min-h-0 flex-1 overflow-hidden bg-muted/20"
         }
       >
         {iframeUrl ? (
           <iframe
             title="Navegador CotaSync"
             src={iframeUrl}
-            className="h-full w-full border-0 bg-background"
+            className="relative z-0 block h-full w-full border-0 bg-background"
+            allow="fullscreen"
           />
         ) : (
           <div className="grid h-full place-items-center bg-muted/30 p-6 text-center">
