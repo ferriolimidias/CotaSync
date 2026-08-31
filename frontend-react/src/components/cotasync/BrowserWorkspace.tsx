@@ -96,18 +96,24 @@ export function BrowserWorkspace({
       ref={rootRef}
       className={
         workspaceMode
-          ? "relative isolate flex h-full min-h-0 flex-col overflow-hidden border border-border bg-card shadow-sm fullscreen:h-screen fullscreen:min-h-screen fullscreen:rounded-none fullscreen:border-0"
-          : "relative isolate flex h-[min(760px,calc(100dvh-9rem))] min-h-[560px] flex-col overflow-hidden rounded-lg border border-border bg-card"
+          ? "relative isolate flex h-full min-h-0 min-w-0 w-full max-w-full flex-col overflow-hidden border border-border bg-card shadow-sm fullscreen:h-screen fullscreen:min-h-screen fullscreen:rounded-none fullscreen:border-0"
+          : "relative isolate flex h-[min(760px,calc(100dvh-9rem))] min-h-[560px] min-w-0 w-full max-w-full flex-col overflow-hidden rounded-lg border border-border bg-card"
       }
     >
       <div
         className={
           workspaceMode
             ? "relative z-20 flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-3 py-2 shadow-sm fullscreen:absolute fullscreen:left-3 fullscreen:right-3 fullscreen:top-3 fullscreen:h-auto fullscreen:min-h-12 fullscreen:rounded-md fullscreen:border fullscreen:bg-background/90 fullscreen:shadow-sm fullscreen:backdrop-blur"
-            : "relative z-20 flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-border bg-background px-3 py-2 shadow-sm"
+            : "relative z-20 flex min-h-14 w-full min-w-0 flex-col items-stretch gap-2 border-b border-border bg-background px-3 py-2 shadow-sm"
         }
       >
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+        <div
+          className={
+            workspaceMode
+              ? "flex min-w-0 flex-1 flex-wrap items-center gap-2"
+              : "flex min-w-0 w-full flex-wrap items-center gap-2"
+          }
+        >
           {leading}
           <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
             <Monitor className="h-4 w-4 shrink-0" />
@@ -122,7 +128,13 @@ export function BrowserWorkspace({
             </div>
           )}
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div
+          className={
+            workspaceMode
+              ? "flex shrink-0 flex-wrap items-center gap-2"
+              : "flex min-w-0 w-full max-w-full flex-wrap items-center gap-2 [&_button]:max-w-full [&_button]:whitespace-normal"
+          }
+        >
           {actions}
           <Button size="sm" variant="outline" onClick={() => void toggleFullscreen()}>
             {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
