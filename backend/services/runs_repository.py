@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -24,6 +25,54 @@ def _parse_dt(value: str | None):
 
 class RunsRepositoryError(Exception):
     """Erro seguro de leitura ou escrita da persistencia de runs."""
+
+
+def persist_terminal_run_fallback(run_id: str, *, code: str, message: str) -> None:
+    """Persist a small terminal record when normal run serialization fails."""
+    with SessionLocal.begin() as session:
+        row = session.get(DbRun, str(run_id or "").strip())
+        if row is None:
+            raise RunsRepositoryError("Run nao encontrada para recovery terminal.")
+        if row.status in {"success", "error"} and row.finished_at is not None:
+            return
+        row.status = "error"
+        row.finished_at = datetime.now(UTC)
+        row.result_summary = "A execução foi encerrada por uma falha interna de persistência."
+        row.error_data = {"code": str(code)[:100], "message": str(message)[:1000]}
+        row.diagnostics = {
+            "recovery": {
+                "code": str(code)[:100],
+                "message": str(message)[:1000],
+            }
+        }
+
+
+def recover_stale_individual_runs() -> int:
+    """Close individual runs left running after a backend process disappeared."""
+    recovered = 0
+    now = datetime.now(UTC)
+    with SessionLocal.begin() as session:
+        rows = (
+            session.query(DbRun)
+            .filter(DbRun.status == "running", DbRun.batch_id.is_(None))
+            .all()
+        )
+        for row in rows:
+            row.status = "error"
+            row.finished_at = now
+            row.result_summary = "Execução interrompida porque o processo responsável foi reiniciado."
+            row.error_data = {
+                "code": "STALE_INDIVIDUAL_RUN_RECOVERED",
+                "message": "Não havia tarefa de execução individual ativa após o restart do backend.",
+            }
+            row.diagnostics = {
+                "recovery": {
+                    "code": "STALE_INDIVIDUAL_RUN_RECOVERED",
+                    "previous_status": "running",
+                }
+            }
+            recovered += 1
+    return recovered
 
 
 def project_root() -> Path:

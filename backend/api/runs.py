@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
@@ -12,7 +11,7 @@ from backend.schemas.runs import (
     RunsListResponse,
     RunStatus,
 )
-from backend.services.action_runner import finish_action_run, missing_required_variables, run_action_sync, start_action_run
+from backend.services.action_runner import missing_required_variables, run_action_sync, schedule_finish_action_run, start_action_run
 from backend.services.actions_repository import ActionsRepositoryError, find_action
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 
@@ -46,7 +45,7 @@ async def run_action(action_id: str, payload: ActionRunRequest) -> ActionRunResp
     try:
         if payload.mode == "async":
             run = start_action_run(action, payload)
-            asyncio.create_task(finish_action_run(action, payload, run))
+            schedule_finish_action_run(action, payload, run)
             return ActionRunResponse(run=run)
         run = await run_action_sync(action, payload)
     except RunsRepositoryError as exc:

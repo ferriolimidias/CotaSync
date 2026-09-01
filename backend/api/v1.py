@@ -22,7 +22,7 @@ from backend.services.actions_repository import (
     find_action,
     load_actions_catalog,
 )
-from backend.services.action_runner import finish_action_run, missing_required_variables, run_action_sync, start_action_run
+from backend.services.action_runner import missing_required_variables, run_action_sync, schedule_finish_action_run, start_action_run
 from backend.services.auth import AuthUser, require_admin, require_user
 from backend.services.batch_runner import (
     BatchIdempotencyConflict,
@@ -677,9 +677,7 @@ async def action_run(action_id: str, payload: ActionRunPayload, _user: AuthUser 
     try:
         if payload.mode == "async":
             run = start_action_run(action, payload)  # type: ignore[arg-type]
-            import asyncio
-
-            asyncio.create_task(finish_action_run(action, payload, run))  # type: ignore[arg-type]
+            schedule_finish_action_run(action, payload, run)  # type: ignore[arg-type]
         else:
             run = await run_action_sync(action, payload)  # type: ignore[arg-type]
     except RunsRepositoryError as exc:

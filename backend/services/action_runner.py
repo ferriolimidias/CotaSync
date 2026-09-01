@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,7 +17,11 @@ from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.action_pages import expected_action_hosts, validate_action_page_url
 from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
-from backend.services.runs_repository import append_run, update_run
+from backend.services.runs_repository import (
+    append_run,
+    persist_terminal_run_fallback,
+    update_run,
+)
 
 logger = logging.getLogger("cotasync.action_runner")
 
@@ -498,6 +503,39 @@ def start_action_run(
     return run
 
 
+def _log_unhandled_run_task(task: asyncio.Task[Any], run_id: str) -> None:
+    try:
+        exception = task.exception()
+    except asyncio.CancelledError:
+        logger.warning("Run %s task cancelada antes de atingir estado terminal", run_id)
+        return
+    if exception is None:
+        return
+    logger.error(
+        "Run %s task terminou com excecao nao tratada",
+        run_id,
+        exc_info=(type(exception), exception, exception.__traceback__),
+    )
+    try:
+        persist_terminal_run_fallback(
+            run_id,
+            code="UNHANDLED_RUN_EXCEPTION",
+            message="A tarefa de execução terminou com uma exceção não tratada.",
+        )
+    except Exception:
+        logger.exception("Falha no fallback terminal do run %s", run_id)
+
+
+def schedule_finish_action_run(
+    action: ActionDetail,
+    request: ActionRunRequest,
+    run: RunRecord,
+) -> asyncio.Task[Any]:
+    task = asyncio.create_task(finish_action_run(action, request, run))
+    task.add_done_callback(lambda completed: _log_unhandled_run_task(completed, run.id))
+    return task
+
+
 async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run: RunRecord) -> RunRecord:
     runner_used = "local_fixture" if _is_local_fixture(action) else "action_runner"
     browser_mode_used = str(action.browser_mode or "desktop_browser").strip() or "desktop_browser"
@@ -592,27 +630,41 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 whether_desktop_browser_used=whether_desktop_browser_used,
             )
     finally:
-        summary_result = await build_operational_summary_result(
-            action,
-            status=run.status,
-            result_payload=run.result_payload,
-            error_message=run.error_message,
-        )
-        run.operational_summary = summary_result.summary
-        run.result_summary = run.operational_summary
-        run.ai_summary_used = summary_result.ai_summary_used
-        run.summary_source = summary_result.summary_source
-        run.summary_reason = summary_result.summary_reason
-        executed_steps = 0
-        if isinstance(run.result_payload, dict):
-            executed_steps = int(run.result_payload.get("passos_executados") or 0)
-        run.technical_summary = build_technical_summary(
-            status=run.status,
-            executed_steps=executed_steps,
-            result_payload=run.result_payload,
-        )
-        run.finished_at = utc_now_iso()
-        update_run(run)
+        try:
+            summary_result = await build_operational_summary_result(
+                action,
+                status=run.status,
+                result_payload=run.result_payload,
+                error_message=run.error_message,
+            )
+            run.operational_summary = summary_result.summary
+            run.result_summary = run.operational_summary
+            run.ai_summary_used = summary_result.ai_summary_used
+            run.summary_source = summary_result.summary_source
+            run.summary_reason = summary_result.summary_reason
+            executed_steps = 0
+            if isinstance(run.result_payload, dict):
+                executed_steps = int(run.result_payload.get("passos_executados") or 0)
+            run.technical_summary = build_technical_summary(
+                status=run.status,
+                executed_steps=executed_steps,
+                result_payload=run.result_payload,
+            )
+            run.finished_at = utc_now_iso()
+            update_run(run)
+        except Exception as persistence_error:
+            logger.exception("Run %s falhou no fechamento/persistencia", run.id)
+            run.status = "error"
+            run.error_message = "Falha interna ao finalizar a execução."
+            run.finished_at = utc_now_iso()
+            try:
+                persist_terminal_run_fallback(
+                    run.id,
+                    code="UNHANDLED_RUN_EXCEPTION",
+                    message="Falha ao persistir o estado terminal da execução.",
+                )
+            except Exception:
+                logger.exception("Fallback terminal indisponivel para o run %s", run.id)
 
     return run
 

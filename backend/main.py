@@ -29,6 +29,7 @@ from backend.api.runs import actions_run_router, runs_router
 from backend.api.v1 import router as api_v1_router
 from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf, validate_session_user
 from backend.services.demo_session import demo_session_manager
+from backend.services.runs_repository import recover_stale_individual_runs
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
 
@@ -58,6 +59,9 @@ logging.getLogger("uvicorn.access").addFilter(_MaskViewTokenFilter())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    recovered = recover_stale_individual_runs()
+    if recovered:
+        logger.warning("Recovery de runs individuais stale: %s", recovered)
     yield
     await demo_session_manager.close_all()
 
