@@ -27,7 +27,11 @@ from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
-from backend.motor_browser import query_result_matches_inputs, verify_postcondition
+from backend.motor_browser import (
+    is_learned_client_query_transition,
+    query_result_matches_inputs,
+    verify_postcondition,
+)
 from tests.auth_helpers import authenticated_client
 
 
@@ -506,6 +510,24 @@ class SessionGuardianTests(unittest.TestCase):
         current_page = "Cota: 000935 0112-00\nQtd. Pcls. Pagas: 034"
         current_client = {"grupo": "935", "cota": "112", "versao": "00"}
         self.assertTrue(query_result_matches_inputs(current_page, current_client))
+
+    def test_complex_action_marks_first_post_input_click_as_query_transition(self) -> None:
+        steps = [
+            {"tipo": "preencher", "variavel": "grupo"},
+            {"tipo": "preencher", "variavel": "cota"},
+            {"tipo": "clicar", "seletor": "#localizar"},
+            {"tipo": "clicar", "seletor": "#formulario"},
+        ]
+        self.assertTrue(is_learned_client_query_transition(steps, 2, {"grupo", "cota"}, False))
+        self.assertFalse(is_learned_client_query_transition(steps, 3, {"grupo", "cota"}, False))
+
+    def test_simple_action_does_not_mark_terminal_result_click_as_complex_transition(self) -> None:
+        steps = [
+            {"tipo": "preencher", "variavel": "grupo"},
+            {"tipo": "preencher", "variavel": "cota"},
+            {"tipo": "clicar", "seletor": "#localizar"},
+        ]
+        self.assertFalse(is_learned_client_query_transition(steps, 2, {"grupo", "cota"}, False))
 
     def test_secret_and_unknown_states_stop_without_automation(self) -> None:
         action = self._stateful_action()

@@ -883,6 +883,24 @@ def query_result_matches_inputs(page_text: str, variables: dict[str, Any]) -> bo
     return re.search(pattern, compact) is not None
 
 
+def is_learned_client_query_transition(
+    steps: list[Any],
+    step_index: int,
+    filled_client_field_keys: set[str],
+    query_transition_confirmed: bool,
+) -> bool:
+    """Identify the learned client-query boundary in a multi-step action."""
+    if query_transition_confirmed or not filled_client_field_keys:
+        return False
+    later_action_steps = any(
+        str(later.get("tipo") or later.get("type") or "").strip().lower()
+        in {"clicar", "preencher", "teclar", "download_pdf"}
+        for later in steps[step_index + 1 :]
+        if isinstance(later, dict)
+    )
+    return str(steps[step_index].get("tipo") or steps[step_index].get("type") or "").strip().lower() == "clicar" and later_action_steps
+
+
 async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
@@ -1376,6 +1394,16 @@ async def executar_acao_rapida(
             contract_for_query = extraction_contract_from_action(action_config if isinstance(action_config, dict) else {})
             selector_data_for_query = contract_for_query.get("selector_data") if isinstance(contract_for_query, dict) else {}
             result_selector_for_query = str(selector_data_for_query.get("primary") or "").strip() if isinstance(selector_data_for_query, dict) else ""
+            client_field_keys = {
+                canonical_client_field_key(str(step.get("variavel") or "").strip())
+                for step in passos_playwright
+                if isinstance(step, dict)
+                and str(step.get("tipo") or step.get("type") or "").strip().lower() == "preencher"
+                and canonical_client_field_key(str(step.get("variavel") or "").strip())
+            }
+            filled_client_field_keys: set[str] = set()
+            query_transition_confirmed = False
+            query_transition_step_index: int | None = None
             for step_index, passo in enumerate(passos_playwright):
                 if not isinstance(passo, dict):
                     continue
@@ -1391,18 +1419,34 @@ async def executar_acao_rapida(
                 seletor = str(passo.get("seletor", "")).strip()
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
                 step_started_at = time.monotonic()
+                later_action_steps = any(
+                    str(later.get("tipo") or later.get("type") or "").strip().lower()
+                    in {"clicar", "preencher", "teclar", "download_pdf"}
+                    for later in passos_playwright[step_index + 1 :]
+                    if isinstance(later, dict)
+                )
+                # A simple action can validate the extracted selector directly.
+                # For a complex action, the query is the first learned transition
+                # after all client fields, even when more navigation follows it.
                 is_query_submit = bool(
                     result_selector_for_query
                     and tipo_acao == "clicar"
-                    and not any(
-                        str(later.get("tipo") or later.get("type") or "").strip().lower() in {"clicar", "preencher"}
-                        for later in passos_playwright[step_index + 1 :]
-                        if isinstance(later, dict)
+                    and not later_action_steps
+                )
+                is_client_query_transition = bool(
+                    client_field_keys
+                    and client_field_keys.issubset(filled_client_field_keys)
+                    and is_learned_client_query_transition(
+                        passos_playwright,
+                        step_index,
+                        filled_client_field_keys,
+                        query_transition_confirmed,
                     )
                 )
+                observes_query_navigation = is_query_submit or is_client_query_transition
                 query_before_url = _safe_result_url(str(getattr(page, "url", "") or "")) if is_query_submit else ""
                 query_before_html = ""
-                if is_query_submit:
+                if observes_query_navigation:
                     try:
                         result_locator_before = page.locator(result_selector_for_query).first
                         if await result_locator_before.count() > 0:
@@ -1524,6 +1568,8 @@ async def executar_acao_rapida(
                                 raise RuntimeError(
                                     f"input_verification_failed: {variable_key} esperado={valor_final!r} lido={valor_lido!r}"
                                 )
+                        if canonical_client_field_key(variable_key):
+                            filled_client_field_keys.add(canonical_client_field_key(variable_key))
 
                     elif tipo_acao == "teclar":
                         await page.keyboard.press(str(passo.get("valor", "")))
@@ -1580,6 +1626,16 @@ async def executar_acao_rapida(
                         )
                     elif expected_selector and tipo_acao != "extrair_texto":
                         await verify_postcondition(page, expected_selector, step_index)
+                    if is_client_query_transition:
+                        # The learned next-step postcondition (or a navigation)
+                        # proves that the query transition happened. Intermediate
+                        # pages do not need to repeat the client's identity fields.
+                        if not expected_selector and not navigation_observed:
+                            raise RuntimeError(
+                                f"query_result_not_confirmed: transição da consulta não foi confirmada após o passo {step_index}"
+                            )
+                        query_transition_confirmed = True
+                        query_transition_step_index = step_index
                     after_state = await current_browser_state(page)
                     overlay_waits_applied = await apply_reviewed_overlay_waits(page, step_index)
                     trace_item.update(
@@ -1647,7 +1703,7 @@ async def executar_acao_rapida(
                     )
                     raise wrapped from e
                 finally:
-                    if is_query_submit:
+                    if observes_query_navigation:
                         try:
                             page.remove_listener("framenavigated", observe_main_frame_navigation)
                         except Exception:
@@ -1691,6 +1747,11 @@ async def executar_acao_rapida(
             except Exception:
                 final_page_dom = ""
             query_result_confirmed = query_result_matches_inputs(final_page_text, dados_variaveis)
+            # Complex actions may intentionally finish on a page that does not
+            # render the client identity again. Their query transition was
+            # already proven by the learned intermediate postcondition.
+            if query_transition_confirmed:
+                query_result_confirmed = True
             if not query_result_confirmed:
                 raise RuntimeError("query_result_not_confirmed: a pagina final nao corresponde aos dados do cliente")
             extraction_attention: dict[str, Any] = {}
@@ -1741,6 +1802,8 @@ async def executar_acao_rapida(
                     if dados_variaveis.get(key) is not None
                 },
                 "query_result_confirmed": query_result_confirmed,
+                "query_transition_confirmed": query_transition_confirmed,
+                "query_transition_step_index": query_transition_step_index,
                 "checkpoint_diagnostics": checkpoint_diagnostics,
                 "step_trace": step_trace,
                 "last_successful_step_index": last_successful_step_index,
