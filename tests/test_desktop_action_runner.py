@@ -27,7 +27,7 @@ from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
-from backend.motor_browser import verify_postcondition
+from backend.motor_browser import query_result_matches_inputs, verify_postcondition
 from tests.auth_helpers import authenticated_client
 
 
@@ -496,6 +496,16 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertEqual(plan["resume_index"], 2)
         self.assertEqual(plan["reentry_strategy"], "transition")
         self.assertEqual(plan["target_workflow_state"], "consulta_ready")
+
+    def test_query_fingerprint_rejects_previous_client_even_when_result_is_equal(self) -> None:
+        previous_page = "Cota: 000935 0110-00\nQtd. Pcls. Pagas: 034"
+        current_client = {"grupo": "935", "cota": "112", "versao": "00"}
+        self.assertFalse(query_result_matches_inputs(previous_page, current_client))
+
+    def test_query_fingerprint_accepts_same_result_for_different_client_when_identity_matches(self) -> None:
+        current_page = "Cota: 000935 0112-00\nQtd. Pcls. Pagas: 034"
+        current_client = {"grupo": "935", "cota": "112", "versao": "00"}
+        self.assertTrue(query_result_matches_inputs(current_page, current_client))
 
     def test_secret_and_unknown_states_stop_without_automation(self) -> None:
         action = self._stateful_action()

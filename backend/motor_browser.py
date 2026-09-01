@@ -838,6 +838,51 @@ async def verify_postcondition(page: Any, selector: str, step_index: int, *, tim
         ) from exc
 
 
+async def verify_query_result_refresh(
+    page: Any,
+    selector: str,
+    step_index: int,
+    *,
+    before_url: str,
+    before_html: str,
+    navigation_observed: bool,
+    timeout_ms: int = 15000,
+) -> None:
+    """Confirma que o resultado pertence a uma atualização posterior ao submit."""
+    expected_selector = str(selector or "").strip()
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        try:
+            locator = page.locator(expected_selector).first
+            if await locator.count() > 0 and await locator.is_visible():
+                current_url = _safe_result_url(str(getattr(page, "url", "") or ""))
+                current_html = ""
+                try:
+                    current_html = str(await locator.evaluate("element => element.outerHTML"))
+                except Exception:
+                    pass
+                if navigation_observed or current_url != before_url or not before_html or current_html != before_html:
+                    return
+        except Exception:
+            pass
+        await asyncio.sleep(0.1)
+    raise RuntimeError(
+        f"Resultado da consulta não foi confirmado após o passo {step_index}: {expected_selector}"
+    )
+
+
+def query_result_matches_inputs(page_text: str, variables: dict[str, Any]) -> bool:
+    """Valida a identificação textual da consulta sem exigir que o resultado numérico mude."""
+    group = re.sub(r"\D", "", str(variables.get("grupo") or ""))
+    quota = re.sub(r"\D", "", str(variables.get("cota") or ""))
+    version = re.sub(r"\D", "", str(variables.get("versao") or ""))
+    if not group or not quota or not version:
+        return True
+    compact = " ".join(str(page_text or "").split())
+    pattern = rf"0*{re.escape(group)}\s+0*{re.escape(quota)}[-/]0*{re.escape(version)}(?:\D|$)"
+    return re.search(pattern, compact) is not None
+
+
 async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
@@ -1280,6 +1325,9 @@ async def executar_acao_rapida(
             )
             _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
+            contract_for_query = extraction_contract_from_action(action_config if isinstance(action_config, dict) else {})
+            selector_data_for_query = contract_for_query.get("selector_data") if isinstance(contract_for_query, dict) else {}
+            result_selector_for_query = str(selector_data_for_query.get("primary") or "").strip() if isinstance(selector_data_for_query, dict) else ""
             for step_index, passo in enumerate(passos_playwright):
                 if not isinstance(passo, dict):
                     continue
@@ -1295,6 +1343,36 @@ async def executar_acao_rapida(
                 seletor = str(passo.get("seletor", "")).strip()
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
                 step_started_at = time.monotonic()
+                is_query_submit = bool(
+                    result_selector_for_query
+                    and tipo_acao == "clicar"
+                    and not any(
+                        str(later.get("tipo") or later.get("type") or "").strip().lower() in {"clicar", "preencher"}
+                        for later in passos_playwright[step_index + 1 :]
+                        if isinstance(later, dict)
+                    )
+                )
+                query_before_url = _safe_result_url(str(getattr(page, "url", "") or "")) if is_query_submit else ""
+                query_before_html = ""
+                if is_query_submit:
+                    try:
+                        result_locator_before = page.locator(result_selector_for_query).first
+                        if await result_locator_before.count() > 0:
+                            query_before_html = str(await result_locator_before.evaluate("element => element.outerHTML"))
+                    except Exception:
+                        query_before_html = ""
+                navigation_observed = False
+
+                def observe_main_frame_navigation(frame: Any) -> None:
+                    nonlocal navigation_observed
+                    if frame == getattr(page, "main_frame", None):
+                        navigation_observed = True
+
+                if is_query_submit:
+                    try:
+                        page.on("framenavigated", observe_main_frame_navigation)
+                    except Exception:
+                        pass
                 before_state = await current_browser_state(page)
                 trace_item: dict[str, Any] = {
                     "step_index": step_index,
@@ -1383,11 +1461,21 @@ async def executar_acao_rapida(
                         for i in range(quantidade):
                             if await elementos.nth(i).is_visible():
                                 await elementos.nth(i).fill(valor_final, timeout=5000)
+                                valor_lido = await elementos.nth(i).input_value(timeout=5000)
+                                if valor_lido != valor_final:
+                                    raise RuntimeError(
+                                        f"input_verification_failed: {variable_key} esperado={valor_final!r} lido={valor_lido!r}"
+                                    )
                                 sucesso_preencher = True
                                 break
 
                         if not sucesso_preencher:
                             await elementos.first.fill(valor_final, timeout=5000, force=True)
+                            valor_lido = await elementos.first.input_value(timeout=5000)
+                            if valor_lido != valor_final:
+                                raise RuntimeError(
+                                    f"input_verification_failed: {variable_key} esperado={valor_final!r} lido={valor_lido!r}"
+                                )
 
                     elif tipo_acao == "teclar":
                         await page.keyboard.press(str(passo.get("valor", "")))
@@ -1433,7 +1521,16 @@ async def executar_acao_rapida(
                         contract = extraction_contract_from_action(action_config)
                         selector_data = contract.get("selector_data") if isinstance(contract, dict) else {}
                         expected_selector = str(selector_data.get("primary") or "").strip() if isinstance(selector_data, dict) else ""
-                    if expected_selector and tipo_acao != "extrair_texto":
+                    if is_query_submit:
+                        await verify_query_result_refresh(
+                            page,
+                            result_selector_for_query,
+                            step_index,
+                            before_url=query_before_url,
+                            before_html=query_before_html,
+                            navigation_observed=navigation_observed,
+                        )
+                    elif expected_selector and tipo_acao != "extrair_texto":
                         await verify_postcondition(page, expected_selector, step_index)
                     after_state = await current_browser_state(page)
                     overlay_waits_applied = await apply_reviewed_overlay_waits(page, step_index)
@@ -1501,6 +1598,12 @@ async def executar_acao_rapida(
                         screenshot_path=screenshot_path,
                     )
                     raise wrapped from e
+                finally:
+                    if is_query_submit:
+                        try:
+                            page.remove_listener("framenavigated", observe_main_frame_navigation)
+                        except Exception:
+                            pass
 
             await asyncio.sleep(1)
             await run_session_checkpoint(page, "final_auth_check")
@@ -1536,6 +1639,9 @@ async def executar_acao_rapida(
                 final_page_dom = (await page.content()).strip()[:50000]
             except Exception:
                 final_page_dom = ""
+            query_result_confirmed = query_result_matches_inputs(final_page_text, dados_variaveis)
+            if not query_result_confirmed:
+                raise RuntimeError("query_result_not_confirmed: a pagina final nao corresponde aos dados do cliente")
             extraction_attention: dict[str, Any] = {}
             contract = extraction_contract_from_action(action_config if isinstance(action_config, dict) else {})
             if contract:
@@ -1578,6 +1684,12 @@ async def executar_acao_rapida(
                 "operator_action_required": False,
                 "last_page_title": last_page_title,
                 "current_host": current_host,
+                "query_completed_for": {
+                    key: str(dados_variaveis.get(key) or "")
+                    for key in ("grupo", "cota", "versao")
+                    if dados_variaveis.get(key) is not None
+                },
+                "query_result_confirmed": query_result_confirmed,
                 "checkpoint_diagnostics": checkpoint_diagnostics,
                 "step_trace": step_trace,
                 "last_successful_step_index": last_successful_step_index,

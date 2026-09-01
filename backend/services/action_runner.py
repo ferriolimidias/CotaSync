@@ -147,6 +147,8 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
         "page_title",
         "current_host",
         "current_url",
+        "query_completed_for",
+        "query_result_confirmed",
         "screenshot_path",
         "checkpoint_diagnostics",
         "next_step_index",
