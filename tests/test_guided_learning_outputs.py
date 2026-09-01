@@ -724,6 +724,9 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["robust_steps"][0]["frame_url"], "https://example.test/frame")
         self.assertEqual(action["robust_steps"][0]["frame_name"], "consulta")
         self.assertTrue(action["robust_steps"][0]["opened_new_page"])
+        self.assertEqual(action["robust_steps"][0]["page_ref"], "main")
+        self.assertIn("learned_states", action)
+        self.assertIn("learned_transitions", action)
 
     def test_operator_fill_records_directly_when_listener_misses_event(self) -> None:
         manager = DemoSessionManager()

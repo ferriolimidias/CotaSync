@@ -908,6 +908,44 @@ class ReplanRequired(RuntimeError):
         self.workflow_state = workflow_state
 
 
+async def select_page_for_learned_step(context: Any, current_page: Any, step: dict[str, Any]) -> Any:
+    """Resolve a learned page reference using its observed signature, not tab order."""
+    page_ref = str(step.get("page_ref") or "").strip()
+    if not page_ref or context is None:
+        return current_page
+    signature = step.get("page_signature_before") if isinstance(step.get("page_signature_before"), dict) else {}
+    expected_host = str(signature.get("host") or "").strip().lower()
+    expected_path = str(signature.get("path") or "").strip()
+    if not expected_host:
+        expected_url = str(step.get("expected_url_before") or "").strip()
+        expected_host = url_host(expected_url)
+        expected_path = urlsplit(expected_url).path if expected_url else ""
+    selector = str(step.get("seletor") or "").strip()
+    best_page = current_page
+    best_score = -1
+    for candidate in [item for item in getattr(context, "pages", []) if not item.is_closed()]:
+        candidate_url = str(getattr(candidate, "url", "") or "")
+        candidate_parsed = urlsplit(candidate_url)
+        score = 0
+        if expected_host and candidate_parsed.hostname == expected_host:
+            score += 4
+        if expected_path and candidate_parsed.path == expected_path:
+            score += 3
+        if candidate is current_page:
+            score += 1
+        if selector:
+            try:
+                locator = candidate.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    score += 5
+            except Exception:
+                pass
+        if score > best_score:
+            best_page = candidate
+            best_score = score
+    return best_page
+
+
 async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
@@ -1474,6 +1512,7 @@ async def executar_acao_rapida(
                 )
                 current_step_diagnostic = step_for_diagnostic(passo, step_index)
                 next_step_diagnostic = step_for_diagnostic(next_step, step_index + 1 if next_step is not None else None)
+                page = await select_page_for_learned_step(context, page, passo)
                 seletor = str(passo.get("seletor", "")).strip()
                 tipo_acao = str(passo.get("tipo", "")).strip().lower()
                 step_started_at = time.monotonic()
@@ -1491,15 +1530,21 @@ async def executar_acao_rapida(
                     and tipo_acao == "clicar"
                     and not later_action_steps
                 )
+                explicit_query_transition = str(passo.get("transition_role") or "").strip().lower() == "client_query"
+                legacy_query_transition = not any(
+                    str(item.get("transition_role") or "").strip().lower() == "client_query"
+                    for item in passos_playwright
+                    if isinstance(item, dict)
+                ) and is_learned_client_query_transition(
+                    passos_playwright,
+                    step_index,
+                    filled_client_field_keys,
+                    query_transition_confirmed,
+                )
                 is_client_query_transition = bool(
                     client_field_keys
                     and client_field_keys.issubset(filled_client_field_keys)
-                    and is_learned_client_query_transition(
-                        passos_playwright,
-                        step_index,
-                        filled_client_field_keys,
-                        query_transition_confirmed,
-                    )
+                    and (explicit_query_transition or legacy_query_transition)
                 )
                 observes_query_navigation = is_query_submit or is_client_query_transition
                 query_before_url = _safe_result_url(str(getattr(page, "url", "") or "")) if is_query_submit else ""

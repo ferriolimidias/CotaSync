@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -631,6 +632,25 @@ def _page_matches_url(page: Page, expected_url: str) -> bool:
     return _safe_page_url(page.url) == _safe_page_url(expected_url)
 
 
+def _learned_page_signature(url: Any, title: Any = "", selector: Any = "") -> dict[str, str]:
+    parsed = urlsplit(str(url or ""))
+    return {
+        "host": str(parsed.hostname or "").lower(),
+        "path": str(parsed.path or "/"),
+        "title": str(title or "").strip()[:200],
+        "selector": str(selector or "").strip()[:500],
+    }
+
+
+def _learned_state_id(page_ref: str, signature: dict[str, str], *, phase: str) -> str:
+    payload = json.dumps(
+        {"page_ref": page_ref, "phase": phase, **signature},
+        sort_keys=True,
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return f"state_{hashlib.sha1(payload).hexdigest()[:16]}"
+
+
 def _safe_file_name(value: str) -> str:
     return safe_file_name(value)
 
@@ -866,6 +886,8 @@ class DemoBrowserSession:
     last_recorded_event_session_id: str = ""
     result_selection: dict[str, Any] = field(default_factory=dict)
     extraction_review: dict[str, Any] = field(default_factory=dict)
+    page_refs: dict[int, str] = field(default_factory=dict)
+    next_page_ref_number: int = 2
 
 
 class DemoSessionManager:
@@ -1254,6 +1276,30 @@ class DemoSessionManager:
         if active_page_changed:
             await self._set_active_page(session, page)
 
+        page_identity = id(page)
+        page_refs = getattr(session, "page_refs", None)
+        if not isinstance(page_refs, dict):
+            page_refs = {}
+            session.page_refs = page_refs
+        next_page_ref_number = int(getattr(session, "next_page_ref_number", 2) or 2)
+        if page_identity not in page_refs:
+            page_refs[page_identity] = "main" if not page_refs else f"page_{next_page_ref_number}"
+            next_page_ref_number += 1
+            session.next_page_ref_number = next_page_ref_number
+        page_ref = page_refs[page_identity]
+        opener_page_ref = ""
+        try:
+            opener = await page.opener()
+            if opener is not None and not opener.is_closed():
+                opener_identity = id(opener)
+                if opener_identity not in page_refs:
+                    page_refs[opener_identity] = "main" if not page_refs else f"page_{next_page_ref_number}"
+                    next_page_ref_number += 1
+                    session.next_page_ref_number = next_page_ref_number
+                opener_page_ref = page_refs[opener_identity]
+        except Exception:
+            pass
+
         event_number = len(session.learning_events)
         screenshot_after = session.storage_state_path.parent / "learning" / f"step_{event_number}_after.png"
         screenshot_after.parent.mkdir(parents=True, exist_ok=True)
@@ -1299,7 +1345,29 @@ class DemoSessionManager:
             "opened_new_page": opened_new_page,
             "active_page_changed": active_page_changed,
             "download_detected": session.download_detected,
+            "page_ref": page_ref,
+            "opener_page_ref": opener_page_ref,
+            "page_signature_before": _learned_page_signature(
+                raw.get("url_before") or page.url,
+                raw.get("title_before") or "",
+                raw.get("seletor") or "",
+            ),
+            "page_signature_after": _learned_page_signature(
+                raw.get("url_after") or page.url,
+                raw.get("title_after") or "",
+                raw.get("seletor") or "",
+            ),
         }
+        event["before_state_id"] = _learned_state_id(
+            page_ref,
+            event["page_signature_before"],
+            phase="before",
+        )
+        event["after_state_id"] = _learned_state_id(
+            page_ref,
+            event["page_signature_after"],
+            phase="after",
+        )
         event["source"] = str(raw.get("source") or "browser_recorder")
         event.update(_frame_metadata(source_frame))
         if isinstance(source, dict) and isinstance(source.get("frame_metadata"), dict):
@@ -2862,6 +2930,12 @@ class DemoSessionManager:
                     "target_text": str(event.get("target_text") or step.get("target_text") or "")[:200],
                     "target_label": str(event.get("target_label") or step.get("target_label") or "")[:200],
                     "opened_new_page": bool(event.get("opened_new_page")),
+                    "page_ref": str(event.get("page_ref") or "main"),
+                    "opener_page_ref": str(event.get("opener_page_ref") or ""),
+                    "before_state_id": str(event.get("before_state_id") or ""),
+                    "after_state_id": str(event.get("after_state_id") or ""),
+                    "page_signature_before": dict(event.get("page_signature_before") or {}),
+                    "page_signature_after": dict(event.get("page_signature_after") or {}),
                     "download_detected": bool(event.get("download_detected")),
                     "expected_selector_after": str(
                         steps[index + 1].get("seletor") if index + 1 < len(steps) else ""
@@ -2871,6 +2945,52 @@ class DemoSessionManager:
                 }
             )
             robust_steps.append(robust_step)
+
+        # Persist the semantic query boundary once, at learning time. Replay
+        # should consume this metadata instead of guessing from a step position.
+        client_keys = {
+            str(item.get("key") or "")
+            for item in variable_schema
+            if isinstance(item, dict) and item.get("source") == "client"
+        }
+        filled_keys: set[str] = set()
+        for index, step in enumerate(robust_steps):
+            if str(step.get("tipo") or "").strip().lower() in {"preencher", "selecionar"}:
+                canonical = canonical_client_field_key(step.get("variavel"))
+                if canonical:
+                    filled_keys.add(canonical)
+                continue
+            later_actions = any(
+                str(later.get("tipo") or "").strip().lower() in {"clicar", "preencher", "selecionar", "teclar", "download_pdf"}
+                for later in robust_steps[index + 1 :]
+                if isinstance(later, dict)
+            )
+            if (
+                str(step.get("tipo") or "").strip().lower() == "clicar"
+                and client_keys
+                and client_keys.issubset(filled_keys)
+                and later_actions
+            ):
+                step["transition_role"] = "client_query"
+
+        learned_transitions = [
+            {
+                "transition_id": f"transition_{index + 1}",
+                "from_state": str(step.get("before_state_id") or ""),
+                "to_state": str(step.get("after_state_id") or ""),
+                "page_ref": str(step.get("page_ref") or "main"),
+                "step_index": index,
+                "action_type": str(step.get("tipo") or ""),
+                "opens_page": bool(step.get("opened_new_page")),
+                "new_page_ref": str(step.get("page_ref") or "") if step.get("opened_new_page") else "",
+                "postcondition": {
+                    "expected_url_after": str(step.get("expected_url_after") or ""),
+                    "expected_selector_after": str(step.get("expected_selector_after") or ""),
+                },
+            }
+            for index, step in enumerate(robust_steps)
+            if isinstance(step, dict)
+        ]
 
         extraction_targets = [
             str(step.get("nome") or "").strip()
@@ -2920,6 +3040,21 @@ class DemoSessionManager:
             "url_inicial": _initial_url_for_learned_action(session, learning_events, robust_steps),
             "passos_playwright": steps,
             "robust_steps": robust_steps,
+            "page_refs": sorted({str(step.get("page_ref") or "main") for step in robust_steps}),
+            "learned_states": [
+                {
+                    "state_id": state_id,
+                    "page_ref": str(step.get("page_ref") or "main"),
+                    "signature": dict(signature or {}),
+                }
+                for step in robust_steps
+                for state_id, signature in (
+                    (str(step.get("before_state_id") or ""), step.get("page_signature_before") or {}),
+                    (str(step.get("after_state_id") or ""), step.get("page_signature_after") or {}),
+                )
+                if state_id
+            ],
+            "learned_transitions": learned_transitions,
             "original_steps": [dict(step) for step in steps],
             "learning_events": learning_events,
             "variaveis_necessarias": variables,
