@@ -277,6 +277,30 @@ def graph_target_state(action: dict[str, Any]) -> str:
     )
 
 
+def transition_kind(transition: dict[str, Any]) -> str:
+    """Return the learned semantic relation, never infer a branch from order."""
+    explicit = str(transition.get("transition_kind") or "").strip().lower()
+    if explicit in {"branch", "alternative"}:
+        return "branch"
+    if transition.get("branch_id") or transition.get("alternative_group") or transition.get("condition"):
+        return "branch"
+    return "sequence"
+
+
+def branch_candidates(transitions: list[dict[str, Any]], state_id: str) -> list[dict[str, Any]]:
+    """List explicitly learned alternatives from a structural state.
+
+    Consecutive same-state transitions remain sequence edges. They are not
+    alternatives merely because they share a source state.
+    """
+    return [
+        item for item in transitions
+        if isinstance(item, dict)
+        and str(item.get("from_state_id") or item.get("from_state") or "") == str(state_id)
+        and transition_kind(item) == "branch"
+    ]
+
+
 def transition_satisfied(
     transition: dict[str, Any],
     step: dict[str, Any],

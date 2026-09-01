@@ -5,12 +5,15 @@ import unittest
 
 from backend.services.learned_graph import (
     canonicalize_graph_metadata,
+    branch_candidates,
     find_graph_path,
     graph_metadata_available,
     match_observation_to_learned_state,
     observe_browser_pages,
     ordered_graph_path,
+    transition_kind,
 )
+from backend.services.demo_session import _attach_learned_output_state
 
 
 class FakeLocator:
@@ -44,6 +47,55 @@ class FakePage:
 
 
 class LearnedGraphTests(unittest.TestCase):
+    def test_visual_contract_creates_output_state_without_extraction_step(self) -> None:
+        steps = [
+            {
+                "tipo": "preencher",
+                "page_ref": "main",
+                "before_state_id": "form",
+                "after_state_id": "form",
+                "page_signature_before": {"host": "app.test", "path": "/form", "stable_selectors": ["#input"]},
+                "page_signature_after": {"host": "app.test", "path": "/form", "stable_selectors": ["#input"]},
+            },
+            {
+                "tipo": "clicar",
+                "page_ref": "main",
+                "before_state_id": "form",
+                "after_state_id": "old-result",
+                "page_signature_before": {"host": "app.test", "path": "/form", "stable_selectors": ["#submit"]},
+                "page_signature_after": {"host": "app.test", "path": "/result", "stable_selectors": ["#submit"]},
+            },
+        ]
+        updated, output = _attach_learned_output_state(
+            steps,
+            {
+                "target_name": "Número de parcelas",
+                "selector_data": {"primary": "#resultado"},
+                "read_mode": "text",
+                "normalization": {"type": "digits_only"},
+            },
+            "Número de parcelas",
+        )
+        self.assertEqual(output["label"], "Número de parcelas")
+        self.assertEqual(output["locator"], "#resultado")
+        self.assertEqual(output["state_id"], updated[-1]["after_state_id"])
+        self.assertEqual(updated[-1]["page_signature_after"]["output_selector"], "#resultado")
+
+    def test_same_state_sequence_is_not_classified_as_branch(self) -> None:
+        transitions = [
+            {"from_state_id": "s1", "to_state_id": "s1", "sequence_index": 0, "action_type": "preencher"},
+            {"from_state_id": "s1", "to_state_id": "s1", "sequence_index": 1, "action_type": "preencher"},
+        ]
+        self.assertEqual([transition_kind(item) for item in transitions], ["sequence", "sequence"])
+        self.assertEqual(branch_candidates(transitions, "s1"), [])
+
+    def test_explicit_branch_is_available_without_inventing_business_rules(self) -> None:
+        transitions = [
+            {"from_state_id": "s1", "to_state_id": "s2", "transition_kind": "branch", "branch_id": "choice"},
+            {"from_state_id": "s1", "to_state_id": "s3", "transition_kind": "branch", "branch_id": "choice"},
+        ]
+        self.assertEqual(len(branch_candidates(transitions, "s1")), 2)
+
     def test_canonicalization_reuses_same_structural_state_and_keeps_self_loop(self) -> None:
         action = {
             "execution_model": "learned_graph",

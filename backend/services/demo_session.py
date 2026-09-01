@@ -684,6 +684,69 @@ def _learned_state_id(page_ref: str, signature: dict[str, Any], *, phase: str = 
     return f"state_{hashlib.sha1(payload).hexdigest()[:16]}"
 
 
+def _contract_primary_selector(contract: dict[str, Any]) -> str:
+    selector_data = contract.get("selector_data") if isinstance(contract.get("selector_data"), dict) else {}
+    return str(
+        selector_data.get("primary")
+        or contract.get("selector_hint")
+        or contract.get("value_selector")
+        or ""
+    ).strip()
+
+
+def _attach_learned_output_state(
+    robust_steps: list[dict[str, Any]],
+    contract: dict[str, Any],
+    expected_result: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Attach a visual contract to the learned terminal state.
+
+    Selecting an output during learning does not necessarily create an
+    explicit ``extrair_texto`` event. The output is still a graph target: use
+    the last demonstrated action state and add the selected locator as a
+    strong, semantic marker instead of inventing a progress state.
+    """
+    if not robust_steps or not contract:
+        return robust_steps, None
+    selector = _contract_primary_selector(contract)
+    if not selector:
+        return robust_steps, None
+    extraction_indexes = [
+        index for index, item in enumerate(robust_steps)
+        if str(item.get("tipo") or "").strip().lower() == "extrair_texto"
+    ]
+    output_index = extraction_indexes[-1] if extraction_indexes else len(robust_steps) - 1
+    step = dict(robust_steps[output_index])
+    page_ref = str(step.get("page_ref") or "main")
+    signature = dict(step.get("page_signature_after") or step.get("page_signature_before") or {})
+    signature["output_selector"] = selector[:500]
+    old_state_id = str(step.get("after_state_id") or step.get("before_state_id") or "")
+    new_state_id = _learned_state_id(page_ref, signature)
+    step["page_signature_after"] = signature
+    step["after_state_id"] = new_state_id
+    robust_steps[output_index] = step
+
+    # The terminal state is normally the last step, but remap any later
+    # transitions as well when a future recorder inserts post-output events.
+    previous_state_id = ""
+    for item in robust_steps:
+        item["graph_from_state_id"] = previous_state_id or str(item.get("before_state_id") or "")
+        previous_state_id = str(item.get("after_state_id") or item.get("before_state_id") or "")
+    return robust_steps, {
+        "output_id": str(contract.get("output_id") or "output_1"),
+        "label": str(contract.get("target_name") or expected_result or contract.get("screen_label") or "Resultado").strip(),
+        "type": "data",
+        "page_ref": page_ref,
+        "state_id": new_state_id,
+        "step_index": output_index,
+        "locator": selector,
+        "read_mode": str(contract.get("read_mode") or "text"),
+        "normalization": dict(contract.get("normalization") or {}) if isinstance(contract.get("normalization"), dict) else {},
+        "source": "visual_result_selection",
+        "replaced_state_id": old_state_id if old_state_id != new_state_id else "",
+    }
+
+
 def _safe_file_name(value: str) -> str:
     return safe_file_name(value)
 
@@ -2975,6 +3038,9 @@ class DemoSessionManager:
                     "page_signature_before": dict(event.get("page_signature_before") or {}),
                     "page_signature_after": dict(event.get("page_signature_after") or {}),
                     "download_detected": bool(event.get("download_detected")),
+                    "branch_id": str(event.get("branch_id") or ""),
+                    "alternative_group": str(event.get("alternative_group") or ""),
+                    "branch_condition": event.get("branch_condition") if isinstance(event.get("branch_condition"), dict) else {},
                     "expected_selector_after": str(
                         steps[index + 1].get("seletor") if index + 1 < len(steps) else ""
                     ),
@@ -3011,6 +3077,19 @@ class DemoSessionManager:
             ):
                 step["transition_role"] = "client_query"
 
+        output_states: list[dict[str, Any]] = []
+        if selected_extraction_contract:
+            expected_result_for_output = str(
+                expected_result or session.guided_learning.get("expected_result") or ""
+            ).strip()
+            robust_steps, selected_output_state = _attach_learned_output_state(
+                robust_steps,
+                selected_extraction_contract,
+                expected_result_for_output,
+            )
+            if selected_output_state:
+                output_states.append(selected_output_state)
+
         previous_state_id = ""
         for step in robust_steps:
             step["graph_from_state_id"] = previous_state_id or str(step.get("before_state_id") or "")
@@ -3027,6 +3106,10 @@ class DemoSessionManager:
                 "sequence_index": index,
                 "step_index": index,
                 "action_type": str(step.get("tipo") or ""),
+                "transition_kind": "branch" if step.get("branch_id") or step.get("alternative_group") else "sequence",
+                "branch_id": str(step.get("branch_id") or ""),
+                "alternative_group": str(step.get("alternative_group") or ""),
+                "condition": dict(step.get("branch_condition") or {}) if isinstance(step.get("branch_condition"), dict) else {},
                 "opens_page": bool(step.get("opened_new_page")),
                 "new_page_ref": str(step.get("page_ref") or "") if step.get("opened_new_page") else "",
                 "postcondition": {
@@ -3037,17 +3120,24 @@ class DemoSessionManager:
             for index, step in enumerate(robust_steps)
             if isinstance(step, dict)
         ]
-        output_states = [
-            {
-                "label": str(step.get("nome") or step.get("target_label") or "resultado"),
-                "type": "data",
-                "page_ref": str(step.get("page_ref") or "main"),
-                "state_id": str(step.get("after_state_id") or step.get("before_state_id") or ""),
-                "step_index": index,
-            }
-            for index, step in enumerate(robust_steps)
-            if str(step.get("tipo") or "").strip().lower() == "extrair_texto"
-        ]
+        for index, step in enumerate(robust_steps):
+            if str(step.get("tipo") or "").strip().lower() != "extrair_texto":
+                continue
+            if any(item.get("step_index") == index for item in output_states):
+                continue
+            output_states.append(
+                {
+                    "output_id": f"output_{len(output_states) + 1}",
+                    "label": str(step.get("nome") or step.get("target_label") or "resultado"),
+                    "type": "data",
+                    "page_ref": str(step.get("page_ref") or "main"),
+                    "state_id": str(step.get("after_state_id") or step.get("before_state_id") or ""),
+                    "step_index": index,
+                    "locator": str(step.get("seletor") or ""),
+                    "read_mode": str(step.get("read_mode") or "text"),
+                    "normalization": dict(step.get("normalization") or {}) if isinstance(step.get("normalization"), dict) else {},
+                }
+            )
         learned_state_records: list[dict[str, Any]] = []
         seen_state_ids: set[str] = set()
         for step in robust_steps:
