@@ -14,6 +14,7 @@ from backend.services.batch_runner import (
     create_batch,
     list_batches,
     load_batch,
+    resume_batch,
 )
 from backend.services.auth import require_user
 from backend.worker import latest_worker_status
@@ -102,4 +103,12 @@ async def cancel_batch_endpoint(batch_id: str) -> dict[str, Any]:
         batch = cancel_batch(batch_id)
     except BatchRunnerError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "ok", "batch": batch}
+
+
+@router.post("/{batch_id}/resume")
+async def resume_batch_endpoint(batch_id: str) -> dict[str, Any]:
+    batch = resume_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=409, detail="Este lote não possui item aguardando atenção para retomar.")
     return {"status": "ok", "batch": batch}

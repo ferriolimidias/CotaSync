@@ -43,6 +43,7 @@ ITEM_STATUS_SUCCESS = "success"
 ITEM_STATUS_ERROR = "error"
 ITEM_STATUS_INTERRUPTED = "interrupted"
 ITEM_STATUS_CANCELLED = "cancelled"
+ITEM_STATUS_NEEDS_ATTENTION = "needs_attention"
 
 FINAL_BATCH_STATUSES = {
     BATCH_STATUS_CANCELLED,
@@ -743,6 +744,54 @@ def complete_item_error(item_id: str, run_id: str | None, message: str, error_da
         if batch is not None:
             batch.heartbeat_at = utc_now()
             _recount_batch(session, batch.id)
+
+
+def pause_item_for_attention(
+    item_id: str,
+    run_id: str | None,
+    message: str,
+    error_data: dict[str, Any] | None = None,
+) -> None:
+    """Retém o item atual sem permitir que o worker avance para o próximo."""
+    with SessionLocal.begin() as session:
+        item = session.get(BatchItem, item_id)
+        if item is None:
+            return
+        item.status = ITEM_STATUS_NEEDS_ATTENTION
+        item.run_id = run_id if run_id and session.get(DbRun, run_id) is not None else None
+        payload = dict(error_data or {})
+        payload.setdefault("message", str(message or "A sessao externa precisa de atencao.")[:1000])
+        payload.setdefault("reason", "operator_action_required")
+        item.error_data = payload
+        item.finished_at = utc_now()
+        batch = session.get(DbBatch, item.batch_id)
+        if batch is not None:
+            batch.heartbeat_at = utc_now()
+            _recount_batch(session, batch.id)
+
+
+def resume_batch(batch_id: str) -> dict[str, Any] | None:
+    """Coloca em fila o item que aguardava atenção, preservando o mesmo item/run."""
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, batch_id)
+        if batch is None or batch.status != BATCH_STATUS_INTERRUPTED:
+            return None
+        item = (
+            session.query(BatchItem)
+            .filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_NEEDS_ATTENTION)
+            .order_by(BatchItem.position)
+            .first()
+        )
+        if item is None:
+            return None
+        item.status = ITEM_STATUS_PENDING
+        item.finished_at = None
+        batch.status = BATCH_STATUS_QUEUED
+        batch.finished_at = None
+        batch.worker_id = None
+        batch.heartbeat_at = utc_now()
+        _recount_batch(session, batch_id)
+    return load_batch(batch_id)
 
 
 def cancel_pending_items(session: Any, batch_id: str) -> None:

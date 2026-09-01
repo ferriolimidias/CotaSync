@@ -933,6 +933,16 @@ async def executar_acao_rapida(
             guardian = SessionGuardian()
             recovery_attempted = False
             total_recovery_attempts = 0
+
+            async def plan_workflow_observation(observed: dict[str, Any]) -> dict[str, Any]:
+                state = str(observed.get("workflow_state") or "unknown")
+                if state == "auth_continue":
+                    return await guardian.plan_resume_index(page, action_config, observed)
+                if state in {"auth_secret_required", "microsoft_password_required", "microsoft_mfa_required"} or state.startswith(
+                    "microsoft_"
+                ):
+                    return {"resume_index": None, "reason": state}
+                return await guardian.plan_resume_index(page, action_config, observed)
             recovery_steps: list[dict[str, Any]] = []
             checkpoint_diagnostics: list[dict[str, Any]] = []
             last_session_state = ""
@@ -1282,13 +1292,11 @@ async def executar_acao_rapida(
                 authenticated=await is_authenticated(page),
             )
             workflow_state = str(observation.get("workflow_state") or "unknown")
-            if workflow_state == "auth_continue":
-                initial_plan = await guardian.plan_resume_index(page, action_config, observation)
-            elif workflow_state in {"auth_secret_required", "microsoft_password_required", "microsoft_mfa_required"} or workflow_state.startswith("microsoft_"):
+            initial_plan = await plan_workflow_observation(observation)
+            if workflow_state in {"auth_secret_required", "microsoft_password_required", "microsoft_mfa_required"} or workflow_state.startswith(
+                "microsoft_"
+            ):
                 await run_session_checkpoint(page, "before_action_auth_check", first_step)
-                initial_plan = {"resume_index": None, "reason": workflow_state}
-            else:
-                initial_plan = await guardian.plan_resume_index(page, action_config, observation)
             stateful_replay = bool(observation.get("stateful", True))
             last_session_state = workflow_state
             initial_evidence = observation.get("evidence") or {}
@@ -1308,6 +1316,46 @@ async def executar_acao_rapida(
                     "Não foi possível determinar com segurança a próxima etapa do navegador.",
                     diagnostics,
                 )
+            if stateful_replay:
+                # A página persistente pode mudar entre a fotografia usada para
+                # planejar e o primeiro passo (por exemplo, um redirect da
+                # Microsoft). Reobserve antes de executar para não aplicar um
+                # plano de uma página antiga ao estado atual.
+                latest_observation = await guardian.observe_workflow_state(
+                    page,
+                    action_config,
+                    authenticated=await is_authenticated(page),
+                )
+                latest_plan = await plan_workflow_observation(latest_observation)
+                latest_state = str(latest_observation.get("workflow_state") or "unknown")
+                observation_changed = (
+                    latest_state != workflow_state
+                    or str((latest_observation.get("evidence") or {}).get("current_url") or "")
+                    != str((observation.get("evidence") or {}).get("current_url") or "")
+                )
+                if observation_changed:
+                    workflow_state = latest_state
+                    observation = latest_observation
+                    initial_plan = latest_plan
+                    initial_evidence = observation.get("evidence") or {}
+                    last_page_title = str(initial_evidence.get("title") or "")
+                    current_host = str(initial_evidence.get("current_host") or "")
+                if initial_plan.get("resume_index") is None:
+                    diagnostics = dict(observation.get("evidence") or {})
+                    diagnostics.update(
+                        {
+                            "reason": initial_plan.get("reason") or "unknown_browser_state",
+                            "workflow_state": workflow_state,
+                            "operator_action_required": workflow_state.startswith("microsoft_")
+                            or workflow_state in {"auth_secret_required", "unknown"},
+                            "retryable": workflow_state in {"unknown", "system_loading", "system_unresponsive"}
+                            or workflow_state.startswith("microsoft_"),
+                        }
+                    )
+                    raise SessionGuardianError(
+                        "Não foi possível determinar com segurança a próxima etapa do navegador.",
+                        diagnostics,
+                    )
             resume_index = int(initial_plan.get("resume_index") or 0)
             skipped_steps = list(range(resume_index))
             checkpoint_diagnostics.append(

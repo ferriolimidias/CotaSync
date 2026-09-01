@@ -30,6 +30,7 @@ from backend.services.batch_runner import (
     complete_item_success,
     finish_batch_if_done,
     mark_batch_interrupted,
+    pause_item_for_attention,
     recover_stale_batches,
     utc_now,
     utc_now_iso,
@@ -290,8 +291,12 @@ class PersistentBatchWorker:
             if run.status == "success":
                 complete_item_success(item_id, run.id, payload)
                 return None
+            systemic_reason = self._systemic_reason(payload)
+            if systemic_reason == "operator_action_required":
+                pause_item_for_attention(item_id, run.id, run.error_message or "A sessao externa precisa de atencao.", payload)
+                return systemic_reason
             complete_item_error(item_id, run.id, run.error_message or "Falha na execucao do cliente.", payload)
-            return self._systemic_reason(payload)
+            return systemic_reason
         except Exception as exc:
             message = str(exc)[:1000] or type(exc).__name__
             complete_item_error(item_id, None, message, {"message": message, "exception_type": type(exc).__name__})
@@ -305,6 +310,8 @@ class PersistentBatchWorker:
             return "external_session_expired"
         if any(part in reason for part in ("external_session_expired", "sessao expirada", "session expired")):
             return "external_session_expired"
+        if operator_action:
+            return "operator_action_required"
         browser_mode = str(payload.get("browser_mode") or "").lower()
         exception_type = str(payload.get("exception_type") or "").lower()
         if browser_mode == "desktop_browser" and any(part in exception_type for part in ("connection", "playwright", "targetclosed")):

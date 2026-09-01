@@ -23,6 +23,7 @@ from backend.services.batch_runner import (
     load_batch,
     parse_csv_rows,
     recover_stale_batches,
+    resume_batch,
     validate_batch_rows,
 )
 from backend.worker import BrowserAdvisoryLock, PersistentBatchWorker
@@ -511,6 +512,44 @@ class BatchRunnerTests(unittest.TestCase):
 
         self.assertEqual(loaded["status"], "interrupted")
         self.assertEqual([row["status"] for row in loaded["rows"]], ["error", "pending"])
+
+    def test_operator_attention_pauses_same_item_and_resume_requeues_it(self) -> None:
+        async def run_action(_action: ActionDetail, _request: ActionRunRequest) -> RunRecord:
+            run = fake_run(1, status="error")
+            run.result_payload = {
+                "reason": "unknown_microsoft_auth",
+                "session_state": "unknown_microsoft_auth",
+                "operator_action_required": True,
+                "retryable": True,
+            }
+            run.error_message = "A sessao externa precisa de atencao."
+            return persist_fake_run(run)
+
+        async def scenario() -> tuple[dict, dict]:
+            with patch("backend.services.batch_runner.find_action", return_value=fake_action()), patch(
+                "backend.worker.find_action", return_value=fake_action()
+            ), patch("backend.worker.run_action_sync", side_effect=run_action):
+                batch = create_batch(
+                    action_id="numero-de-parcelas-pagas",
+                    rows=[
+                        {"grupo": "935", "grupo_2": "110", "grupo_3": "00"},
+                        {"grupo": "935", "grupo_2": "111", "grupo_3": "00"},
+                    ],
+                    auto_start=False,
+                )
+                claim_next_batch("worker-test")
+                await PersistentBatchWorker("worker-test").execute_batch(batch["batch_id"])
+                paused = load_batch(batch["batch_id"]) or {}
+                resumed = resume_batch(batch["batch_id"]) or {}
+                return paused, resumed
+
+        paused, resumed = asyncio.run(scenario())
+
+        self.assertEqual(paused["status"], "interrupted")
+        self.assertEqual([row["status"] for row in paused["rows"]], ["needs_attention", "pending"])
+        self.assertEqual(paused["rows"][0]["error_data"]["session_state"], "unknown_microsoft_auth")
+        self.assertEqual(resumed["status"], "queued")
+        self.assertEqual([row["status"] for row in resumed["rows"]], ["pending", "pending"])
 
 
 if __name__ == "__main__":
