@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -30,6 +30,7 @@ import {
   getClients,
   getRun,
   runAction,
+  resumeBatch,
 } from "@/services/api";
 import type { ApiBatch, ApiClient, ApiRun, BatchItem } from "@/types/api";
 import { actionIsExecutable, batchStatusLabel, runStatusLabel } from "@/lib/status-labels";
@@ -162,12 +163,25 @@ function ExecucaoPage() {
     },
   });
 
+  const resume = useMutation({
+    mutationFn: (id: string) => resumeBatch(id),
+    onSuccess: (nextBatch) => {
+      setCurrentBatchId(nextBatch.batch_id || nextBatch.id || null);
+      void queryClient.invalidateQueries({ queryKey: ["batch", currentBatchId] });
+      void queryClient.invalidateQueries({ queryKey: ["batches"] });
+      toast.success("Execução retomada pelo cliente que aguardava atenção.");
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível retomar a execução."),
+  });
+
   const batch = currentBatch.data || batches.data?.items[0];
   const batchId = batch?.batch_id || batch?.id || "";
   const progress = batch?.total_items
     ? Math.round((batch.processed_items / batch.total_items) * 100)
     : 0;
   const batchRows = batch?.rows || batch?.items || batch?.results || [];
+  const attentionItem = batchRows.find((item) => item.status === "needs_attention");
   const batchTableColumns = useMemo<Column<BatchItem>[]>(
     () => (batch?.result_columns || []).map((column) => ({
       key: column.key,
@@ -393,6 +407,20 @@ function ExecucaoPage() {
                   >
                     <StopCircle className="h-4 w-4" /> Cancelar execução
                   </Button>
+                  {batch.status === "interrupted" && attentionItem && (
+                    <>
+                      <Button asChild variant="outline" size="sm">
+                        <Link to="/configuracoes/navegador">Abrir navegador</Link>
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={!batchId || resume.isPending}
+                        onClick={() => resume.mutate(batchId)}
+                      >
+                        {resume.isPending ? "Retomando..." : "Retomar execução"}
+                      </Button>
+                    </>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
@@ -413,6 +441,17 @@ function ExecucaoPage() {
                     <Download className="h-4 w-4" /> Baixar CSV final
                   </Button>
                 </div>
+                {batch.status === "interrupted" && attentionItem && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                    <p className="font-medium text-foreground">Execução pausada</p>
+                    <p className="mt-1 text-muted-foreground">
+                      Cliente atual: {attentionItem.client_name || attentionItem.client_id || "-"}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      Motivo: {attentionItem.error_message || "A sessão do sistema externo precisa de atenção."}
+                    </p>
+                  </div>
+                )}
                 <p className="text-xs text-muted-foreground">
                   Cancelar execução conclui o cliente atual e cancela os próximos.
                 </p>

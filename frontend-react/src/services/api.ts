@@ -317,6 +317,13 @@ export async function cancelBatch(id: string) {
   return payload.batch;
 }
 
+export async function resumeBatch(id: string) {
+  const payload = await apiFetch<{ batch: ApiBatch }>(`/api/v1/batches/${id}/resume`, {
+    method: "POST",
+  });
+  return payload.batch;
+}
+
 export async function exportBatchResultsCsv(id: string) {
   return apiFetch<string>(`/api/v1/batches/${id}/results.csv`);
 }

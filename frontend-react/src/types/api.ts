@@ -142,7 +142,7 @@ export type BatchItem = {
   client_id?: string;
   client_name?: string;
   client_fields?: { grupo?: string; cota?: string; versao?: string };
-  status?: "queued" | "running" | "success" | "error" | "interrupted" | "cancelled";
+  status?: "queued" | "running" | "success" | "error" | "interrupted" | "cancelled" | "needs_attention";
   status_label?: string;
   output_values?: Record<string, string>;
   dados_extraidos?: Record<string, string>;
@@ -180,6 +180,7 @@ export type ApiBatch = {
   rows?: BatchItem[];
   result_columns?: BatchResultColumn[];
   output_definitions?: BatchResultColumn[];
+  metadata?: Record<string, unknown>;
 };
 
 export type BrowserStatus = {

@@ -32,6 +32,7 @@ from backend.services.batch_runner import (
     create_batch,
     list_batches,
     load_batch,
+    resume_batch,
 )
 from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
 from backend.services.clients_repository import (
@@ -1035,6 +1036,14 @@ async def batches_cancel(batch_id: str, _user: AuthUser = Depends(require_user))
         batch = cancel_batch(batch_id)
     except BatchRunnerError as exc:
         raise _error(404, "BATCH_NOT_FOUND", str(exc)) from exc
+    return {"status": "ok", "batch": batch}
+
+
+@router.post("/batches/{batch_id}/resume", summary="Retoma item do batch aguardando atenção")
+async def batches_resume(batch_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    batch = resume_batch(batch_id)
+    if batch is None:
+        raise _error(409, "BATCH_NOT_RESUMABLE", "Este lote não possui item aguardando atenção para retomar.")
     return {"status": "ok", "batch": batch}
 
 

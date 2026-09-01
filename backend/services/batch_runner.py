@@ -339,6 +339,7 @@ def _status_label(status: Any) -> str:
         ITEM_STATUS_CANCELLED: "Cancelado",
         ITEM_STATUS_RUNNING: "Executando",
         ITEM_STATUS_PENDING: "Na fila",
+        ITEM_STATUS_NEEDS_ATTENTION: "Aguardando atenção",
     }.get(str(status or ""), str(status or ""))
 
 

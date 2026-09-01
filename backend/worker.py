@@ -305,12 +305,13 @@ class PersistentBatchWorker:
     @staticmethod
     def _systemic_reason(payload: dict[str, Any]) -> str | None:
         reason = str(payload.get("reason") or payload.get("session_state") or "").lower()
+        session_state = str(payload.get("session_state") or "").lower()
         operator_action = bool(payload.get("operator_action_required"))
         if operator_action and any(part in reason for part in ("session", "login", "expired", "expir")):
             return "external_session_expired"
         if any(part in reason for part in ("external_session_expired", "sessao expirada", "session expired")):
             return "external_session_expired"
-        if operator_action:
+        if operator_action or session_state.startswith("microsoft_") or session_state == "unknown_microsoft_auth":
             return "operator_action_required"
         browser_mode = str(payload.get("browser_mode") or "").lower()
         exception_type = str(payload.get("exception_type") or "").lower()
