@@ -2978,6 +2978,8 @@ class DemoSessionManager:
                 "transition_id": f"transition_{index + 1}",
                 "from_state": str(step.get("before_state_id") or ""),
                 "to_state": str(step.get("after_state_id") or ""),
+                "from_state_id": str(step.get("before_state_id") or ""),
+                "to_state_id": str(step.get("after_state_id") or ""),
                 "page_ref": str(step.get("page_ref") or "main"),
                 "step_index": index,
                 "action_type": str(step.get("tipo") or ""),
@@ -2990,6 +2992,30 @@ class DemoSessionManager:
             }
             for index, step in enumerate(robust_steps)
             if isinstance(step, dict)
+        ]
+        output_states = [
+            {
+                "label": str(step.get("nome") or step.get("target_label") or "resultado"),
+                "type": "data",
+                "page_ref": str(step.get("page_ref") or "main"),
+                "state_id": str(step.get("after_state_id") or step.get("before_state_id") or ""),
+                "step_index": index,
+            }
+            for index, step in enumerate(robust_steps)
+            if str(step.get("tipo") or "").strip().lower() == "extrair_texto"
+        ]
+        learned_state_records = [
+            {
+                "state_id": state_id,
+                "page_ref": str(step.get("page_ref") or "main"),
+                "signature": dict(signature or {}),
+            }
+            for step in robust_steps
+            for state_id, signature in (
+                (str(step.get("before_state_id") or ""), step.get("page_signature_before") or {}),
+                (str(step.get("after_state_id") or ""), step.get("page_signature_after") or {}),
+            )
+            if state_id
         ]
 
         extraction_targets = [
@@ -3040,20 +3066,10 @@ class DemoSessionManager:
             "url_inicial": _initial_url_for_learned_action(session, learning_events, robust_steps),
             "passos_playwright": steps,
             "robust_steps": robust_steps,
+            "execution_model": "learned_graph" if learned_state_records and learned_transitions else "legacy_linear",
+            "output_states": output_states,
             "page_refs": sorted({str(step.get("page_ref") or "main") for step in robust_steps}),
-            "learned_states": [
-                {
-                    "state_id": state_id,
-                    "page_ref": str(step.get("page_ref") or "main"),
-                    "signature": dict(signature or {}),
-                }
-                for step in robust_steps
-                for state_id, signature in (
-                    (str(step.get("before_state_id") or ""), step.get("page_signature_before") or {}),
-                    (str(step.get("after_state_id") or ""), step.get("page_signature_after") or {}),
-                )
-                if state_id
-            ],
+            "learned_states": learned_state_records,
             "learned_transitions": learned_transitions,
             "original_steps": [dict(step) for step in steps],
             "learning_events": learning_events,

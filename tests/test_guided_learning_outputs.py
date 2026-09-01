@@ -724,6 +724,7 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["robust_steps"][0]["frame_url"], "https://example.test/frame")
         self.assertEqual(action["robust_steps"][0]["frame_name"], "consulta")
         self.assertTrue(action["robust_steps"][0]["opened_new_page"])
+        self.assertEqual(action["execution_model"], "legacy_linear")
         self.assertEqual(action["robust_steps"][0]["page_ref"], "main")
         self.assertIn("learned_states", action)
         self.assertIn("learned_transitions", action)

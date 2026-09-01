@@ -30,6 +30,14 @@ from backend.services.browser_providers import browser_provider, normalize_brows
 from backend.services.client_fields import canonical_client_field_key
 from backend.services.extraction_targets import extract_value_near_label
 from backend.services.file_names import safe_file_name
+from backend.services.learned_graph import (
+    find_graph_path,
+    graph_metadata_available,
+    graph_step_indices,
+    graph_target_state,
+    match_observation_to_learned_state,
+    observe_browser_pages,
+)
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
@@ -990,6 +998,7 @@ async def executar_acao_rapida(
 
     action_config = action_config if isinstance(action_config, dict) else {}
     browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "desktop_browser")
+    graph_mode = graph_metadata_available(action_config)
     provider = browser_provider(browser_mode)
     browser: Browser | None = None
     _LOGGER.info(f"[DESKTOP-REPLAY] Iniciando execução rápida da ação: {nome_acao}")
@@ -1416,7 +1425,7 @@ async def executar_acao_rapida(
             initial_evidence = observation.get("evidence") or {}
             last_page_title = str(initial_evidence.get("title") or "")
             current_host = str(initial_evidence.get("current_host") or "")
-            if initial_plan.get("resume_index") is None and stateful_replay:
+            if initial_plan.get("resume_index") is None and stateful_replay and not graph_mode:
                 diagnostics = dict(observation.get("evidence") or {})
                 diagnostics.update(
                     {
@@ -1430,7 +1439,7 @@ async def executar_acao_rapida(
                     "Não foi possível determinar com segurança a próxima etapa do navegador.",
                     diagnostics,
                 )
-            if stateful_replay:
+            if stateful_replay and not graph_mode:
                 # A página persistente pode mudar entre a fotografia usada para
                 # planejar e o primeiro passo (por exemplo, um redirect da
                 # Microsoft). Reobserve antes de executar para não aplicar um
@@ -1487,6 +1496,56 @@ async def executar_acao_rapida(
             )
             _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
+            graph_plan: dict[str, Any] = {"execution_model": "legacy_linear"}
+            if graph_mode:
+                graph_states = action_config.get("learned_states") or []
+                graph_transitions = action_config.get("learned_transitions") or []
+                observations = await observe_browser_pages(context, graph_states)
+                current_match = match_observation_to_learned_state(observations, graph_states)
+                target_state_id = graph_target_state(action_config)
+                if current_match.get("status") != "matched":
+                    raise SessionGuardianError(
+                        "Não foi possível identificar um estado aprendido único para continuar a ação.",
+                        {
+                            "reason": current_match.get("reason") or "unknown_learned_state",
+                            "execution_model": "learned_graph",
+                            "state_candidates": current_match.get("candidates", []),
+                            "browser_pages": [
+                                {key: value for key, value in item.items() if key != "page"}
+                                for item in observations
+                            ],
+                        },
+                    )
+                graph_path = find_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id)
+                if graph_path is None:
+                    raise SessionGuardianError(
+                        "Não existe um caminho aprendido entre o estado atual e o resultado da ação.",
+                        {
+                            "reason": "learned_graph_path_not_found",
+                            "execution_model": "learned_graph",
+                            "current_state_id": current_match["state_id"],
+                            "target_state_id": target_state_id,
+                        },
+                    )
+                selected_indices = graph_step_indices(graph_path)
+                selected_indices.extend(
+                    index
+                    for index, step in enumerate(passos_playwright)
+                    if isinstance(step, dict)
+                    and str(step.get("tipo") or step.get("type") or "").strip().lower() == "extrair_texto"
+                    and index not in selected_indices
+                )
+                selected_indices = sorted(selected_indices)
+                passos_playwright = [passos_playwright[index] for index in selected_indices]
+                graph_plan = {
+                    "execution_model": "learned_graph",
+                    "current_state_id": current_match["state_id"],
+                    "target_state_id": target_state_id,
+                    "path_step_indices": selected_indices,
+                    "path_length": len(graph_path),
+                }
+                resume_index = 0
+                skipped_steps = []
             contract_for_query = extraction_contract_from_action(action_config if isinstance(action_config, dict) else {})
             selector_data_for_query = contract_for_query.get("selector_data") if isinstance(contract_for_query, dict) else {}
             result_selector_for_query = str(selector_data_for_query.get("primary") or "").strip() if isinstance(selector_data_for_query, dict) else ""
@@ -1850,7 +1909,12 @@ async def executar_acao_rapida(
                 final_page_dom = (await page.content()).strip()
             except Exception:
                 final_page_dom = ""
-            query_result_confirmed = query_result_matches_inputs(final_page_text, dados_variaveis)
+            output_validation = action_config.get("output_validation") if isinstance(action_config, dict) else {}
+            query_result_confirmed = (
+                query_result_matches_inputs(final_page_text, dados_variaveis)
+                if not graph_mode or (isinstance(output_validation, dict) and output_validation.get("client_identity"))
+                else True
+            )
             # Complex actions may intentionally finish on a page that does not
             # render the client identity again. Their query transition was
             # already proven by the learned intermediate postcondition.
@@ -1908,6 +1972,7 @@ async def executar_acao_rapida(
                 "query_result_confirmed": query_result_confirmed,
                 "query_transition_confirmed": query_transition_confirmed,
                 "query_transition_step_index": query_transition_step_index,
+                "graph_plan": graph_plan,
                 "checkpoint_diagnostics": checkpoint_diagnostics,
                 "step_trace": step_trace,
                 "last_successful_step_index": last_successful_step_index,
