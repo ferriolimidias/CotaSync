@@ -62,6 +62,40 @@ class LearnedGraphTests(unittest.TestCase):
         self.assertEqual(canonical["learned_transitions"][0]["from_state_id"], canonical["learned_transitions"][0]["to_state_id"])
         self.assertEqual(canonical["output_states"][0]["state_id"], "result")
 
+    def test_canonicalization_ignores_legacy_step_selector_but_keeps_markers(self) -> None:
+        action = {
+            "execution_model": "learned_graph",
+            "learned_states": [
+                {"state_id": "grupo", "page_ref": "main", "signature": {"host": "app.test", "path": "/form", "title": "Form", "selector": "#grupo"}},
+                {"state_id": "cota", "page_ref": "main", "signature": {"host": "app.test", "path": "/form", "title": "Form", "selector": "#cota"}},
+            ],
+            "learned_transitions": [
+                {"from_state_id": "grupo", "to_state_id": "cota", "step_index": 0, "action_type": "preencher"},
+            ],
+        }
+        canonical = canonicalize_graph_metadata(action)
+        self.assertEqual(len(canonical["learned_states"]), 1)
+        self.assertEqual(canonical["learned_states"][0]["signature"]["legacy_markers"], ["#grupo", "#cota"])
+
+    def test_same_page_observation_matches_one_canonical_state(self) -> None:
+        action = {
+            "execution_model": "learned_graph",
+            "learned_states": [
+                {"state_id": "main-before", "page_ref": "main", "signature": {"host": "app.test", "path": "/main", "title": "App", "selector": "#atendimento"}},
+                {"state_id": "main-after", "page_ref": "main", "signature": {"host": "app.test", "path": "/main", "title": "App", "selector": "#grupo"}},
+            ],
+            "learned_transitions": [
+                {"from_state_id": "main-before", "to_state_id": "main-after", "step_index": 0, "action_type": "preencher"},
+            ],
+        }
+        canonical = canonicalize_graph_metadata(action)
+        match = match_observation_to_learned_state(
+            [{"host": "app.test", "path": "/main", "title": "App", "visible_selectors": ["#atendimento"]}],
+            canonical["learned_states"],
+        )
+        self.assertEqual(match["status"], "matched")
+        self.assertEqual(match["state_id"], "main-before")
+
     def test_graph_metadata_and_bfs_path(self) -> None:
         action = {
             "execution_model": "learned_graph",

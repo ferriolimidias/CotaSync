@@ -45,8 +45,20 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
         if not old_id:
             continue
         signature = raw_state.get("signature") if isinstance(raw_state.get("signature"), dict) else {}
+        stable_selectors = signature.get("stable_selectors")
+        if not isinstance(stable_selectors, list):
+            stable_selectors = []
+        # Older graph versions used the current step selector as the only
+        # marker. Keep it as matching evidence, but not as browser-state
+        # identity: a fill/click changes the target while the page remains.
+        structural_signature = dict(signature)
+        legacy_markers = []
+        if not stable_selectors:
+            legacy_markers = [str(signature.get("selector") or "").strip()]
+            structural_signature.pop("selector", None)
+        structural_signature.pop("legacy_markers", None)
         key = json.dumps(
-            {"page_ref": str(raw_state.get("page_ref") or "main"), "signature": signature},
+            {"page_ref": str(raw_state.get("page_ref") or "main"), "signature": structural_signature},
             sort_keys=True,
             ensure_ascii=False,
         )
@@ -54,7 +66,23 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
         if canonical_id is None:
             canonical_id = old_id
             canonical_by_key[key] = canonical_id
-            states.append({**raw_state, "state_id": canonical_id})
+            canonical_state = {**raw_state, "state_id": canonical_id}
+            if legacy_markers:
+                canonical_state["signature"] = {
+                    **signature,
+                    "legacy_markers": [marker for marker in legacy_markers if marker],
+                }
+            states.append(canonical_state)
+        elif legacy_markers:
+            existing = states[-1] if states and states[-1].get("state_id") == canonical_id else next(
+                item for item in states if item.get("state_id") == canonical_id
+            )
+            existing_signature = existing.get("signature") if isinstance(existing.get("signature"), dict) else {}
+            markers = list(existing_signature.get("legacy_markers") or [])
+            for marker in legacy_markers:
+                if marker and marker not in markers:
+                    markers.append(marker)
+            existing["signature"] = {**existing_signature, "legacy_markers": markers}
         state_id_map[old_id] = canonical_id
 
     transitions: list[dict[str, Any]] = []
@@ -109,6 +137,9 @@ def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> 
     if not isinstance(raw_expected_selectors, list):
         raw_expected_selectors = []
     expected_selectors = {str(item).strip() for item in raw_expected_selectors if str(item).strip()}
+    legacy_markers = signature.get("legacy_markers", [])
+    if isinstance(legacy_markers, list):
+        expected_selectors.update(str(item).strip() for item in legacy_markers if str(item).strip())
     observed_selectors = set(observation.get("visible_selectors") or [])
     if expected_selectors:
         overlap = expected_selectors & observed_selectors
@@ -207,6 +238,7 @@ async def observe_browser_pages(context: Any, states: list[dict[str, Any]]) -> l
         if not selectors:
             selector = str((signature or {}).get("selector") or "")
             selectors = [selector] if selector else []
+        selectors.extend((signature or {}).get("legacy_markers") or [])
         for selector in selectors:
             if selector:
                 selector_by_state.setdefault(str(state.get("page_ref") or "main"), set()).add(str(selector))
