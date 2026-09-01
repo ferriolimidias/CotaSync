@@ -16,6 +16,7 @@ from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.action_pages import expected_action_hosts, validate_action_page_url
 from backend.services.actions_repository import enrich_action_access_profile
+from backend.services.learned_graph import canonicalize_graph_metadata
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
 from backend.services.runs_repository import (
     append_run,
@@ -289,7 +290,10 @@ def _load_action_config(action: ActionDetail) -> dict[str, Any]:
                     raw = dict(version.definition or {})
                     raw.setdefault("nome_amigavel", db_action.name)
                     raw.setdefault("descricao", db_action.description)
-                    return enrich_action_access_profile(raw)
+                    enriched = enrich_action_access_profile(raw)
+                    if enriched.get("execution_model") == "learned_graph":
+                        enriched = canonicalize_graph_metadata(enriched)
+                    return enriched
     except Exception:
         logger.exception("Falha ao carregar acao publicada do PostgreSQL.")
         return {}

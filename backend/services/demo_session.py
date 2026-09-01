@@ -157,12 +157,25 @@ _RECORDER_SCRIPT = r"""
     placeholder: String(el?.getAttribute?.('placeholder') || '').slice(0, 160),
     aria_label: String(el?.getAttribute?.('aria-label') || '').slice(0, 160)
   });
+  const stableInteractiveSelectors = () => Array.from(document.querySelectorAll(
+    'button, input, select, textarea, a, [role="button"], [data-testid], [data-cotasync-output]'
+  )).filter((element) => {
+    const style = window.getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  }).map((element) => {
+    const id = element.id ? `#${element.id}` : '';
+    const name = element.getAttribute('name') ? `[name="${element.getAttribute('name')}\"]` : '';
+    const testId = element.getAttribute('data-testid') ? `[data-testid="${element.getAttribute('data-testid')}\"]` : '';
+    const role = element.getAttribute('role') ? `[role="${element.getAttribute('role')}\"]` : '';
+    return id || testId || name || role;
+  }).filter(Boolean).filter((selector, index, all) => all.indexOf(selector) === index).slice(0, 32);
   const domSummary = () => ({
     ready_state: document.readyState,
     element_count: document.body ? document.body.querySelectorAll('*').length : 0,
     interactive_count: document.querySelectorAll('button,input,select,textarea,a,[role="button"]').length,
     modal_count: document.querySelectorAll('[role="dialog"],dialog[open],.modal.show,[aria-modal="true"]').length,
-    authenticated_marker: document.body?.dataset?.cotasyncAuthenticated === 'true'
+    authenticated_marker: document.body?.dataset?.cotasyncAuthenticated === 'true',
+    stable_interactive_selectors: stableInteractiveSelectors()
   });
   const snapshot = () => ({
     timestamp: new Date().toISOString(),
@@ -632,19 +645,39 @@ def _page_matches_url(page: Page, expected_url: str) -> bool:
     return _safe_page_url(page.url) == _safe_page_url(expected_url)
 
 
-def _learned_page_signature(url: Any, title: Any = "", selector: Any = "") -> dict[str, str]:
+def _learned_page_signature(
+    url: Any,
+    title: Any = "",
+    selector: Any = "",
+    dom_summary: dict[str, Any] | None = None,
+    event_type: str = "",
+) -> dict[str, Any]:
     parsed = urlsplit(str(url or ""))
-    return {
+    summary = dom_summary if isinstance(dom_summary, dict) else {}
+    stable_selectors = summary.get("stable_interactive_selectors")
+    if not isinstance(stable_selectors, list):
+        stable_selectors = []
+    stable_selectors = sorted({str(item).strip() for item in stable_selectors if str(item).strip()})[:32]
+    signature: dict[str, Any] = {
         "host": str(parsed.hostname or "").lower(),
         "path": str(parsed.path or "/"),
         "title": str(title or "").strip()[:200],
-        "selector": str(selector or "").strip()[:500],
+        "stable_selectors": stable_selectors,
     }
+    # Keep the event target as legacy evidence, but do not make it the identity
+    # of a browser state. The target can change while the same page remains.
+    if not stable_selectors and selector:
+        signature["selector"] = str(selector).strip()[:500]
+    elif str(event_type or "").strip().lower() in {"extract", "download"} and selector:
+        # The output target is a real state marker. Interaction targets are not:
+        # filling another field can leave the same browser page unchanged.
+        signature["output_selector"] = str(selector).strip()[:500]
+    return signature
 
 
-def _learned_state_id(page_ref: str, signature: dict[str, str], *, phase: str) -> str:
+def _learned_state_id(page_ref: str, signature: dict[str, Any], *, phase: str = "") -> str:
     payload = json.dumps(
-        {"page_ref": page_ref, "phase": phase, **signature},
+        {"page_ref": page_ref, **signature},
         sort_keys=True,
         ensure_ascii=False,
     ).encode("utf-8")
@@ -1351,11 +1384,15 @@ class DemoSessionManager:
                 raw.get("url_before") or page.url,
                 raw.get("title_before") or "",
                 raw.get("seletor") or "",
+                raw.get("dom_summary_before") if isinstance(raw.get("dom_summary_before"), dict) else {},
+                event_type,
             ),
             "page_signature_after": _learned_page_signature(
                 raw.get("url_after") or page.url,
                 raw.get("title_after") or "",
                 raw.get("seletor") or "",
+                raw.get("dom_summary_after") if isinstance(raw.get("dom_summary_after"), dict) else {},
+                event_type,
             ),
         }
         event["before_state_id"] = _learned_state_id(
@@ -3010,19 +3047,23 @@ class DemoSessionManager:
             for index, step in enumerate(robust_steps)
             if str(step.get("tipo") or "").strip().lower() == "extrair_texto"
         ]
-        learned_state_records = [
-            {
-                "state_id": state_id,
-                "page_ref": str(step.get("page_ref") or "main"),
-                "signature": dict(signature or {}),
-            }
-            for step in robust_steps
+        learned_state_records: list[dict[str, Any]] = []
+        seen_state_ids: set[str] = set()
+        for step in robust_steps:
             for state_id, signature in (
                 (str(step.get("before_state_id") or ""), step.get("page_signature_before") or {}),
                 (str(step.get("after_state_id") or ""), step.get("page_signature_after") or {}),
-            )
-            if state_id
-        ]
+            ):
+                if not state_id or state_id in seen_state_ids:
+                    continue
+                seen_state_ids.add(state_id)
+                learned_state_records.append(
+                    {
+                        "state_id": state_id,
+                        "page_ref": str(step.get("page_ref") or "main"),
+                        "signature": dict(signature or {}),
+                    }
+                )
 
         extraction_targets = [
             str(step.get("nome") or "").strip()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any
 from urllib.parse import urlsplit
+import json
 
 
 def graph_metadata_available(action: dict[str, Any]) -> bool:
@@ -26,6 +27,76 @@ def graph_metadata_available(action: dict[str, Any]) -> bool:
     )
 
 
+def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
+    """Collapse structurally identical states without changing learned steps."""
+    result = dict(action)
+    raw_states = action.get("learned_states")
+    raw_transitions = action.get("learned_transitions")
+    if not isinstance(raw_states, list) or not isinstance(raw_transitions, list):
+        return result
+
+    canonical_by_key: dict[str, str] = {}
+    state_id_map: dict[str, str] = {}
+    states: list[dict[str, Any]] = []
+    for raw_state in raw_states:
+        if not isinstance(raw_state, dict):
+            continue
+        old_id = str(raw_state.get("state_id") or "")
+        if not old_id:
+            continue
+        signature = raw_state.get("signature") if isinstance(raw_state.get("signature"), dict) else {}
+        key = json.dumps(
+            {"page_ref": str(raw_state.get("page_ref") or "main"), "signature": signature},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        canonical_id = canonical_by_key.get(key)
+        if canonical_id is None:
+            canonical_id = old_id
+            canonical_by_key[key] = canonical_id
+            states.append({**raw_state, "state_id": canonical_id})
+        state_id_map[old_id] = canonical_id
+
+    transitions: list[dict[str, Any]] = []
+    seen_transitions: set[tuple[str, str, int | str, str]] = set()
+    for raw_transition in raw_transitions:
+        if not isinstance(raw_transition, dict):
+            continue
+        source = str(raw_transition.get("from_state_id") or raw_transition.get("from_state") or "")
+        target = str(raw_transition.get("to_state_id") or raw_transition.get("to_state") or "")
+        source = state_id_map.get(source, source)
+        target = state_id_map.get(target, target)
+        step_index = raw_transition.get("step_index", "")
+        key = (source, target, step_index, str(raw_transition.get("action_type") or ""))
+        if not source or not target or key in seen_transitions:
+            continue
+        seen_transitions.add(key)
+        transitions.append(
+            {
+                **raw_transition,
+                "from_state": source,
+                "to_state": target,
+                "from_state_id": source,
+                "to_state_id": target,
+            }
+        )
+
+    outputs = []
+    for raw_output in action.get("output_states") or []:
+        if not isinstance(raw_output, dict):
+            continue
+        output = dict(raw_output)
+        old_id = str(output.get("state_id") or "")
+        if old_id:
+            output["state_id"] = state_id_map.get(old_id, old_id)
+        outputs.append(output)
+    result["learned_states"] = states
+    result["learned_transitions"] = transitions
+    if isinstance(action.get("output_states"), list):
+        result["output_states"] = outputs
+    return result
+
+
 def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> int:
     score = 0
     if observation.get("host") and observation.get("host") == signature.get("host"):
@@ -34,9 +105,20 @@ def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> 
         score += 3
     if observation.get("title") and signature.get("title") and observation["title"] == signature["title"]:
         score += 2
-    expected_selector = str(signature.get("selector") or "")
-    if expected_selector and expected_selector in set(observation.get("visible_selectors") or []):
-        score += 5
+    raw_expected_selectors = signature.get("stable_selectors", [])
+    if not isinstance(raw_expected_selectors, list):
+        raw_expected_selectors = []
+    expected_selectors = {str(item).strip() for item in raw_expected_selectors if str(item).strip()}
+    observed_selectors = set(observation.get("visible_selectors") or [])
+    if expected_selectors:
+        overlap = expected_selectors & observed_selectors
+        score += min(8, len(overlap) * 2)
+        if overlap and len(overlap) >= max(1, min(3, len(expected_selectors))):
+            score += 3
+    else:
+        expected_selector = str(signature.get("selector") or "")
+        if expected_selector and expected_selector in observed_selectors:
+            score += 5
     return score
 
 
@@ -116,9 +198,18 @@ async def observe_browser_pages(context: Any, states: list[dict[str, Any]]) -> l
     selector_by_state: dict[str, set[str]] = {}
     for state in states:
         signature = state.get("signature") if isinstance(state, dict) else {}
-        selector = str((signature or {}).get("selector") or "")
-        if selector:
-            selector_by_state.setdefault(str(state.get("page_ref") or "main"), set()).add(selector)
+        selectors = (signature or {}).get("stable_selectors") or []
+        if not isinstance(selectors, list):
+            selectors = []
+        output_selector = str((signature or {}).get("output_selector") or "").strip()
+        if output_selector:
+            selectors = [*selectors, output_selector]
+        if not selectors:
+            selector = str((signature or {}).get("selector") or "")
+            selectors = [selector] if selector else []
+        for selector in selectors:
+            if selector:
+                selector_by_state.setdefault(str(state.get("page_ref") or "main"), set()).add(str(selector))
     observations: list[dict[str, Any]] = []
     for page in [item for item in getattr(context, "pages", []) if not item.is_closed()]:
         url = str(getattr(page, "url", "") or "")

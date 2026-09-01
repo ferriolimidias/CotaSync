@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from backend.services.learned_graph import (
+    canonicalize_graph_metadata,
     find_graph_path,
     graph_metadata_available,
     match_observation_to_learned_state,
@@ -42,6 +43,25 @@ class FakePage:
 
 
 class LearnedGraphTests(unittest.TestCase):
+    def test_canonicalization_reuses_same_structural_state_and_keeps_self_loop(self) -> None:
+        action = {
+            "execution_model": "learned_graph",
+            "learned_states": [
+                {"state_id": "before", "page_ref": "main", "signature": {"host": "app.test", "path": "/form", "stable_selectors": ["#grupo"]}},
+                {"state_id": "after", "page_ref": "main", "signature": {"host": "app.test", "path": "/form", "stable_selectors": ["#grupo"]}},
+                {"state_id": "result", "page_ref": "main", "signature": {"host": "app.test", "path": "/form", "output_selector": "#resultado"}},
+            ],
+            "learned_transitions": [
+                {"from_state_id": "before", "to_state_id": "after", "step_index": 0, "action_type": "preencher"},
+                {"from_state_id": "after", "to_state_id": "result", "step_index": 1, "action_type": "clicar"},
+            ],
+            "output_states": [{"state_id": "result", "label": "Resultado"}],
+        }
+        canonical = canonicalize_graph_metadata(action)
+        self.assertEqual(len(canonical["learned_states"]), 2)
+        self.assertEqual(canonical["learned_transitions"][0]["from_state_id"], canonical["learned_transitions"][0]["to_state_id"])
+        self.assertEqual(canonical["output_states"][0]["state_id"], "result")
+
     def test_graph_metadata_and_bfs_path(self) -> None:
         action = {
             "execution_model": "learned_graph",
