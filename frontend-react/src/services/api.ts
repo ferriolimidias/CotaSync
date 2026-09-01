@@ -441,10 +441,16 @@ export async function saveExternalSystemConfig(input: ExternalSystemConfig) {
   return payload.external_system;
 }
 
-export async function openExternalLogin() {
-  return apiFetch<{ login_url: string; manual_login_required: boolean; browser_opened?: boolean }>(
+export async function openExternalLogin(force = false) {
+  return apiFetch<{
+    login_url?: string;
+    manual_login_required: boolean;
+    browser_opened?: boolean;
+    current_url?: string;
+    status?: "login_started" | "already_connected";
+  }>(
     "/api/v1/external-session/open-login",
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify({ force }) },
   );
 }
 

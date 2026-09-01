@@ -78,6 +78,34 @@ class ApiV1ContractTests(unittest.TestCase):
             self.assertEqual(validated.status_code, 200)
             self.assertIn("external_session", validated.json())
 
+    def test_open_login_does_not_navigate_connected_browser_without_force(self) -> None:
+        with authenticated_client("operator") as client, patch(
+            "backend.api.v1.desktop_browser_health",
+            return_value={"cdp_reachable": True, "version": "test"},
+        ), patch(
+            "backend.api.v1._external_session_status_from_browser",
+            new=AsyncMock(return_value="authenticated"),
+        ), patch(
+            "backend.api.v1._current_desktop_url",
+            new=AsyncMock(return_value="https://nwcweb.randonconsorcios.com.br/home"),
+        ), patch("backend.api.v1._navigate_desktop_browser", new=AsyncMock()) as navigate:
+            response = client.post("/api/v1/external-session/open-login")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["status"], "already_connected")
+            navigate.assert_not_awaited()
+
+    def test_open_login_force_navigates_explicitly(self) -> None:
+        with authenticated_client("operator") as client, patch(
+            "backend.api.v1.desktop_browser_health",
+            return_value={"cdp_reachable": True, "version": "test"},
+        ), patch(
+            "backend.api.v1._navigate_desktop_browser", new=AsyncMock()
+        ) as navigate:
+            response = client.post("/api/v1/external-session/open-login", json={"force": True})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["status"], "login_started")
+            navigate.assert_awaited_once()
+
     def test_batches_v1_idempotency_conflict_and_polling(self) -> None:
         payload = {
             "action_id": "numero-de-parcelas-pagas",

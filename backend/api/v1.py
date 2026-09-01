@@ -93,6 +93,10 @@ class ExternalSystemConfigPayload(BaseModel):
     expected_system_host: str = ""
 
 
+class ExternalSessionLoginPayload(BaseModel):
+    force: bool = False
+
+
 class ClientsCsvPayload(BaseModel):
     filename: str = "clientes.csv"
     csv_text: str = Field(min_length=1)
@@ -957,8 +961,11 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
     return {"status": "ok", "external_session": external_session}
 
 
-@router.post("/external-session/open-login", summary="Retorna URL de login configurada")
-async def external_session_open_login(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+@router.post("/external-session/open-login", summary="Inicia explicitamente o login externo")
+async def external_session_open_login(
+    payload: ExternalSessionLoginPayload | None = None,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
     config = load_current_external_system()
     login_url = str(config.get("external_login_url") or "")
     if not login_url:
@@ -966,11 +973,25 @@ async def external_session_open_login(_user: AuthUser = Depends(require_user)) -
     health = await desktop_browser_health()
     if not health.get("cdp_reachable"):
         raise _error(503, "BROWSER_UNAVAILABLE", "Desktop browser indisponivel.")
+    force = bool(payload and payload.force)
+    if not force and await _external_session_status_from_browser(config) == "authenticated":
+        current_url = await _current_desktop_url()
+        return {
+            "status": "already_connected",
+            "current_url": current_url,
+            "manual_login_required": True,
+            "browser_opened": False,
+        }
     try:
         await _navigate_desktop_browser(login_url)
     except Exception as exc:
         raise _error(503, "BROWSER_NAVIGATION_FAILED", "Nao foi possivel abrir a URL de login no navegador.") from exc
-    return {"status": "ok", "login_url": login_url, "manual_login_required": True, "browser_opened": True}
+    return {
+        "status": "login_started",
+        "login_url": login_url,
+        "manual_login_required": True,
+        "browser_opened": True,
+    }
 
 
 @router.post("/external-session/validate", summary="Valida configuração de sessão externa")

@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -63,9 +63,13 @@ function ConfigPage() {
       ),
   });
   const openLogin = useMutation({
-    mutationFn: openExternalLogin,
+    mutationFn: (force: boolean) => openExternalLogin(force),
     onSuccess: (result) => {
-      toast.message("Navegador aberto na URL de login configurada.");
+      toast.message(
+        result.status === "already_connected"
+          ? "A sessão externa já está conectada."
+          : "Navegador aberto na URL de login configurada.",
+      );
       void queryClient.invalidateQueries({ queryKey: ["external-session"] });
       void queryClient.invalidateQueries({ queryKey: ["browser"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
@@ -105,6 +109,7 @@ function ConfigPage() {
   }
 
   const loginConfigured = Boolean(form.external_login_url.trim());
+  const sessionStatus = external.data?.session_status;
 
   if (location.pathname === "/configuracoes/navegador") {
     return <Outlet />;
@@ -215,13 +220,20 @@ function ConfigPage() {
             </div>
 
             <div className="flex flex-col gap-2 border-t border-border pt-4 sm:flex-row sm:flex-wrap">
+              <Button className="w-full sm:w-auto" asChild>
+                <Link to="/configuracoes/navegador">
+                  <ExternalLink className="h-4 w-4" /> Abrir navegador
+                </Link>
+              </Button>
               <Button
                 className="w-full sm:w-auto"
-                onClick={() => openLogin.mutate()}
+                variant="outline"
+                onClick={() => openLogin.mutate(true)}
                 disabled={openLogin.isPending || !loginConfigured}
                 title={!loginConfigured ? "Salve uma URL de login primeiro." : undefined}
               >
-                <ExternalLink className="h-4 w-4" /> Abrir sessão para login
+                <ShieldCheck className="h-4 w-4" />
+                {sessionStatus === "authenticated" ? "Reiniciar login" : "Iniciar login"}
               </Button>
               <Button
                 className="w-full sm:w-auto"
