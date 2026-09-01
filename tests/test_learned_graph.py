@@ -9,6 +9,7 @@ from backend.services.learned_graph import (
     graph_metadata_available,
     match_observation_to_learned_state,
     observe_browser_pages,
+    ordered_graph_path,
 )
 
 
@@ -95,6 +96,15 @@ class LearnedGraphTests(unittest.TestCase):
         )
         self.assertEqual(match["status"], "matched")
         self.assertEqual(match["state_id"], "main-before")
+
+    def test_ordered_path_keeps_same_state_transitions(self) -> None:
+        transitions = [
+            {"sequence_index": 0, "from_state_id": "s1", "to_state_id": "s1", "step_index": 0},
+            {"sequence_index": 1, "from_state_id": "s1", "to_state_id": "s1", "step_index": 1},
+            {"sequence_index": 2, "from_state_id": "s1", "to_state_id": "s2", "step_index": 2},
+        ]
+        path = ordered_graph_path(transitions, "s1", "s2")
+        self.assertEqual([item["step_index"] for item in path or []], [0, 1, 2])
 
     def test_graph_metadata_and_bfs_path(self) -> None:
         action = {

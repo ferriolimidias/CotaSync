@@ -37,6 +37,8 @@ from backend.services.learned_graph import (
     graph_target_state,
     match_observation_to_learned_state,
     observe_browser_pages,
+    ordered_graph_path,
+    transition_satisfied,
 )
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
@@ -1273,7 +1275,7 @@ async def executar_acao_rapida(
                         return current_match
                     if current_match.get("status") == "matched" and _replan_attempts < 2:
                         target_state_id = graph_target_state(action_config)
-                        if find_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id) is not None:
+                        if ordered_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id) is not None:
                             checkpoint_diagnostics.append(
                                 {
                                     "checkpoint": "before_step_graph_replan",
@@ -1556,7 +1558,7 @@ async def executar_acao_rapida(
                             ],
                         },
                     )
-                graph_path = find_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id)
+                graph_path = ordered_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id)
                 if graph_path is None:
                     raise SessionGuardianError(
                         "Não existe um caminho aprendido entre o estado atual e o resultado da ação.",
@@ -1755,6 +1757,16 @@ async def executar_acao_rapida(
 
                         for i in range(quantidade):
                             if await elementos.nth(i).is_visible():
+                                valor_atual = await elementos.nth(i).input_value(timeout=5000)
+                                if graph_mode and transition_satisfied(
+                                    {"action_type": tipo_acao}, passo,
+                                    current_value=valor_atual,
+                                    expected_value=valor_final,
+                                ):
+                                    trace_item["status"] = "skipped_satisfied"
+                                    trace_item["satisfaction"] = "input_value_matches"
+                                    sucesso_preencher = True
+                                    break
                                 await elementos.nth(i).fill(valor_final, timeout=5000)
                                 valor_lido = await elementos.nth(i).input_value(timeout=5000)
                                 if valor_lido != valor_final:

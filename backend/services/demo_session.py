@@ -3024,6 +3024,7 @@ class DemoSessionManager:
                 "from_state_id": str(step.get("graph_from_state_id") or step.get("before_state_id") or ""),
                 "to_state_id": str(step.get("after_state_id") or ""),
                 "page_ref": str(step.get("page_ref") or "main"),
+                "sequence_index": index,
                 "step_index": index,
                 "action_type": str(step.get("tipo") or ""),
                 "opens_page": bool(step.get("opened_new_page")),

@@ -102,6 +102,7 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
         transitions.append(
             {
                 **raw_transition,
+                "sequence_index": raw_transition.get("sequence_index", raw_transition.get("step_index", len(transitions))),
                 "from_state": source,
                 "to_state": target,
                 "from_state_id": source,
@@ -120,6 +121,21 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
         outputs.append(output)
     result["learned_states"] = states
     result["learned_transitions"] = transitions
+    for steps_key in ("robust_steps", "passos_playwright"):
+        raw_steps = action.get(steps_key)
+        if not isinstance(raw_steps, list):
+            continue
+        remapped_steps = []
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, dict):
+                remapped_steps.append(raw_step)
+                continue
+            step = dict(raw_step)
+            for key in ("before_state_id", "after_state_id", "graph_from_state_id"):
+                if step.get(key):
+                    step[key] = state_id_map.get(str(step[key]), str(step[key]))
+            remapped_steps.append(step)
+        result[steps_key] = remapped_steps
     if isinstance(action.get("output_states"), list):
         result["output_states"] = outputs
     return result
@@ -210,6 +226,43 @@ def find_graph_path(
     return None
 
 
+def ordered_graph_path(
+    transitions: list[dict[str, Any]],
+    current_state_id: str,
+    target_state_id: str,
+) -> list[dict[str, Any]] | None:
+    """Plan the demonstrated sequence while retaining same-state transitions."""
+    if current_state_id == target_state_id:
+        return []
+    ordered = sorted(
+        (item for item in transitions if isinstance(item, dict)),
+        key=lambda item: (
+            int(item.get("sequence_index"))
+            if str(item.get("sequence_index", "")).lstrip("-").isdigit()
+            else int(item.get("step_index", 0) or 0),
+        ),
+    )
+    path: list[dict[str, Any]] = []
+    state_id = str(current_state_id)
+    started = False
+    for transition in ordered:
+        source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+        target = str(transition.get("to_state_id") or transition.get("to_state") or "")
+        if not started:
+            if source != state_id:
+                continue
+            started = True
+        elif source != state_id:
+            return None
+        if not target:
+            return None
+        path.append(transition)
+        state_id = target
+        if state_id == target_state_id:
+            return path
+    return None
+
+
 def graph_target_state(action: dict[str, Any]) -> str:
     outputs = action.get("output_states")
     if isinstance(outputs, list):
@@ -222,6 +275,20 @@ def graph_target_state(action: dict[str, Any]) -> str:
         if transitions and isinstance(transitions[-1], dict)
         else ""
     )
+
+
+def transition_satisfied(
+    transition: dict[str, Any],
+    step: dict[str, Any],
+    *,
+    current_value: str | None = None,
+    expected_value: str | None = None,
+) -> bool:
+    """Check only deterministic facts available for reentry."""
+    action_type = str(transition.get("action_type") or step.get("tipo") or "").strip().lower()
+    if action_type in {"preencher", "fill", "selecionar", "select"}:
+        return current_value is not None and expected_value is not None and current_value == expected_value
+    return False
 
 
 async def observe_browser_pages(context: Any, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
