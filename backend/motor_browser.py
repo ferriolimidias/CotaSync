@@ -901,12 +901,21 @@ def is_learned_client_query_transition(
     return str(steps[step_index].get("tipo") or steps[step_index].get("type") or "").strip().lower() == "clicar" and later_action_steps
 
 
+class ReplanRequired(RuntimeError):
+    def __init__(self, step_index: int, workflow_state: str) -> None:
+        super().__init__(f"replan_required:{step_index}:{workflow_state}")
+        self.step_index = step_index
+        self.workflow_state = workflow_state
+
+
 async def executar_acao_rapida(
     nome_acao: str,
     passos_playwright: list,
     dados_variaveis: dict | None = None,
     action_config: dict[str, Any] | None = None,
     run_id: str = "",
+    *,
+    _replan_attempts: int = 0,
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Desktop replay), repetindo os passos técnicos.
@@ -1186,6 +1195,55 @@ async def executar_acao_rapida(
                         session_failure_message(result.state.state, result.state.reason),
                         diagnostics,
                     )
+
+            async def replan_before_step(page_to_check: Any, step_index: int) -> dict[str, Any] | None:
+                """Reobserve a page that changed after planning, with a bounded restart."""
+                # Some legacy callers provide the steps only as the positional
+                # replay argument. Without learned step metadata there is no
+                # safe alternative plan to calculate.
+                if not (
+                    isinstance(action_config, dict)
+                    and (action_config.get("robust_steps") or action_config.get("passos_playwright"))
+                ):
+                    return None
+                observed = await guardian.observe_workflow_state(
+                    page_to_check,
+                    action_config,
+                    authenticated=await is_authenticated(page_to_check),
+                )
+                plan = await plan_workflow_observation(observed)
+                planned_index = plan.get("resume_index")
+                current_state = str(observed.get("workflow_state") or "unknown")
+                if planned_index is not None and int(planned_index) == step_index:
+                    return observed
+                if planned_index is not None and _replan_attempts < 2:
+                    checkpoint_diagnostics.append(
+                        {
+                            "checkpoint": "before_step_replan",
+                            "result": "replanned",
+                            "from_step_index": step_index,
+                            "to_step_index": int(planned_index),
+                            "workflow_state": current_state,
+                            "current_url": (observed.get("evidence") or {}).get("current_url", ""),
+                        }
+                    )
+                    raise ReplanRequired(int(planned_index), current_state)
+                diagnostics = dict(observed.get("evidence") or {})
+                diagnostics.update(
+                    {
+                        "reason": plan.get("reason") or current_state,
+                        "workflow_state": current_state,
+                        "operator_action_required": current_state.startswith("microsoft_")
+                        or current_state in {"unknown", "unknown_microsoft_auth"},
+                        "retryable": current_state in {"unknown", "system_loading", "system_unresponsive"}
+                        or current_state.startswith("microsoft_"),
+                        "checkpoint_diagnostics": checkpoint_diagnostics,
+                    }
+                )
+                raise SessionGuardianError(
+                    session_failure_message(current_state, str(plan.get("reason") or current_state)),
+                    diagnostics,
+                )
 
             async def validate_or_allow_learned_microsoft_step(
                 page_to_check: Any,
@@ -1481,6 +1539,7 @@ async def executar_acao_rapida(
                 step_trace.append(trace_item)
 
                 logging.info(f"[DESKTOP-REPLAY] Executando passo: {tipo_acao} em {seletor}")
+                await replan_before_step(page, step_index)
                 await run_session_checkpoint(page, "before_step_auth_check", current_step_diagnostic)
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
@@ -1816,6 +1875,15 @@ async def executar_acao_rapida(
                 result_payload["status"] = "erro"
                 result_payload["motivo"] = "A consulta foi concluída, mas não foi possível capturar o resultado."
             return result_payload
+    except ReplanRequired:
+        return await executar_acao_rapida(
+            nome_acao,
+            passos_playwright,
+            dados_variaveis,
+            action_config,
+            run_id,
+            _replan_attempts=_replan_attempts + 1,
+        )
     except SessionGuardianError as exc:
         _LOGGER.info(f"[ERRO] Sessao invalida na execução rápida '{nome_acao}': {exc}")
         exc.diagnostics.setdefault("step_trace", step_trace)
