@@ -2934,6 +2934,7 @@ class DemoSessionManager:
                     "opener_page_ref": str(event.get("opener_page_ref") or ""),
                     "before_state_id": str(event.get("before_state_id") or ""),
                     "after_state_id": str(event.get("after_state_id") or ""),
+                    "graph_from_state_id": "",
                     "page_signature_before": dict(event.get("page_signature_before") or {}),
                     "page_signature_after": dict(event.get("page_signature_after") or {}),
                     "download_detected": bool(event.get("download_detected")),
@@ -2973,12 +2974,17 @@ class DemoSessionManager:
             ):
                 step["transition_role"] = "client_query"
 
+        previous_state_id = ""
+        for step in robust_steps:
+            step["graph_from_state_id"] = previous_state_id or str(step.get("before_state_id") or "")
+            previous_state_id = str(step.get("after_state_id") or step.get("before_state_id") or "")
+
         learned_transitions = [
             {
                 "transition_id": f"transition_{index + 1}",
-                "from_state": str(step.get("before_state_id") or ""),
+                "from_state": str(step.get("graph_from_state_id") or step.get("before_state_id") or ""),
                 "to_state": str(step.get("after_state_id") or ""),
-                "from_state_id": str(step.get("before_state_id") or ""),
+                "from_state_id": str(step.get("graph_from_state_id") or step.get("before_state_id") or ""),
                 "to_state_id": str(step.get("after_state_id") or ""),
                 "page_ref": str(step.get("page_ref") or "main"),
                 "step_index": index,

@@ -1243,7 +1243,11 @@ async def executar_acao_rapida(
                         diagnostics,
                     )
 
-            async def replan_before_step(page_to_check: Any, step_index: int) -> dict[str, Any] | None:
+            async def replan_before_step(
+                page_to_check: Any,
+                step_index: int,
+                step_to_execute: dict[str, Any] | None = None,
+            ) -> dict[str, Any] | None:
                 """Reobserve a page that changed after planning, with a bounded restart."""
                 # Some legacy callers provide the steps only as the positional
                 # replay argument. Without learned step metadata there is no
@@ -1253,6 +1257,42 @@ async def executar_acao_rapida(
                     and (action_config.get("robust_steps") or action_config.get("passos_playwright"))
                 ):
                     return None
+                if graph_mode:
+                    graph_states = action_config.get("learned_states") or []
+                    graph_transitions = action_config.get("learned_transitions") or []
+                    observations = await observe_browser_pages(context, graph_states)
+                    current_match = match_observation_to_learned_state(observations, graph_states)
+                    expected_state = str(
+                        (step_to_execute or {}).get("graph_from_state_id")
+                        or (step_to_execute or {}).get("before_state_id")
+                        or ""
+                    )
+                    if current_match.get("status") == "matched" and (
+                        not expected_state or str(current_match.get("state_id") or "") == expected_state
+                    ):
+                        return current_match
+                    if current_match.get("status") == "matched" and _replan_attempts < 2:
+                        target_state_id = graph_target_state(action_config)
+                        if find_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id) is not None:
+                            checkpoint_diagnostics.append(
+                                {
+                                    "checkpoint": "before_step_graph_replan",
+                                    "result": "replanned",
+                                    "from_step_index": step_index,
+                                    "current_state_id": current_match["state_id"],
+                                    "expected_state_id": expected_state,
+                                }
+                            )
+                            raise ReplanRequired(step_index, str(current_match["state_id"]))
+                    raise SessionGuardianError(
+                        "Não foi possível confirmar o estado aprendido antes da transição.",
+                        {
+                            "reason": current_match.get("reason") or "learned_state_mismatch",
+                            "execution_model": "learned_graph",
+                            "expected_state_id": expected_state,
+                            "state_candidates": current_match.get("candidates", []),
+                        },
+                    )
                 observed = await guardian.observe_workflow_state(
                     page_to_check,
                     action_config,
@@ -1643,7 +1683,7 @@ async def executar_acao_rapida(
                 step_trace.append(trace_item)
 
                 logging.info(f"[DESKTOP-REPLAY] Executando passo: {tipo_acao} em {seletor}")
-                await replan_before_step(page, step_index)
+                await replan_before_step(page, step_index, passo)
                 await run_session_checkpoint(page, "before_step_auth_check", current_step_diagnostic)
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
