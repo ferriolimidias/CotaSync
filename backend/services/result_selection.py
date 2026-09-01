@@ -174,6 +174,57 @@ class _TableParser(HTMLParser):
             self._current_cell["text_parts"].append(data)
 
 
+class _SelectedElementParser(HTMLParser):
+    """Lê o texto/value do elemento identificado pelo selector CSS persistido."""
+
+    def __init__(self, element_id: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.element_id = element_id
+        self.depth = 0
+        self.tag = ""
+        self.value = ""
+        self.text_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.depth:
+            self.depth += 1
+            return
+        attributes = dict(attrs)
+        if attributes.get("id") != self.element_id:
+            return
+        self.tag = tag.lower()
+        self.value = str(attributes.get("value") or "")
+        self.depth = 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.depth:
+            self.depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.depth and data:
+            self.text_parts.append(data)
+
+
+def _read_persisted_selector(dom: Any, selector: Any) -> dict[str, str] | None:
+    """Resolve selectors de id sem executar o parser heurístico de contexto."""
+    raw_selector = clean_text(selector)
+    match = re.fullmatch(r"#([A-Za-z_][\w:.-]*)", raw_selector)
+    if not match:
+        return None
+    parser = _SelectedElementParser(match.group(1))
+    try:
+        parser.feed(str(dom or ""))
+    except Exception:
+        return None
+    if not parser.tag:
+        return None
+    return {
+        "value": clean_text(parser.value if parser.tag in {"input", "textarea", "select"} else " ".join(parser.text_parts)),
+        "tag": parser.tag,
+        "selector": raw_selector,
+    }
+
+
 def _parse_tables(html_text: Any) -> list[list[list[dict[str, Any]]]]:
     parser = _TableParser()
     try:
@@ -463,6 +514,35 @@ def extract_with_contract(final_page_dom: Any, final_page_text: Any, contract: d
     if not isinstance(contract, dict) or not contract:
         return {"value": "", "needs_attention": False, "source": "none"}
     source = f"{final_page_dom or ''}\n{final_page_text or ''}"
+    selector_data = contract.get("selector_data") if isinstance(contract.get("selector_data"), dict) else {}
+    primary_selector = selector_data.get("primary") if isinstance(selector_data, dict) else ""
+    selected = _read_persisted_selector(final_page_dom, primary_selector)
+    if selected is not None:
+        value = selected["value"]
+        normalization = contract.get("normalization") if isinstance(contract.get("normalization"), dict) else {}
+        normalization_type = str(normalization.get("type") or "exact_text")
+        normalized = normalize_extracted_value(value, normalization_type)
+        if normalized.get("needs_attention"):
+            return {
+                "value": "",
+                "needs_attention": True,
+                "validation": {"valid": False, "needs_attention": True, "reason": normalized.get("reason")},
+                "candidate": {"selector": selected["selector"], "value": value},
+                "source": "visual_contract_selector",
+            }
+        value = str(normalized.get("value") if normalization_type == "digits_only" else value)
+        validation = validate_candidate_value(
+            value,
+            str(contract.get("value_type") or infer_value_type(contract.get("target_name"), contract.get("screen_label"), value)),
+            contract.get("avoid_labels") if isinstance(contract.get("avoid_labels"), list) else None,
+        )
+        return {
+            "value": value,
+            "needs_attention": bool(validation["needs_attention"]),
+            "validation": validation,
+            "candidate": {"selector": selected["selector"], "value": value, "tag": selected["tag"], "selected": True},
+            "source": "visual_contract_selector",
+        }
     target = clean_text(contract.get("target_name") or "")
     label = clean_text(contract.get("screen_label") or contract.get("selected_text") or target)
     candidates = detect_extraction_candidates(source, target_name=target, screen_label=label, limit=50)

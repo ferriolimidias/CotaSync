@@ -1636,7 +1636,10 @@ async def executar_acao_rapida(
             except Exception:
                 final_page_text = ""
             try:
-                final_page_dom = (await page.content()).strip()[:50000]
+                # Preserve the selected visual element even on large legacy pages.
+                # The extraction contract is resolved against this snapshot, so a
+                # fixed-size prefix could discard a valid selector near the end.
+                final_page_dom = (await page.content()).strip()
             except Exception:
                 final_page_dom = ""
             query_result_confirmed = query_result_matches_inputs(final_page_text, dados_variaveis)
@@ -1699,6 +1702,8 @@ async def executar_acao_rapida(
             }
             if extraction_attention:
                 result_payload["extraction_attention"] = extraction_attention
+                result_payload["status"] = "erro"
+                result_payload["motivo"] = "A consulta foi concluída, mas não foi possível capturar o resultado."
             return result_payload
     except SessionGuardianError as exc:
         _LOGGER.info(f"[ERRO] Sessao invalida na execução rápida '{nome_acao}': {exc}")

@@ -137,6 +137,28 @@ class LearningExtractionFlowTests(unittest.TestCase):
             result = extract_with_contract(html, "", contract)
             self.assertEqual(result["value"], value)
 
+    def test_exact_visual_selector_wins_over_noisy_neighboring_context(self) -> None:
+        contract = {
+            "target_name": "O número de parcelas",
+            "screen_label": "Dif. Grupo: 0 0,0000 Qtd. Pcls. Pagas:",
+            "selection_type": "block_text",
+            "value_type": "decimal_percent",
+            "normalization": {"type": "digits_only"},
+            "selector_data": {"primary": "#ctl00_Conteudo_lblQT_Pcls_Paga"},
+        }
+        html_template = """
+        {prefix}
+        <div>0 | 0,0000 | Qtd. Pcls. Pagas: |
+          <span id="ctl00_Conteudo_lblQT_Pcls_Paga">{value}</span> |
+          Qtd. Pcls. Furo: | 000 | Lance Mín: 0,0000%
+        </div>
+        """
+        for expected in ("034", "027", "005"):
+            result = extract_with_contract(html_template.format(prefix="x" * 60000, value=expected), "", contract)
+            self.assertEqual(result["value"], expected)
+            self.assertFalse(result["needs_attention"])
+            self.assertEqual(result["source"], "visual_contract_selector")
+
     def test_invalid_candidate_cannot_be_saved_as_success(self) -> None:
         empty = build_extraction_contract(
             target_name="Quantidade de parcelas",
