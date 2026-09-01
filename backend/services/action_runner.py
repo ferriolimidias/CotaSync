@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -81,6 +82,29 @@ def mask_variables(variables: dict[str, Any]) -> dict[str, Any]:
     for key, value in variables.items():
         masked[str(key)] = mask_value_for_key(str(key), value)
     return masked
+
+
+def _json_safe(value: Any, *, depth: int = 0) -> Any:
+    """Keep browser diagnostics persistable without leaking Playwright objects."""
+    if depth > 12:
+        return "[diagnostic depth limit]"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item, depth=depth + 1) for item in value]
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        url = getattr(value, "url", None)
+        if isinstance(url, str):
+            return {"type": type(value).__name__, "url": url[:1000]}
+        return f"[{type(value).__name__}]"
 
 
 def _safe_runtime_file_metadata(value: Any) -> dict[str, Any] | None:
@@ -204,7 +228,7 @@ def _safe_result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
                 if safe_file is not None:
                     payload[key] = safe_file
             else:
-                payload[key] = value
+                payload[key] = _json_safe(value)
     return payload or None
 
 
@@ -407,7 +431,7 @@ def _build_error_payload(
         "next_step_expected_selector": raw_diagnostics.get("next_step_expected_selector", ""),
         "next_step_expected_text": raw_diagnostics.get("next_step_expected_text", ""),
         "input_variables": mask_variables(request.variables),
-        "diagnostics": raw_diagnostics,
+        "diagnostics": _json_safe(raw_diagnostics),
         "retryable": bool(raw_diagnostics.get("retryable", False)),
     }
     for key in (
@@ -440,9 +464,9 @@ def _build_error_payload(
     ):
         value = raw_diagnostics.get(key)
         if value is not None and value != [] and value != {}:
-            payload[key] = value
+            payload[key] = _json_safe(value)
     if "selector_diagnostics" not in payload:
-        payload["selector_diagnostics"] = [step_source or {"reason": reason, "current_url": current_url, "current_host": current_host}]
+        payload["selector_diagnostics"] = [_json_safe(step_source or {"reason": reason, "current_url": current_url, "current_host": current_host})]
     return payload
 
 
