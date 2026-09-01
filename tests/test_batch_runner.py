@@ -43,6 +43,8 @@ def fake_action() -> ActionDetail:
         steps_count=1,
         has_url=True,
         browser_mode="desktop_browser",
+        output_schema={"Número de parcelas": {"type": "string"}},
+        extraction_targets=["Número de parcelas"],
     )
 
 
@@ -233,14 +235,25 @@ class BatchRunnerTests(unittest.TestCase):
         batch = {
             "batch_id": "batch-1",
             "action_id": "numero-de-parcelas-pagas",
+            "result_columns": [
+                {"key": "client_name", "label": "Nome"},
+                {"key": "grupo", "label": "Grupo"},
+                {"key": "cota", "label": "Cota"},
+                {"key": "versao", "label": "Versão"},
+                {"key": "Número de parcelas", "label": "Número de parcelas"},
+                {"key": "status", "label": "Status"},
+            ],
             "rows": [
                 {
+                    "id": "item-1",
                     "index": 1,
+                    "client_name": "Cliente 1",
+                    "client_fields": {"grupo": "935", "cota": "110", "versao": "00"},
                     "variables": {"grupo": "935", "grupo_3": "00"},
                     "status": "success",
+                    "status_label": "Sucesso",
                     "run_id": "run-1",
-                    "operational_summary": "032",
-                    "dados_extraidos": {"Qtd. Pcls. Pagas": "032"},
+                    "output_values": {"Número de parcelas": "032"},
                     "error_message": "",
                     "started_at": "inicio",
                     "finished_at": "fim",
@@ -250,9 +263,29 @@ class BatchRunnerTests(unittest.TestCase):
 
         csv_text = batch_results_csv(batch)
 
-        self.assertIn("batch_id,row_index,client_id,client_name,client_group,action_id,status,run_id", csv_text)
-        self.assertIn('""grupo_3"": ""00""', csv_text)
-        self.assertIn("Qtd. Pcls. Pagas", csv_text)
+        self.assertIn("Nome,Grupo,Cota,Versão,Número de parcelas,Status", csv_text)
+        self.assertIn("Cliente 1,935,110,00,032,Sucesso", csv_text)
+
+    def test_batch_output_label_is_dynamic_and_screen_label_is_not_exported(self) -> None:
+        action = fake_action()
+        action.output_schema = {"Valor da parcela": {"type": "string"}}
+        action.extraction_targets = ["Valor da parcela"]
+        rendered = batch_results_csv({
+            "result_columns": [
+                {"key": "client_name", "label": "Nome"},
+                {"key": "Valor da parcela", "label": "Valor da parcela"},
+                {"key": "status", "label": "Status"},
+            ],
+            "rows": [{
+                "client_name": "Cliente 1",
+                "output_values": {"Valor da parcela": "123,45"},
+                "status": "success",
+                "status_label": "Sucesso",
+            }],
+        })
+        self.assertIn("Nome,Valor da parcela,Status", rendered)
+        self.assertIn("Cliente 1,\"123,45\",Sucesso", rendered)
+        self.assertNotIn("Qtd. Pcls. Pagas", rendered)
 
     def test_create_batch_from_client_group_saves_client_metadata(self) -> None:
         validation = {

@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 import logging
+import re
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,11 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal
 from backend.services.actions_repository import find_action
-from backend.services.clients_repository import resolve_variables_for_action, validate_clients_for_action
+from backend.services.clients_repository import (
+    get_client_display_fields,
+    resolve_variables_for_action,
+    validate_clients_for_action,
+)
 
 logger = logging.getLogger("cotasync.batch_runner")
 
@@ -269,9 +275,87 @@ def _batch_final_status(items: list[BatchItem], *, cancel_requested: bool = Fals
     return BATCH_STATUS_FAILED
 
 
-def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem]) -> dict[str, Any]:
+def _human_output_label(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    text = re.sub(r"^(?:retornar|exibir|mostrar)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:o|a|os|as)\s+", "", text, flags=re.IGNORECASE)
+    return text.strip(" :;|-\t")
+
+
+def _output_definitions(action: Any) -> list[dict[str, str]]:
+    """Deriva os outputs humanos da definição publicada, sem conhecer uma ação específica."""
+    candidates: list[str] = []
+    output_schema = getattr(action, "output_schema", {}) if action is not None else {}
+    if isinstance(output_schema, dict):
+        candidates.extend(str(key).strip() for key, value in output_schema.items() if key and not (isinstance(value, dict) and value.get("type") == "file"))
+    if not candidates and action is not None:
+        candidates.extend(str(value).strip() for value in (getattr(action, "extraction_targets", []) or []) if value)
+    if not candidates and action is not None:
+        for value in (getattr(action, "extraction_target", ""), getattr(action, "expected_result", "")):
+            if str(value or "").strip():
+                candidates.append(str(value).strip())
+                break
+    if action is not None and not candidates:
+        review = getattr(action, "extraction_review", {}) or {}
+        if isinstance(review, dict):
+            candidates.append(str(review.get("label") or review.get("target_name") or review.get("screen_label") or "Resultado").strip())
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for key in candidates:
+        label = _human_output_label(key) or "Resultado"
+        label = label[:1].upper() + label[1:]
+        normalized = _normalize_output_key(label)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append({"key": key, "label": label})
+    return result or [{"key": "resultado", "label": "Resultado"}]
+
+
+def _normalize_output_key(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode().casefold()
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+
+
+def _output_value(extracted: Any, definition: dict[str, str]) -> str:
+    if not isinstance(extracted, dict):
+        return ""
+    expected = {_normalize_output_key(definition.get("key")), _normalize_output_key(definition.get("label"))}
+    for key, value in extracted.items():
+        if _normalize_output_key(key) in expected:
+            return "" if value is None else str(value)
+    if len(extracted) == 1:
+        value = next(iter(extracted.values()))
+        return "" if value is None else str(value)
+    return ""
+
+
+def _status_label(status: Any) -> str:
+    return {
+        ITEM_STATUS_SUCCESS: "Sucesso",
+        ITEM_STATUS_ERROR: "Erro",
+        ITEM_STATUS_INTERRUPTED: "Interrompido",
+        ITEM_STATUS_CANCELLED: "Cancelado",
+        ITEM_STATUS_RUNNING: "Executando",
+        ITEM_STATUS_PENDING: "Na fila",
+    }.get(str(status or ""), str(status or ""))
+
+
+def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem], *, action: Any = None, clients: dict[str, Any] | None = None) -> dict[str, Any]:
     metadata = db_batch.metadata_json or {}
     current = next((item for item in items if item.status == ITEM_STATUS_RUNNING), None)
+    output_definitions = _output_definitions(action)
+    has_errors = any(_normalize_item_status(item.status) == ITEM_STATUS_ERROR for item in items)
+    result_columns = [
+        {"key": "client_name", "label": "Nome"},
+        {"key": "grupo", "label": "Grupo"},
+        {"key": "cota", "label": "Cota"},
+        {"key": "versao", "label": "Versão"},
+        *output_definitions,
+        {"key": "status", "label": "Status"},
+    ]
+    if has_errors:
+        result_columns.append({"key": "error_message", "label": "Motivo do erro"})
     return {
         "batch_id": db_batch.id,
         "action_id": db_batch.action_id or "",
@@ -302,23 +386,37 @@ def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem]) -> dict[str, Any]:
         "action_key": metadata.get("action_key", ""),
         "action_name": metadata.get("action_name", metadata.get("action_key", "")),
         "client_ids": metadata.get("client_ids", []),
+        "result_columns": result_columns,
+        "output_definitions": output_definitions,
         "rows": [
-            {
+            (lambda client, result_payload, extracted: {
+                "id": item.id,
                 "index": item.position,
                 "client_id": item.client_id or "",
-                "client_name": "",
-                "client_group": "",
+                "client_name": client.name if client is not None else "",
+                "client_group": client.client_group if client is not None else "",
+                "client_fields": get_client_display_fields({"variables": client.variables or {}}) if client is not None else {
+                    "grupo": str((item.input_variables or {}).get("grupo") or ""),
+                    "cota": str((item.input_variables or {}).get("cota") or ""),
+                    "versao": str((item.input_variables or {}).get("versao") or ""),
+                },
                 "status": _normalize_item_status(item.status),
+                "status_label": _status_label(item.status),
                 "run_id": item.run_id or "",
                 "variables": item.input_variables or {},
-                "result_payload": item.result_data or {},
-                "dados_extraidos": (item.result_data or {}).get("dados_extraidos", {}) if isinstance(item.result_data, dict) else {},
+                "result_payload": result_payload,
+                "dados_extraidos": extracted,
+                "output_values": {definition["key"]: _output_value(extracted, definition) for definition in output_definitions},
                 "error_message": (item.error_data or {}).get("message", ""),
                 "error_data": item.error_data or {},
                 "started_at": item.started_at.isoformat() if item.started_at else None,
                 "finished_at": item.finished_at.isoformat() if item.finished_at else None,
                 "retry_count": item.retry_count,
-            }
+            })(
+                (clients or {}).get(item.client_id),
+                item.result_data or {},
+                (item.result_data or {}).get("dados_extraidos", {}) if isinstance(item.result_data, dict) else {},
+            )
             for item in items
         ],
     }
@@ -331,7 +429,12 @@ def load_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, Any]
             return None
         items = session.query(BatchItem).filter(BatchItem.batch_id == db_batch.id).order_by(BatchItem.position).all()
         _recount_batch(session, db_batch.id)
-        return _batch_to_dict(db_batch, items)
+        action = find_action(db_batch.action_id) if db_batch.action_id else None
+        clients = {
+            client.id: client
+            for client in session.query(DbClient).filter(DbClient.id.in_([item.client_id for item in items if item.client_id])).all()
+        }
+        return _batch_to_dict(db_batch, items, action=action, clients=clients)
 
 
 def list_batches(*, limit: int = 20, batches_dir: Path | None = None) -> list[dict[str, Any]]:
@@ -730,48 +833,28 @@ def recover_stale_batches(stale_seconds: int) -> int:
 
 def batch_results_csv(batch: dict[str, Any]) -> str:
     output = io.StringIO()
-    columns = [
-        "batch_id",
-        "row_index",
-        "client_id",
-        "client_name",
-        "client_group",
-        "action_id",
-        "status",
-        "run_id",
-        "variables_json",
-        "operational_summary",
-        "dados_extraidos_json",
-        "error_message",
-        "started_at",
-        "finished_at",
-    ]
+    result_columns = batch.get("result_columns") if isinstance(batch.get("result_columns"), list) else []
+    if not result_columns:
+        result_columns = [{"key": "client_name", "label": "Nome"}, {"key": "status", "label": "Status"}]
+    columns = [str(column.get("label") or column.get("key") or "") for column in result_columns if isinstance(column, dict)]
     writer = csv.DictWriter(output, fieldnames=columns)
     writer.writeheader()
     rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
     for row in rows:
         if not isinstance(row, dict):
             continue
-        result_payload = row.get("result_payload") if isinstance(row.get("result_payload"), dict) else {}
-        dados_extraidos = row.get("dados_extraidos")
-        if not isinstance(dados_extraidos, dict) and isinstance(result_payload, dict):
-            dados_extraidos = result_payload.get("dados_extraidos")
+        client_fields = row.get("client_fields") if isinstance(row.get("client_fields"), dict) else {}
+        output_values = row.get("output_values") if isinstance(row.get("output_values"), dict) else {}
+        values = {
+            "client_name": row.get("client_name", ""),
+            "grupo": client_fields.get("grupo", ""),
+            "cota": client_fields.get("cota", ""),
+            "versao": client_fields.get("versao", ""),
+            "status": row.get("status_label") or _status_label(row.get("status")),
+            "error_message": row.get("error_message", ""),
+            **output_values,
+        }
         writer.writerow(
-            {
-                "batch_id": batch.get("batch_id", ""),
-                "row_index": row.get("index", ""),
-                "client_id": row.get("client_id", ""),
-                "client_name": row.get("client_name", ""),
-                "client_group": row.get("client_group", ""),
-                "action_id": batch.get("action_id", ""),
-                "status": row.get("status", ""),
-                "run_id": row.get("run_id", ""),
-                "variables_json": json.dumps(row.get("variables") or {}, ensure_ascii=False, sort_keys=True),
-                "operational_summary": row.get("operational_summary", ""),
-                "dados_extraidos_json": json.dumps(dados_extraidos or {}, ensure_ascii=False, sort_keys=True),
-                "error_message": row.get("error_message", ""),
-                "started_at": row.get("started_at", ""),
-                "finished_at": row.get("finished_at", ""),
-            }
+            {str(column.get("label") or column.get("key") or ""): values.get(str(column.get("key") or ""), "") for column in result_columns if isinstance(column, dict)}
         )
     return output.getvalue()

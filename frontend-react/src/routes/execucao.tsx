@@ -31,7 +31,7 @@ import {
   getRun,
   runAction,
 } from "@/services/api";
-import type { ApiBatch, ApiClient, ApiRun } from "@/types/api";
+import type { ApiBatch, ApiClient, ApiRun, BatchItem } from "@/types/api";
 import { actionIsExecutable, batchStatusLabel, runStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/execucao")({
@@ -167,6 +167,31 @@ function ExecucaoPage() {
   const progress = batch?.total_items
     ? Math.round((batch.processed_items / batch.total_items) * 100)
     : 0;
+  const batchRows = batch?.rows || batch?.items || batch?.results || [];
+  const batchTableColumns = useMemo<Column<BatchItem>[]>(
+    () => (batch?.result_columns || []).map((column) => ({
+      key: column.key,
+      header: column.label,
+      cell: (item) => {
+        if (column.key === "client_name") return item.client_name || item.client_id || "-";
+        if (column.key === "grupo" || column.key === "cota" || column.key === "versao") {
+          return item.client_fields?.[column.key as "grupo" | "cota" | "versao"] || "-";
+        }
+        if (column.key === "status") {
+          return (
+            <BadgeStatus
+              tone={item.status === "success" ? "success" : item.status === "error" ? "error" : "info"}
+            >
+              {item.status_label || batchStatusLabel(item.status || "queued")}
+            </BadgeStatus>
+          );
+        }
+        if (column.key === "error_message") return item.error_message || "-";
+        return item.output_values?.[column.key] || "-";
+      },
+    })),
+    [batch?.result_columns],
+  );
 
   return (
     <AppShell title="Execução" subtitle="Consultas individuais e lotes sequenciais">
@@ -392,11 +417,8 @@ function ExecucaoPage() {
                   Cancelar execução conclui o cliente atual e cancela os próximos.
                 </p>
                 <DataTable
-                  columns={itemColumns}
-                  data={(batch.items || batch.results || []).map((item, index) => ({
-                    id: item.id || `${index}`,
-                    ...item,
-                  }))}
+                  columns={batchTableColumns.length ? batchTableColumns : itemColumns}
+                  data={batchRows.map((item, index) => ({ id: item.id || `${index}`, ...item }))}
                   empty="Resultados aparecerão conforme o worker processar a fila."
                 />
               </>

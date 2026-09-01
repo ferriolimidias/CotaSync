@@ -138,13 +138,24 @@ export type DashboardPayload = {
 
 export type BatchItem = {
   id?: string;
+  index?: number;
   client_id?: string;
   client_name?: string;
+  client_fields?: { grupo?: string; cota?: string; versao?: string };
   status?: "queued" | "running" | "success" | "error" | "interrupted" | "cancelled";
+  status_label?: string;
+  output_values?: Record<string, string>;
+  dados_extraidos?: Record<string, string>;
   result_summary?: string | null;
+  result_payload?: Record<string, unknown>;
   error_message?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+};
+
+export type BatchResultColumn = {
+  key: string;
+  label: string;
 };
 
 export type ApiBatch = {
@@ -166,6 +177,9 @@ export type ApiBatch = {
   finished_at?: string | null;
   items?: BatchItem[];
   results?: BatchItem[];
+  rows?: BatchItem[];
+  result_columns?: BatchResultColumn[];
+  output_definitions?: BatchResultColumn[];
 };
 
 export type BrowserStatus = {
