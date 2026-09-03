@@ -1577,9 +1577,10 @@ async def executar_acao_rapida(
                     sequence_index = int(transition.get("sequence_index", transition.get("step_index", -1)) or -1)
                     if sequence_index < 0:
                         continue
+                    configured_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
                     step_for_transition = (
-                        action_config.get("robust_steps", action_config.get("passos_playwright", []))[sequence_index]
-                        if sequence_index < len(action_config.get("robust_steps", action_config.get("passos_playwright", [])))
+                        configured_steps[sequence_index]
+                        if isinstance(configured_steps, list) and sequence_index < len(configured_steps)
                         else {}
                     )
                     satisfaction = await evaluate_transition_satisfaction(
