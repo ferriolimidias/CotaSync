@@ -226,7 +226,30 @@ export type LearningSession = {
   variables?: string[];
   result_selection?: Record<string, unknown>;
   extraction_review?: Record<string, unknown>;
+  outputs?: Array<Record<string, unknown>>;
+  learning_mode?: "free_action" | "spreadsheet";
+  data_source_id?: string | null;
   [key: string]: unknown;
+};
+
+export type DataSourceField = {
+  id: string;
+  field_id: string;
+  display_name: string;
+  source_column_reference: string;
+  semantic_role?: string | null;
+  data_type: string;
+  active: boolean;
+};
+
+export type DataSource = {
+  id: string;
+  name: string;
+  type: "excel" | "google_sheets";
+  source_type: string;
+  status: string;
+  schema: Record<string, unknown>;
+  fields: DataSourceField[];
 };
 
 export type ResultSelectionCandidate = {

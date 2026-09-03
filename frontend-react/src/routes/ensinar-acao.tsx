@@ -20,6 +20,7 @@ import {
   captureLearningResultSelection,
   confirmLearningResultSelection,
   getLearningSession,
+  getDataSources,
   saveLearnedAction,
   startLearningRecording,
   startLearningResultSelection,
@@ -42,6 +43,10 @@ function EnsinarPage() {
   const [selectionCandidate, setSelectionCandidate] = useState<ResultSelectionCandidate | null>(null);
   const [resultConfirmed, setResultConfirmed] = useState(false);
   const [normalization, setNormalization] = useState<"exact_text" | "digits_only">("exact_text");
+  const [learningMode, setLearningMode] = useState<"free_action" | "spreadsheet">("free_action");
+  const [dataSourceId, setDataSourceId] = useState<string>("");
+  const [dataSourceFieldId, setDataSourceFieldId] = useState<string>("");
+  const dataSources = useQuery({ queryKey: ["data-sources"], queryFn: getDataSources });
   const session = useQuery({
     queryKey: ["learning-session", sessionId],
     queryFn: () => getLearningSession(sessionId as string),
@@ -61,7 +66,7 @@ function EnsinarPage() {
   });
   const start = useMutation({
     mutationFn: (id: string) =>
-      startLearningRecording(id, { name, objective, expected_result: expected }),
+      startLearningRecording(id, { name, objective, expected_result: expected, learning_mode: learningMode, data_source_id: dataSourceId || null }),
     onSuccess: () => toast.success("Gravação iniciada."),
   });
   const stop = useMutation({
@@ -150,6 +155,9 @@ function EnsinarPage() {
         selection_type: String(selectionCandidate?.type || selectionCandidate?.candidate_type || "field_value"),
         candidate: selectionCandidate as ResultSelectionCandidate,
         normalization,
+        destination: learningMode === "spreadsheet" && dataSourceId && dataSourceFieldId
+          ? { type: "data_source_field", data_source_id: dataSourceId, field_id: dataSourceFieldId }
+          : null,
       }),
     onSuccess: () => {
       setResultConfirmed(true);
@@ -190,6 +198,30 @@ function EnsinarPage() {
             <CardTitle className="text-base">Dados da ação</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="grid gap-2">
+              <Label>O que você quer ensinar?</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <Button type="button" variant={learningMode === "free_action" ? "default" : "outline"} onClick={() => setLearningMode("free_action")}>
+                  Ação livre
+                </Button>
+                <Button type="button" variant={learningMode === "spreadsheet" ? "default" : "outline"} onClick={() => setLearningMode("spreadsheet")}>
+                  Atualizar planilha
+                </Button>
+              </div>
+              {learningMode === "spreadsheet" && <p className="text-xs text-muted-foreground">A fonte e os campos são definidos em Clientes. O vínculo será associado ao resultado selecionado.</p>}
+              {learningMode === "spreadsheet" && (
+                <>
+                  <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={dataSourceId} onChange={(event) => { setDataSourceId(event.target.value); setDataSourceFieldId(""); }}>
+                    <option value="">Selecione a fonte</option>
+                    {(dataSources.data || []).map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
+                  </select>
+                  <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={dataSourceFieldId} onChange={(event) => setDataSourceFieldId(event.target.value)} disabled={!dataSourceId}>
+                    <option value="">Selecione o campo a atualizar</option>
+                    {(dataSources.data || []).find((source) => source.id === dataSourceId)?.fields.map((field) => <option key={field.id} value={field.id}>{field.display_name}</option>)}
+                  </select>
+                </>
+              )}
+            </div>
             <div className="grid gap-2">
               <Label>Nome</Label>
               <Input
@@ -300,6 +332,17 @@ function EnsinarPage() {
                 <BadgeStatus tone="warning">
                   <Crosshair className="h-3 w-3" /> Clique no campo que deseja capturar
                 </BadgeStatus>
+              )}
+              {Array.isArray(session.data?.outputs) && session.data.outputs.length > 0 && selectionMode !== "preview" && (
+                <div className="space-y-2 text-foreground">
+                  <p className="text-xs font-medium uppercase text-muted-foreground">Resultados selecionados</p>
+                  {session.data.outputs.map((output, index) => (
+                    <div className="flex items-center gap-2" key={String(output.output_id || index)}>
+                      <Check className="h-4 w-4 text-emerald-600" />
+                      <span>{String(output.label || `Resultado ${index + 1}`)}</span>
+                    </div>
+                  ))}
+                </div>
               )}
               {selectionCandidate && selectionMode === "preview" && (
                 <div className="space-y-3 text-foreground">

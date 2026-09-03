@@ -296,6 +296,8 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         output_type=str(data.get("output_type") or "").strip(),
         output_schema=data.get("output_schema", {}) if isinstance(data.get("output_schema"), dict) else {},
         extraction_targets=extraction_targets,
+        outputs=data.get("outputs", []) if isinstance(data.get("outputs"), list) else [],
+        output_states=data.get("output_states", []) if isinstance(data.get("output_states"), list) else [],
         user_result_summary_template=str(data.get("user_result_summary_template") or "").strip() or None,
         ai_result_summary_enabled=bool(data.get("ai_result_summary_enabled", True)),
         ai_recovery_enabled=bool(data.get("ai_recovery_enabled", False)),
@@ -458,6 +460,10 @@ def _action_contracts_from_payload(action_id: str, version_id: str, data: dict[s
     overlay = data.get("reviewed_overlay") if isinstance(data.get("reviewed_overlay"), dict) else {}
     review = data.get("extraction_review") if isinstance(data.get("extraction_review"), dict) else {}
     target_values: list[dict[str, Any]] = []
+    outputs = data.get("outputs") if isinstance(data.get("outputs"), list) else []
+    for output in outputs:
+        if isinstance(output, dict) and isinstance(output.get("contract"), dict):
+            target_values.append({**output["contract"], "destination": output.get("destination")})
     for source in (overlay.get("extraction") if isinstance(overlay, dict) else None, review):
         if isinstance(source, dict) and source:
             target_values.append(source)

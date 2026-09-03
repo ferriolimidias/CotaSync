@@ -53,6 +53,31 @@ class Client(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class DataSource(Base):
+    __tablename__ = "data_sources"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    source_type: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    schema_metadata: Mapped[dict[str, Any]] = mapped_column("schema_metadata", JSONB, default=dict)
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DataSourceField(Base):
+    __tablename__ = "data_source_fields"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    data_source_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    source_column_reference: Mapped[str] = mapped_column(String(255))
+    semantic_role: Mapped[str | None] = mapped_column(String(64))
+    data_type: Mapped[str] = mapped_column(String(32), default="string")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class Action(Base):
     __tablename__ = "actions"
     id: Mapped[str] = mapped_column(String(255), primary_key=True)

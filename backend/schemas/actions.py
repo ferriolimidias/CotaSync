@@ -43,6 +43,8 @@ class ActionSummary(BaseModel):
     output_type: str = ""
     output_schema: dict[str, Any] = Field(default_factory=dict)
     extraction_targets: list[str] = Field(default_factory=list)
+    outputs: list[dict[str, Any]] = Field(default_factory=list)
+    output_states: list[dict[str, Any]] = Field(default_factory=list)
     user_result_summary_template: str | None = None
     ai_result_summary_enabled: bool = True
     ai_recovery_enabled: bool = False

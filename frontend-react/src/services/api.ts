@@ -17,6 +17,7 @@ import type {
   LearningResultSelection,
   ResultSelectionCandidate,
   WorkerStatus,
+  DataSource,
 } from "@/types/api";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
@@ -167,6 +168,11 @@ export async function getClients(
   if (params.search?.trim()) query.set("search", params.search.trim());
   const payload = await apiFetch<{ clients: ApiPage<ApiClient> }>(`/api/v1/clients?${query}`);
   return payload.clients;
+}
+
+export async function getDataSources() {
+  const payload = await apiFetch<{ data_sources: DataSource[] }>("/api/v1/data-sources");
+  return payload.data_sources;
 }
 
 export async function createClient(input: {
@@ -475,7 +481,7 @@ export async function getLearningSession(id: string) {
 
 export async function startLearningRecording(
   id: string,
-  input: { name: string; objective: string; expected_result: string },
+  input: { name: string; objective: string; expected_result: string; learning_mode?: string; data_source_id?: string | null },
 ) {
   const payload = await apiFetch<{ session: LearningSession }>(
     `/api/v1/learning/sessions/${id}/recording/start`,
@@ -522,6 +528,7 @@ export async function confirmLearningResultSelection(
     selection_type: string;
     candidate: ResultSelectionCandidate;
     normalization: "exact_text" | "digits_only";
+    destination?: Record<string, unknown> | null;
   },
 ) {
   return apiFetch<LearningResultSelection>(`/api/v1/learning/sessions/${id}/result-selection/confirm`, {

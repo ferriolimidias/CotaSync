@@ -31,6 +31,8 @@ class SaveDemoActionRequest(BaseModel):
     return_downloaded_file: bool = False
     requires_authenticated_session: bool | None = None
     action_timeout_seconds: int | None = None
+    learning_mode: str = "free_action"
+    data_source_id: str | None = None
 
 
 class GuidedLearningRequest(BaseModel):
@@ -42,6 +44,8 @@ class GuidedLearningRequest(BaseModel):
     output_type: str = "apenas abrir tela"
     ai_result_summary_enabled: bool = True
     ai_recovery_enabled: bool = False
+    learning_mode: str = "free_action"
+    data_source_id: str | None = None
 
 
 class OperatorFillRequest(BaseModel):

@@ -59,6 +59,7 @@ from backend.services.result_selection import (
     extract_with_contract,
     host_from_url,
 )
+from backend.services.learning_trace import build_raw_learning_trace
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -982,6 +983,7 @@ class DemoBrowserSession:
     last_recorded_event_session_id: str = ""
     result_selection: dict[str, Any] = field(default_factory=dict)
     extraction_review: dict[str, Any] = field(default_factory=dict)
+    outputs: list[dict[str, Any]] = field(default_factory=list)
     page_refs: dict[int, str] = field(default_factory=dict)
     next_page_ref_number: int = 2
 
@@ -1088,6 +1090,7 @@ class DemoSessionManager:
         candidate: dict[str, Any] | None = None,
         selection_type: str = "",
         normalization: str = "",
+        destination: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session = self._get(session_id)
         current_selection = session.result_selection if isinstance(session.result_selection, dict) else {}
@@ -1120,6 +1123,25 @@ class DemoSessionManager:
             }
             raise DemoSessionError(messages.get(reason, "Resultado selecionado não é confiável para extração."))
         session.extraction_review = contract
+        latest_event = session.learning_events[-1] if session.learning_events else {}
+        output_page_ref = str(contract.get("page_ref") or latest_event.get("page_ref") or "main")
+        output_state_id = str(contract.get("state_id") or latest_event.get("after_state_id") or latest_event.get("before_state_id") or "")
+        output = {
+            "output_id": f"output_{len(session.outputs) + 1}",
+            "label": str(contract.get("target_name") or target_name),
+            "type": "data",
+            "preferred_selector": str((contract.get("selector_data") or {}).get("primary") or contract.get("selector_hint") or ""),
+            "fallback_selectors": list((contract.get("selector_data") or {}).get("candidates") or []),
+            "page_ref": output_page_ref,
+            "state_id": output_state_id,
+            "read_mode": str(contract.get("read_mode") or "text"),
+            "normalization": contract.get("normalization") or normalization or "exact_text",
+            "example_value": str(contract.get("example_value") or ""),
+            "destination": destination,
+            "contract": dict(contract),
+        }
+        session.outputs = [item for item in session.outputs if str(item.get("output_id")) != output["output_id"]]
+        session.outputs.append(output)
         session.result_selection = {
             "status": "confirmed",
             "captured": current_selection.get("captured") if isinstance(current_selection.get("captured"), dict) else {},
@@ -1127,7 +1149,7 @@ class DemoSessionManager:
             "contract": contract,
             "confirmed_at": _utc_now(),
         }
-        return {"status": "confirmed", "extraction_review": contract, "result_selection": session.result_selection}
+        return {"status": "confirmed", "extraction_review": contract, "output": output, "outputs": list(session.outputs), "result_selection": session.result_selection}
 
     async def cancel_result_selection(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
@@ -1149,6 +1171,27 @@ class DemoSessionManager:
             "contract": previous_contract,
         }
         return session.result_selection
+
+    async def learning_outputs(self, session_id: str) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._get(session_id).outputs]
+
+    async def rename_learning_output(self, session_id: str, output_id: str, label: str) -> dict[str, Any]:
+        session = self._get(session_id)
+        clean_label = str(label or "").strip()
+        if not clean_label:
+            raise DemoSessionError("Informe um nome para o resultado.")
+        for output in session.outputs:
+            if str(output.get("output_id")) == output_id:
+                output["label"] = clean_label
+                if isinstance(output.get("contract"), dict):
+                    output["contract"]["target_name"] = clean_label
+                return dict(output)
+        raise DemoSessionError("Resultado não encontrado.")
+
+    async def remove_learning_output(self, session_id: str, output_id: str) -> list[dict[str, Any]]:
+        session = self._get(session_id)
+        session.outputs = [item for item in session.outputs if str(item.get("output_id")) != output_id]
+        return [dict(item) for item in session.outputs]
 
     async def detect_result_candidates(
         self,
@@ -1993,6 +2036,9 @@ class DemoSessionManager:
             "confirmed_page_title": session.confirmed_page_title,
             "result_selection": dict(session.result_selection),
             "extraction_review": dict(session.extraction_review),
+            "outputs": [dict(item) for item in session.outputs],
+            "learning_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
+            "data_source_id": session.guided_learning.get("data_source_id"),
         }
 
     async def operator_diagnostics(self, session_id: str) -> dict[str, Any]:
@@ -2626,6 +2672,8 @@ class DemoSessionManager:
             "output_type": output_type,
             "ai_result_summary_enabled": bool(raw_instruction.get("ai_result_summary_enabled", True)),
             "ai_recovery_enabled": bool(raw_instruction.get("ai_recovery_enabled", False)),
+            "learning_mode": str(raw_instruction.get("learning_mode") or "free_action"),
+            "data_source_id": str(raw_instruction.get("data_source_id") or "") or None,
         }
         session.output_candidates = []
         session.learning_synthesis = {}
@@ -2641,6 +2689,7 @@ class DemoSessionManager:
         session.last_recorded_event_session_id = ""
         session.result_selection = {}
         session.extraction_review = {}
+        session.outputs = []
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -2888,6 +2937,8 @@ class DemoSessionManager:
         return_downloaded_file: bool = False,
         requires_authenticated_session: bool | None = None,
         action_timeout_seconds: int | None = None,
+        learning_mode: str = "free_action",
+        data_source_id: str | None = None,
     ) -> dict[str, Any]:
         session = self._get(session_id)
         action_name = str(name or "").strip()
@@ -3090,6 +3141,34 @@ class DemoSessionManager:
             if selected_output_state:
                 output_states.append(selected_output_state)
 
+        outputs = [dict(item) for item in session.outputs if isinstance(item, dict)]
+        if selected_extraction_contract and not outputs:
+            outputs.append({
+                "output_id": "output_1",
+                "label": str(selected_extraction_contract.get("target_name") or "resultado"),
+                "type": "data",
+                "contract": dict(selected_extraction_contract),
+                "destination": None,
+            })
+        known_output_ids = {str(item.get("output_id")) for item in output_states}
+        for output in outputs:
+            output_id = str(output.get("output_id") or f"output_{len(output_states) + 1}")
+            state_id = str(output.get("state_id") or "")
+            page_ref = str(output.get("page_ref") or "main")
+            if output_id in known_output_ids or not state_id:
+                continue
+            output_states.append({
+                "output_id": output_id,
+                "label": str(output.get("label") or output_id),
+                "type": str(output.get("type") or "data"),
+                "page_ref": page_ref,
+                "state_id": state_id,
+                "step_index": output.get("step_index"),
+                "locator": str(output.get("preferred_selector") or output.get("selector") or ""),
+                "read_mode": str(output.get("read_mode") or "text"),
+                "normalization": output.get("normalization") or "exact_text",
+            })
+
         previous_state_id = ""
         for step in robust_steps:
             step["graph_from_state_id"] = previous_state_id or str(step.get("before_state_id") or "")
@@ -3219,6 +3298,7 @@ class DemoSessionManager:
             "robust_steps": robust_steps,
             "execution_model": "learned_graph" if learned_state_records and learned_transitions else "legacy_linear",
             "output_states": output_states,
+            "outputs": outputs,
             "page_refs": sorted({str(step.get("page_ref") or "main") for step in robust_steps}),
             "learned_states": learned_state_records,
             "learned_transitions": learned_transitions,
@@ -3238,6 +3318,15 @@ class DemoSessionManager:
             "ai_review_summary": "",
             "final_summary_instruction": "",
             "extraction_review": selected_extraction_contract,
+            "outputs": list(session.outputs),
+            "raw_learning_trace": build_raw_learning_trace(learning_events),
+            "learning_mode": (
+                "desktop_browser_mechanical_ai_reviewed"
+                if session.browser_mode == "desktop_browser"
+                else "human_demo_mechanical_ai_reviewed"
+            ),
+            "teaching_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
+            "data_source_id": session.guided_learning.get("data_source_id"),
             "objective": objective_text,
             "input_description": input_description_text,
             "expected_result": expected_result_text,
@@ -3268,6 +3357,12 @@ class DemoSessionManager:
                 "desktop_browser_mechanical_ai_reviewed"
                 if session.browser_mode == "desktop_browser"
                 else "human_demo_mechanical_ai_reviewed"
+            ),
+            "teaching_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
+            "capture_mode": (
+                "desktop_browser_mechanical"
+                if session.browser_mode == "desktop_browser"
+                else "human_demo_mechanical"
             ),
             "browser_mode": session.browser_mode,
             "external_system_name": session.external_system_name,
@@ -3372,6 +3467,8 @@ class DemoSessionManager:
             "output_type": learned_action["output_type"],
             "output_schema": learned_action["output_schema"],
             "extraction_targets": learned_action["extraction_targets"],
+            "outputs": learned_action.get("outputs", []),
+            "output_states": learned_action.get("output_states", []),
             "user_result_summary_template": learned_action["user_result_summary_template"],
             "ai_result_summary_enabled": learned_action["ai_result_summary_enabled"],
             "ai_recovery_enabled": learned_action["ai_recovery_enabled"],

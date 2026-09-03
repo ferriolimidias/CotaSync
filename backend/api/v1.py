@@ -49,6 +49,9 @@ from backend.services.clients_repository import (
 from backend.services.demo_session import DemoSessionError, demo_session_manager
 from backend.services.desktop_view_tokens import create_token, validate_token
 from backend.services.external_systems import ExternalSystemConfigError, load_current_external_system, save_current_external_system
+from backend.services.data_sources import DataSourceError, get_source, list_sources, upsert_source_schema
+from backend.services.learning_ai import LearningAIObserver
+from backend.services.learning_trace import build_raw_learning_trace
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.worker import latest_worker_status
 from playwright.async_api import async_playwright
@@ -100,6 +103,13 @@ class ExternalSessionLoginPayload(BaseModel):
 class ClientsCsvPayload(BaseModel):
     filename: str = "clientes.csv"
     csv_text: str = Field(min_length=1)
+
+
+class DataSourceSchemaPayload(BaseModel):
+    name: str
+    source_type: str
+    headers: list[str] = Field(default_factory=list)
+    configuration: dict[str, Any] = Field(default_factory=dict)
 
 
 MAX_CLIENTS_CSV_BYTES = 1_048_576
@@ -560,7 +570,34 @@ async def clients_import(payload: ClientsCsvPayload, _user: AuthUser = Depends(r
                 created += 1
     except ClientsRepositoryError as exc:
         raise _error(422, "CLIENTS_CSV_IMPORT_FAILED", str(exc)) from exc
-    return {"status": "ok", "import_result": {"created": created, "updated": updated, "count": len(clients), "clients": clients}}
+    headers = next(csv.reader(io.StringIO(csv_text)), [])
+    try:
+        source = upsert_source_schema(name=payload.filename or "Clientes", source_type="excel", headers=headers)
+    except DataSourceError:
+        source = None
+    return {"status": "ok", "import_result": {"created": created, "updated": updated, "count": len(clients), "clients": clients, "data_source": source}}
+
+
+@router.get("/data-sources", summary="Lista fontes de dados configuradas")
+async def data_sources_list(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    return {"status": "ok", "data_sources": list_sources()}
+
+
+@router.get("/data-sources/{source_id}", summary="Mostra schema de uma fonte")
+async def data_source_detail(source_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    source = get_source(source_id)
+    if source is None:
+        raise _error(404, "DATA_SOURCE_NOT_FOUND", "Fonte de dados não encontrada.")
+    return {"status": "ok", "data_source": source}
+
+
+@router.post("/data-sources/schema", summary="Registra ou atualiza schema de fonte")
+async def data_source_schema(payload: DataSourceSchemaPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        source = upsert_source_schema(name=payload.name, source_type=payload.source_type, headers=payload.headers, configuration=payload.configuration)
+    except DataSourceError as exc:
+        raise _error(422, "DATA_SOURCE_SCHEMA_INVALID", str(exc)) from exc
+    return {"status": "ok", "data_source": source}
 
 
 @router.get("/clients/export.csv", summary="Exporta clientes em CSV")
@@ -722,7 +759,7 @@ async def learning_create_session(_user: AuthUser = Depends(require_user)) -> di
 @router.get("/learning/sessions/{session_id}", summary="Estado da sessão de aprendizado")
 async def learning_get_session(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        session = await demo_session_manager.status(session_id)
+        session = await demo_session_manager.recording_diagnostics(session_id)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
     return {"status": "ok", "session": session}
@@ -757,6 +794,11 @@ class LearningResultSelectionConfirmRequest(BaseModel):
     selection_type: str = ""
     candidate: dict[str, Any] = Field(default_factory=dict)
     normalization: str = "exact_text"
+    destination: dict[str, Any] | None = None
+
+
+class LearningOutputRenameRequest(BaseModel):
+    label: str
 
 
 @router.post("/learning/sessions/{session_id}/result-selection/start", summary="Inicia seleção visual do resultado")
@@ -803,6 +845,7 @@ async def learning_confirm_result_selection(
             candidate=payload.candidate,
             selection_type=payload.selection_type,
             normalization=payload.normalization,
+            destination=payload.destination,
         )
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
@@ -819,6 +862,44 @@ async def learning_cancel_result_selection(
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
     return {"status": "ok", "selection": result}
+
+
+@router.get("/learning/sessions/{session_id}/outputs", summary="Lista resultados do aprendizado")
+async def learning_outputs(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        outputs = await demo_session_manager.learning_outputs(session_id)
+    except DemoSessionError as exc:
+        raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
+    return {"status": "ok", "outputs": outputs}
+
+
+@router.post("/learning/sessions/{session_id}/ai-analysis", summary="Analisa aprendizado sem publicar automaticamente")
+async def learning_ai_analysis(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        session = await demo_session_manager.recording_diagnostics(session_id)
+    except DemoSessionError as exc:
+        raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
+    events = session.get("learning_events") if isinstance(session.get("learning_events"), list) else []
+    analysis = LearningAIObserver().analyze(build_raw_learning_trace(events))
+    return {"status": "ok", "analysis": analysis, "published": False}
+
+
+@router.patch("/learning/sessions/{session_id}/outputs/{output_id}", summary="Renomeia resultado do aprendizado")
+async def learning_output_rename(session_id: str, output_id: str, payload: LearningOutputRenameRequest, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        output = await demo_session_manager.rename_learning_output(session_id, output_id, payload.label)
+    except DemoSessionError as exc:
+        raise _error(404, "LEARNING_OUTPUT_NOT_FOUND", str(exc)) from exc
+    return {"status": "ok", "output": output}
+
+
+@router.delete("/learning/sessions/{session_id}/outputs/{output_id}", summary="Remove resultado do aprendizado")
+async def learning_output_remove(session_id: str, output_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        outputs = await demo_session_manager.remove_learning_output(session_id, output_id)
+    except DemoSessionError as exc:
+        raise _error(404, "LEARNING_OUTPUT_NOT_FOUND", str(exc)) from exc
+    return {"status": "ok", "outputs": outputs}
 
 
 @router.post("/learning/sessions/{session_id}/actions", summary="Publica ação aprendida")
@@ -842,6 +923,8 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
             return_downloaded_file=payload.return_downloaded_file,
             requires_authenticated_session=payload.requires_authenticated_session,
             action_timeout_seconds=payload.action_timeout_seconds,
+            learning_mode=payload.learning_mode,
+            data_source_id=payload.data_source_id,
         )
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_SAVE_ERROR", str(exc)) from exc

@@ -36,8 +36,9 @@ import {
   importClientsCsv,
   previewClientsCsv,
   updateClient,
+  getDataSources,
 } from "@/services/api";
-import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow } from "@/types/api";
+import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, DataSource } from "@/types/api";
 
 export const Route = createFileRoute("/clientes")({
   head: () => ({ meta: [{ title: "Clientes — CotaSync" }] }),
@@ -70,6 +71,7 @@ const emptyForm: FormState = {
 function ClientesPage() {
   const queryClient = useQueryClient();
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => getClients({ pageSize: 200 }) });
+  const dataSources = useQuery({ queryKey: ["data-sources"], queryFn: getDataSources });
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("all");
   const [status, setStatus] = useState("all");
@@ -255,6 +257,18 @@ function ClientesPage() {
               <Plus className="h-4 w-4" /> Novo cliente
             </Button>
           </div>
+        </CardContent>
+      </Card>
+      <Card className="mb-4">
+        <CardContent className="flex flex-wrap items-center gap-3 p-4">
+          <div>
+            <p className="text-sm font-medium">Fonte de dados</p>
+            <p className="text-xs text-muted-foreground">Schema reutilizado durante o ensino de ações.</p>
+          </div>
+          <div className="ml-auto text-sm text-muted-foreground">
+            {dataSources.isLoading ? "Carregando..." : dataSources.data?.length ? dataSources.data.map((source: DataSource) => `${source.name} (${source.type})`).join(" · ") : "Nenhuma fonte importada"}
+          </div>
+          <span className="text-xs text-muted-foreground">Google Sheets: integração em breve</span>
         </CardContent>
       </Card>
 
