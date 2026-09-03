@@ -3112,10 +3112,23 @@ class DemoSessionManager:
                 "condition": dict(step.get("branch_condition") or {}) if isinstance(step.get("branch_condition"), dict) else {},
                 "opens_page": bool(step.get("opened_new_page")),
                 "new_page_ref": str(step.get("page_ref") or "") if step.get("opened_new_page") else "",
+                "preconditions": (
+                    [{"kind": "selector_present", "selector": str(step.get("seletor") or "")}]
+                    if str(step.get("seletor") or "").strip()
+                    else []
+                ),
                 "postcondition": {
                     "expected_url_after": str(step.get("expected_url_after") or ""),
                     "expected_selector_after": str(step.get("expected_selector_after") or ""),
                 },
+                "postconditions": (
+                    ([{"kind": "selector_present", "selector": str(step.get("expected_selector_after") or "")}]
+                     if str(step.get("expected_selector_after") or "").strip() else [])
+                    + ([{"kind": "url", "value": str(step.get("expected_url_after") or "")}]
+                       if str(step.get("expected_url_after") or "").strip()
+                       and str(step.get("expected_url_after") or "") != str(step.get("expected_url_before") or "")
+                       else [])
+                ),
             }
             for index, step in enumerate(robust_steps)
             if isinstance(step, dict)

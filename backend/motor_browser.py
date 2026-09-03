@@ -38,6 +38,8 @@ from backend.services.learned_graph import (
     match_observation_to_learned_state,
     observe_browser_pages,
     ordered_graph_path,
+    ordered_graph_suffix,
+    evaluate_transition_satisfaction,
     transition_satisfied,
 )
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
@@ -1559,6 +1561,43 @@ async def executar_acao_rapida(
                         },
                     )
                 graph_path = ordered_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id)
+                reentry_sequence_index: int | None = None
+                ordered_transitions = sorted(
+                    (item for item in graph_transitions if isinstance(item, dict)),
+                    key=lambda item: int(item.get("sequence_index", item.get("step_index", 0)) or 0),
+                )
+                # A canonical state can be both sides of a navigation click.
+                # In that case the state match alone cannot prove the click;
+                # use its learned postcondition to recover the cursor.
+                for transition in ordered_transitions:
+                    source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+                    target = str(transition.get("to_state_id") or transition.get("to_state") or "")
+                    if target != str(current_match["state_id"]) or source == target:
+                        continue
+                    sequence_index = int(transition.get("sequence_index", transition.get("step_index", -1)) or -1)
+                    if sequence_index < 0:
+                        continue
+                    step_for_transition = (
+                        action_config.get("robust_steps", action_config.get("passos_playwright", []))[sequence_index]
+                        if sequence_index < len(action_config.get("robust_steps", action_config.get("passos_playwright", [])))
+                        else {}
+                    )
+                    satisfaction = await evaluate_transition_satisfaction(
+                        current_match["evidence"]["page"],
+                        transition,
+                        step_for_transition,
+                        current_state_id=str(current_match["state_id"]),
+                    )
+                    if satisfaction == "unknown":
+                        raise SessionGuardianError(
+                            "Não foi possível confirmar o progresso da ação ao retomar o navegador.",
+                            {"reason": "transition_satisfaction_unknown", "transition_id": transition.get("transition_id"), "sequence_index": sequence_index},
+                        )
+                    if satisfaction != "satisfied":
+                        reentry_sequence_index = sequence_index
+                        break
+                if reentry_sequence_index is not None:
+                    graph_path = ordered_graph_suffix(graph_transitions, reentry_sequence_index, target_state_id)
                 if graph_path is None:
                     raise SessionGuardianError(
                         "Não existe um caminho aprendido entre o estado atual e o resultado da ação.",

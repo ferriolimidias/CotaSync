@@ -11,14 +11,17 @@ from backend.services.learned_graph import (
     match_observation_to_learned_state,
     observe_browser_pages,
     ordered_graph_path,
+    ordered_graph_suffix,
     transition_kind,
+    evaluate_transition_satisfaction,
 )
 from backend.services.demo_session import _attach_learned_output_state
 
 
 class FakeLocator:
-    def __init__(self, visible: bool) -> None:
+    def __init__(self, visible: bool, value: str = "") -> None:
         self.visible = visible
+        self.value = value
 
     @property
     def first(self) -> "FakeLocator":
@@ -30,11 +33,15 @@ class FakeLocator:
     async def is_visible(self) -> bool:
         return self.visible
 
+    async def input_value(self) -> str:
+        return self.value
+
 
 class FakePage:
-    def __init__(self, url: str, selectors: set[str]) -> None:
+    def __init__(self, url: str, selectors: set[str], values: dict[str, str] | None = None) -> None:
         self.url = url
         self.selectors = selectors
+        self.values = values or {}
 
     def is_closed(self) -> bool:
         return False
@@ -43,7 +50,7 @@ class FakePage:
         return "Learned page"
 
     def locator(self, selector: str) -> FakeLocator:
-        return FakeLocator(selector in self.selectors)
+        return FakeLocator(selector in self.selectors, self.values.get(selector, ""))
 
 
 class LearnedGraphTests(unittest.TestCase):
@@ -95,6 +102,26 @@ class LearnedGraphTests(unittest.TestCase):
             {"from_state_id": "s1", "to_state_id": "s3", "transition_kind": "branch", "branch_id": "choice"},
         ]
         self.assertEqual(len(branch_candidates(transitions, "s1")), 2)
+
+    def test_same_state_click_uses_postcondition_during_reentry(self) -> None:
+        transition = {
+            "from_state_id": "s1",
+            "to_state_id": "s1",
+            "postconditions": [{"kind": "selector_present", "selector": "#form"}],
+        }
+        before = FakePage("https://app.test/main", {"#button"})
+        after = FakePage("https://app.test/main", {"#button", "#form"})
+        self.assertEqual(asyncio.run(evaluate_transition_satisfaction(before, transition)), "not_satisfied")
+        self.assertEqual(asyncio.run(evaluate_transition_satisfaction(after, transition)), "satisfied")
+
+    def test_ordered_suffix_starts_at_unsatisfied_same_state_transition(self) -> None:
+        transitions = [
+            {"sequence_index": 0, "from_state_id": "s0", "to_state_id": "s1"},
+            {"sequence_index": 1, "from_state_id": "s1", "to_state_id": "s1"},
+            {"sequence_index": 2, "from_state_id": "s1", "to_state_id": "s2"},
+        ]
+        suffix = ordered_graph_suffix(transitions, 1, "s2")
+        self.assertEqual([item["sequence_index"] for item in suffix or []], [1, 2])
 
     def test_canonicalization_reuses_same_structural_state_and_keeps_self_loop(self) -> None:
         action = {

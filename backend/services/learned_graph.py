@@ -99,8 +99,7 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
         if not source or not target or key in seen_transitions:
             continue
         seen_transitions.add(key)
-        transitions.append(
-            {
+        transition = {
                 **raw_transition,
                 "sequence_index": raw_transition.get("sequence_index", raw_transition.get("step_index", len(transitions))),
                 "from_state": source,
@@ -108,7 +107,18 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
                 "from_state_id": source,
                 "to_state_id": target,
             }
-        )
+        if "preconditions" not in transition:
+            selector = str((raw_transition.get("step") or {}).get("seletor") or raw_transition.get("selector") or "").strip()
+            transition["preconditions"] = [{"kind": "selector_present", "selector": selector}] if selector else []
+        if "postconditions" not in transition:
+            legacy = transition.get("postcondition") if isinstance(transition.get("postcondition"), dict) else {}
+            conditions = []
+            if legacy.get("expected_selector_after"):
+                conditions.append({"kind": "selector_present", "selector": legacy["expected_selector_after"]})
+            if legacy.get("expected_url_after") and legacy.get("expected_url_after") != legacy.get("expected_url_before"):
+                conditions.append({"kind": "url", "value": legacy["expected_url_after"]})
+            transition["postconditions"] = conditions
+        transitions.append(transition)
 
     outputs = []
     for raw_output in action.get("output_states") or []:
@@ -263,6 +273,40 @@ def ordered_graph_path(
     return None
 
 
+def ordered_graph_suffix(
+    transitions: list[dict[str, Any]],
+    start_sequence_index: int,
+    target_state_id: str,
+) -> list[dict[str, Any]] | None:
+    """Return the demonstrated suffix after a reentry transition is found."""
+    ordered = sorted(
+        (item for item in transitions if isinstance(item, dict)),
+        key=lambda item: int(item.get("sequence_index", item.get("step_index", 0)) or 0),
+    )
+    selected = [
+        item for item in ordered
+        if int(item.get("sequence_index", item.get("step_index", -1)) or -1) >= start_sequence_index
+    ]
+    if not selected:
+        return [] if str(target_state_id) else None
+    path: list[dict[str, Any]] = []
+    state_id = ""
+    for transition in selected:
+        source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+        target = str(transition.get("to_state_id") or transition.get("to_state") or "")
+        if not path:
+            state_id = target
+        elif source != state_id:
+            return None
+        if not target:
+            return None
+        path.append(transition)
+        state_id = target
+        if state_id == target_state_id:
+            return path
+    return None
+
+
 def graph_target_state(action: dict[str, Any]) -> str:
     outputs = action.get("output_states")
     if isinstance(outputs, list):
@@ -313,6 +357,72 @@ def transition_satisfied(
     if action_type in {"preencher", "fill", "selecionar", "select"}:
         return current_value is not None and expected_value is not None and current_value == expected_value
     return False
+
+
+async def evaluate_transition_satisfaction(
+    page: Any,
+    transition: dict[str, Any],
+    step: dict[str, Any] | None = None,
+    *,
+    current_state_id: str = "",
+) -> str:
+    """Return satisfied/not_satisfied/unknown for deterministic reentry facts."""
+    step = step if isinstance(step, dict) else {}
+    action_type = str(transition.get("action_type") or step.get("tipo") or "").strip().lower()
+    if action_type in {"preencher", "fill", "selecionar", "select"}:
+        selector = str(step.get("seletor") or "").strip()
+        expected = step.get("expected_value")
+        if not selector or expected is None:
+            return "unknown"
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() == 0 or not await locator.is_visible():
+                return "not_satisfied"
+            if action_type in {"selecionar", "select"}:
+                current = await locator.input_value()
+            else:
+                current = await locator.input_value()
+            return "satisfied" if str(current) == str(expected) else "not_satisfied"
+        except Exception:
+            return "unknown"
+
+    postconditions = transition.get("postconditions")
+    if not isinstance(postconditions, list):
+        legacy = transition.get("postcondition") if isinstance(transition.get("postcondition"), dict) else {}
+        postconditions = []
+        if legacy.get("expected_selector_after"):
+            postconditions.append({"kind": "selector_present", "selector": legacy["expected_selector_after"]})
+        if legacy.get("expected_url_after"):
+            postconditions.append({"kind": "url", "value": legacy["expected_url_after"]})
+    if not postconditions:
+        source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+        target = str(transition.get("to_state_id") or transition.get("to_state") or "")
+        if source != target and current_state_id and current_state_id == target:
+            return "satisfied"
+        return "unknown"
+    try:
+        for condition in postconditions:
+            if not isinstance(condition, dict):
+                continue
+            kind = str(condition.get("kind") or condition.get("type") or "").strip().lower()
+            if kind in {"selector_present", "selector_visible"}:
+                selector = str(condition.get("selector") or "").strip()
+                if not selector:
+                    continue
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    return "satisfied"
+                return "not_satisfied"
+            if kind == "selector_absent":
+                selector = str(condition.get("selector") or "").strip()
+                locator = page.locator(selector).first
+                return "satisfied" if await locator.count() == 0 or not await locator.is_visible() else "not_satisfied"
+            if kind == "url":
+                expected = str(condition.get("value") or "").strip()
+                return "satisfied" if expected and str(getattr(page, "url", "")) == expected else "not_satisfied"
+        return "unknown"
+    except Exception:
+        return "unknown"
 
 
 async def observe_browser_pages(context: Any, states: list[dict[str, Any]]) -> list[dict[str, Any]]:
