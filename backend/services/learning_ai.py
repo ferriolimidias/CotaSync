@@ -1,10 +1,43 @@
 from __future__ import annotations
 
 import os
+import json
+import logging
+from urllib import request as urlrequest
+from urllib.error import HTTPError, URLError
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from pydantic import BaseModel, Field, ValidationError
+
 from backend.services.learning_trace import sanitize_trace
+
+logger = logging.getLogger("cotasync.learning_ai")
+PROMPT_VERSION = 1
+
+
+class SelectorSuggestion(BaseModel):
+    selector: str
+    rationale: str = ""
+    confidence: float | None = None
+
+
+class LearningAIAnalysis(BaseModel):
+    selector_analysis: list[dict[str, Any]] = Field(default_factory=list)
+    transition_analysis: list[dict[str, Any]] = Field(default_factory=list)
+    output_analysis: list[dict[str, Any]] = Field(default_factory=list)
+    state_analysis: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    quality: dict[str, Any] = Field(default_factory=dict)
+
+
+SYSTEM_PROMPT = """You are the CotaSync learning compiler. Prompt version 1.
+The browser recorder already identified TARGET_NODE; never locate targets from images.
+Analyze only sanitized evidence. Propose deterministic selectors, preconditions,
+postconditions, state/output metadata and warnings. Do not invent business logic,
+change client bindings, handle credentials, or suggest AI during replay.
+Return only JSON matching LearningAIAnalysis. Suggestions remain untrusted until
+the deterministic browser validator proves them."""
 
 
 @dataclass
@@ -27,10 +60,57 @@ class DisabledLearningAIProvider:
         return {"enabled": False, "suggestions": [], "reason": "AI_DISABLED"}
 
 
+class OpenAICompatibleLearningProvider:
+    """Small provider client kept inside learning services, never replay services."""
+
+    def __init__(self, *, api_key: str, model: str, base_url: str, timeout: float = 20.0) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def analyze(self, trace: list[dict[str, Any]]) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps({"prompt_version": PROMPT_VERSION, "trace": trace}, ensure_ascii=False)},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        req = urlrequest.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+            method="POST",
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            parsed = LearningAIAnalysis.model_validate(json.loads(content))
+            return {"enabled": True, "provider": "openai_compatible", "model": self.model, **parsed.model_dump()}
+        except (HTTPError, URLError, TimeoutError, OSError, KeyError, IndexError, json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Learning AI unavailable or invalid response: %s", type(exc).__name__)
+            return {"enabled": True, "provider": "openai_compatible", "model": self.model, "warnings": ["AI_UNAVAILABLE_OR_INVALID_RESPONSE"], "quality": {"blocking_issues": []}}
+
+
+def configured_learning_ai_provider() -> LearningAIProvider:
+    api_key = os.getenv("AI_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return DisabledLearningAIProvider()
+    return OpenAICompatibleLearningProvider(
+        api_key=api_key,
+        model=os.getenv("AI_MODEL", "").strip() or os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
+        base_url=os.getenv("AI_BASE_URL", "").strip() or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
+    )
+
+
 class LearningAIObserver:
     def __init__(self, provider: LearningAIProvider | None = None) -> None:
         self.enabled = os.getenv("AI_ENABLED", "false").lower() in {"1", "true", "yes"}
-        self.provider = provider or DisabledLearningAIProvider()
+        self.provider = provider or (configured_learning_ai_provider() if self.enabled else DisabledLearningAIProvider())
 
     def analyze(self, trace: list[dict[str, Any]]) -> dict[str, Any]:
         safe_trace = sanitize_trace(trace)

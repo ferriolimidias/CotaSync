@@ -234,6 +234,8 @@ async def observe_learning_step_with_ai(
     """Analisa um evento ao vivo; falhas sempre retornam o fallback determinístico."""
 
     fallback = deterministic_observe_learning_step(step_event)
+    if os.getenv("AI_ENABLED", "false").strip().lower() not in {"1", "true", "yes"}:
+        return fallback
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return fallback
@@ -335,6 +337,8 @@ async def analyze_recorded_action_with_ai(
     """Enriquece uma receita humana sem alterar seus passos determinísticos."""
 
     fallback = _local_analysis(action)
+    if os.getenv("AI_ENABLED", "false").strip().lower() not in {"1", "true", "yes"}:
+        return fallback
     config = openai_configuration_status()
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:

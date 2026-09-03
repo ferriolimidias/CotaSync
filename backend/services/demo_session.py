@@ -3327,6 +3327,7 @@ class DemoSessionManager:
             ),
             "teaching_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
             "data_source_id": session.guided_learning.get("data_source_id"),
+            "learning_ai_analysis": {},
             "objective": objective_text,
             "input_description": input_description_text,
             "expected_result": expected_result_text,
@@ -3379,6 +3380,10 @@ class DemoSessionManager:
             "microsoft_hosts": microsoft_hosts,
             "session_guardian_enabled": bool(session.external_login_url or session.browser_mode == "desktop_browser"),
         }
+        from backend.services.learning_ai import LearningAIObserver
+        learned_action["learning_ai_analysis"] = LearningAIObserver().analyze(
+            learned_action["raw_learning_trace"]
+        )
         if selected_extraction_contract:
             learned_action["reviewed_overlay"] = {
                 "review_status": "approved",

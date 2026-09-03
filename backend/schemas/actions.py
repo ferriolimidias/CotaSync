@@ -45,6 +45,7 @@ class ActionSummary(BaseModel):
     extraction_targets: list[str] = Field(default_factory=list)
     outputs: list[dict[str, Any]] = Field(default_factory=list)
     output_states: list[dict[str, Any]] = Field(default_factory=list)
+    learning_ai_analysis: dict[str, Any] = Field(default_factory=dict)
     user_result_summary_template: str | None = None
     ai_result_summary_enabled: bool = True
     ai_recovery_enabled: bool = False

@@ -298,6 +298,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         extraction_targets=extraction_targets,
         outputs=data.get("outputs", []) if isinstance(data.get("outputs"), list) else [],
         output_states=data.get("output_states", []) if isinstance(data.get("output_states"), list) else [],
+        learning_ai_analysis=data.get("learning_ai_analysis", {}) if isinstance(data.get("learning_ai_analysis"), dict) else {},
         user_result_summary_template=str(data.get("user_result_summary_template") or "").strip() or None,
         ai_result_summary_enabled=bool(data.get("ai_result_summary_enabled", True)),
         ai_recovery_enabled=bool(data.get("ai_recovery_enabled", False)),
