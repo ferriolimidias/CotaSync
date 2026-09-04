@@ -1609,49 +1609,61 @@ async def executar_acao_rapida(
                     )
                 configured_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
                 canonical_passos_playwright = configured_steps if isinstance(configured_steps, list) else passos_playwright
-                selected_indices = []
+                steps_by_id = {
+                    str(step.get("step_id")): step
+                    for step in canonical_passos_playwright
+                    if isinstance(step, dict) and str(step.get("step_id") or "").strip()
+                }
+                selected_steps: list[dict[str, Any]] = []
                 selected_step_ids: list[str] = []
                 for transition in graph_path:
-                    resolved = resolve_transition_step(transition, configured_steps) if isinstance(configured_steps, list) else None
+                    resolved = resolve_transition_step(transition, canonical_passos_playwright) if isinstance(canonical_passos_playwright, list) else None
                     if resolved is None:
+                        requested_step_id = str(transition.get("step_id") or "").strip()
+                        legacy_step_index = transition.get("step_index")
                         raise SessionGuardianError(
                             "O grafo aprendido possui uma referência de step não resolvível.",
-                            {"reason": "dangling_step_reference", "transition_id": transition.get("transition_id"), "step_id": transition.get("step_id"), "step_index": transition.get("step_index")},
+                            {
+                                "reason": "learned_graph_step_reference_missing",
+                                "transition_id": transition.get("transition_id"),
+                                "sequence_index": transition.get("sequence_index"),
+                                "step_id": requested_step_id,
+                                "legacy_step_index": legacy_step_index,
+                                "step_count": len(canonical_passos_playwright),
+                                "resolution_source": "step_id" if requested_step_id else "legacy_compatibility",
+                                "execution_model": "learned_graph",
+                            },
                         )
-                    selected_indices.append(int(resolved["index"]))
-                    selected_step_ids.append(str(resolved["step_id"]))
-                selected_indices.extend(
-                    index
-                    for index, step in enumerate(canonical_passos_playwright)
-                    if isinstance(step, dict)
-                    and str(step.get("tipo") or step.get("type") or "").strip().lower() == "extrair_texto"
-                    and index not in selected_indices
-                )
-                selected_indices = sorted(selected_indices)
-                invalid_indices = [
-                    index
-                    for index in selected_indices
-                    if index < 0 or index >= len(canonical_passos_playwright)
-                ]
-                if invalid_indices:
-                    raise SessionGuardianError(
-                        "O grafo aprendido referencia passos que não existem na versão publicada.",
-                        {
-                            "reason": "learned_graph_step_index_out_of_range",
-                            "execution_model": "learned_graph",
-                            "invalid_step_indices": invalid_indices,
-                            "steps_count": len(canonical_passos_playwright),
-                            "current_state_id": current_match["state_id"],
-                            "target_state_id": target_state_id,
-                        },
-                    )
-                original_passos_playwright = canonical_passos_playwright
-                passos_playwright = [original_passos_playwright[index] for index in selected_indices]
+                    resolved_step_id = str(resolved["step_id"])
+                    resolved_step = steps_by_id.get(resolved_step_id)
+                    if resolved_step is None:
+                        raise SessionGuardianError(
+                            "O grafo aprendido referencia um step_id ausente na ActionVersion.",
+                            {
+                                "reason": "learned_graph_dangling_step_reference",
+                                "transition_id": transition.get("transition_id"),
+                                "sequence_index": transition.get("sequence_index"),
+                                "step_id": resolved_step_id,
+                                "legacy_step_index": transition.get("step_index"),
+                                "step_count": len(canonical_passos_playwright),
+                                "resolution_source": resolved.get("source"),
+                                "execution_model": "learned_graph",
+                            },
+                        )
+                    selected_steps.append(resolved_step)
+                    selected_step_ids.append(resolved_step_id)
+                for step in canonical_passos_playwright:
+                    if isinstance(step, dict) and str(step.get("tipo") or step.get("type") or "").strip().lower() == "extrair_texto":
+                        step_id = str(step.get("step_id") or "")
+                        if step_id and step_id not in selected_step_ids:
+                            selected_steps.append(step)
+                            selected_step_ids.append(step_id)
+                passos_playwright = selected_steps
                 graph_plan = {
                     "execution_model": "learned_graph",
                     "current_state_id": current_match["state_id"],
                     "target_state_id": target_state_id,
-                    "path_step_indices": selected_indices,
+                    "path_step_indices": [int(resolve_transition_step(item, canonical_passos_playwright)["index"]) for item in graph_path],
                     "path_step_ids": selected_step_ids,
                     "path_length": len(graph_path),
                 }
