@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Check, CircleDot, Crosshair, Play, Save, Square, X } from "lucide-react";
+import { Check, CircleDot, Crosshair, Play, Save, Square, Trash2, X } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -21,6 +21,8 @@ import {
   confirmLearningResultSelection,
   getLearningSession,
   getDataSources,
+  removeLearningOutput,
+  renameLearningOutput,
   saveLearnedAction,
   startLearningRecording,
   startLearningResultSelection,
@@ -46,6 +48,7 @@ function EnsinarPage() {
   const [learningMode, setLearningMode] = useState<"free_action" | "spreadsheet">("free_action");
   const [dataSourceId, setDataSourceId] = useState<string>("");
   const [dataSourceFieldId, setDataSourceFieldId] = useState<string>("");
+  const [outputLabels, setOutputLabels] = useState<Record<string, string>>({});
   const dataSources = useQuery({ queryKey: ["data-sources"], queryFn: getDataSources });
   const session = useQuery({
     queryKey: ["learning-session", sessionId],
@@ -175,6 +178,26 @@ function EnsinarPage() {
       setSelectionCandidate(null);
     },
   });
+  const renameOutput = useMutation({
+    mutationFn: ({ outputId, label }: { outputId: string; label: string }) =>
+      renameLearningOutput(sessionId as string, outputId, label),
+    onSuccess: () => {
+      void session.refetch();
+      toast.success("Resultado renomeado.");
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível renomear o resultado."),
+  });
+  const removeOutput = useMutation({
+    mutationFn: (outputId: string) => removeLearningOutput(sessionId as string, outputId),
+    onSuccess: (outputs) => {
+      setResultConfirmed(outputs.length > 0);
+      void session.refetch();
+      toast.success("Resultado removido.");
+    },
+    onError: (error) =>
+      toast.error(error instanceof Error ? error.message : "Não foi possível remover o resultado."),
+  });
 
   useEffect(() => {
     if (selectionMode !== "selecting" || !sessionId) return;
@@ -186,6 +209,7 @@ function EnsinarPage() {
 
   const eventCount = Number(session.data?.learning_events_count || 0);
   const variableCount = Array.isArray(session.data?.variables) ? session.data.variables.length : 3;
+  const outputs = Array.isArray(session.data?.outputs) ? session.data.outputs : [];
 
   return (
     <AppShell
@@ -307,7 +331,7 @@ function EnsinarPage() {
                 disabled={!sessionId || startSelection.isPending || stopped}
                 onClick={() => startSelection.mutate()}
               >
-                <Crosshair className="h-4 w-4" /> Selecionar resultado
+                <Crosshair className="h-4 w-4" /> {outputs.length > 0 ? "+ Selecionar outro resultado" : "Selecionar resultado"}
               </Button>
             )
           }
@@ -333,15 +357,59 @@ function EnsinarPage() {
                   <Crosshair className="h-3 w-3" /> Clique no campo que deseja capturar
                 </BadgeStatus>
               )}
-              {Array.isArray(session.data?.outputs) && session.data.outputs.length > 0 && selectionMode !== "preview" && (
+              {outputs.length > 0 && selectionMode !== "preview" && (
                 <div className="space-y-2 text-foreground">
                   <p className="text-xs font-medium uppercase text-muted-foreground">Resultados selecionados</p>
-                  {session.data.outputs.map((output, index) => (
-                    <div className="flex items-center gap-2" key={String(output.output_id || index)}>
-                      <Check className="h-4 w-4 text-emerald-600" />
-                      <span>{String(output.label || `Resultado ${index + 1}`)}</span>
+                  {outputs.map((output, index) => {
+                    const outputId = String(output.output_id || index);
+                    const currentLabel = outputLabels[outputId] ?? String(output.label || `Resultado ${index + 1}`);
+                    return (
+                    <div className="grid gap-2 rounded-md border border-border p-2" key={outputId}>
+                      <div className="flex items-center gap-2">
+                        <Check className="h-4 w-4 text-emerald-600" />
+                        <Input
+                          className="h-8 min-w-0 flex-1"
+                          value={currentLabel}
+                          onChange={(event) =>
+                            setOutputLabels((labels) => ({ ...labels, [outputId]: event.target.value }))
+                          }
+                          onBlur={() => {
+                            const nextLabel = currentLabel.trim();
+                            if (nextLabel && nextLabel !== String(output.label || "")) {
+                              renameOutput.mutate({ outputId, label: nextLabel });
+                            }
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter") return;
+                            event.currentTarget.blur();
+                          }}
+                        />
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          disabled={removeOutput.isPending}
+                          onClick={() => removeOutput.mutate(outputId)}
+                          title="Remover resultado"
+                          aria-label="Remover resultado"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      {isOutputDestination(output.destination) && (
+                        <p className="text-xs text-muted-foreground">
+                          Campo: {String(output.destination.field_id)}
+                        </p>
+                      )}
                     </div>
-                  ))}
+                  )})}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!sessionId || startSelection.isPending || stopped}
+                    onClick={() => startSelection.mutate()}
+                  >
+                    <Crosshair className="h-4 w-4" /> + Selecionar outro resultado
+                  </Button>
                 </div>
               )}
               {selectionCandidate && selectionMode === "preview" && (
@@ -422,6 +490,10 @@ function EnsinarPage() {
       </div>
     </AppShell>
   );
+}
+
+function isOutputDestination(value: unknown): value is { field_id: unknown } {
+  return Boolean(value && typeof value === "object" && "field_id" in value);
 }
 
 function candidateValue(candidate: ResultSelectionCandidate | null) {

@@ -545,6 +545,25 @@ export async function cancelLearningResultSelection(id: string) {
   return payload.selection;
 }
 
+export async function renameLearningOutput(id: string, outputId: string, label: string) {
+  const payload = await apiFetch<{ output: Record<string, unknown> }>(
+    `/api/v1/learning/sessions/${id}/outputs/${outputId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ label }),
+    },
+  );
+  return payload.output;
+}
+
+export async function removeLearningOutput(id: string, outputId: string) {
+  const payload = await apiFetch<{ outputs: Array<Record<string, unknown>> }>(
+    `/api/v1/learning/sessions/${id}/outputs/${outputId}`,
+    { method: "DELETE" },
+  );
+  return payload.outputs;
+}
+
 export async function saveLearnedAction(
   id: string,
   input: {

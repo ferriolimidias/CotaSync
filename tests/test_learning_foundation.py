@@ -4,6 +4,7 @@ import unittest
 
 from backend.services.learning_ai import (
     LearningAIObserver,
+    LearningAIAnalysis,
     compile_validated_learning_metadata,
     validate_postcondition_candidate,
     validate_selector_candidate,
@@ -41,6 +42,20 @@ class LearningFoundationTests(unittest.TestCase):
 
     def test_ai_disabled_does_not_block_learning(self):
         self.assertFalse(LearningAIObserver().analyze([])["enabled"])
+
+    def test_structured_response_rejects_invalid_schema(self):
+        with self.assertRaises(Exception):
+            LearningAIAnalysis.model_validate({"selector_analysis": "not-a-list"})
+
+    def test_provider_failure_is_safe(self):
+        class BrokenProvider:
+            def analyze(self, trace):
+                raise RuntimeError("provider down")
+
+        observer = LearningAIObserver(provider=BrokenProvider())
+        observer.enabled = True
+        result = observer.analyze([])
+        self.assertEqual(result["reason"], "AI_PROVIDER_UNAVAILABLE")
 
     def test_compiler_accepts_only_validated_suggestions(self):
         compiled, report = compile_validated_learning_metadata(

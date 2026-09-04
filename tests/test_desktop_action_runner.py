@@ -4,6 +4,7 @@ import tests  # noqa: F401
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -30,6 +31,7 @@ from backend.services.session_guardian import SessionGuardian, SessionGuardianCo
 from backend.motor_browser import (
     is_learned_client_query_transition,
     query_result_matches_inputs,
+    select_page_for_learned_step,
     verify_postcondition,
 )
 from tests.auth_helpers import authenticated_client
@@ -529,6 +531,25 @@ class SessionGuardianTests(unittest.TestCase):
         ]
         self.assertFalse(is_learned_client_query_transition(steps, 2, {"grupo", "cota"}, False))
 
+    def test_learned_page_ref_resolves_by_signature_instead_of_tab_order(self) -> None:
+        main = FakeReplayPage()
+        main.url = "https://main.example/home"
+        popup = FakeReplayPage()
+        popup.url = "https://popup.example/form"
+        context = type("Context", (), {"pages": [main, popup]})()
+        selected = asyncio.run(
+            select_page_for_learned_step(
+                context,
+                main,
+                {
+                    "page_ref": "page_2",
+                    "page_signature_before": {"host": "popup.example", "path": "/form"},
+                    "seletor": "#field",
+                },
+            )
+        )
+        self.assertIs(selected, popup)
+
     def test_secret_and_unknown_states_stop_without_automation(self) -> None:
         action = self._stateful_action()
         password = FakeGuardianPage(
@@ -901,7 +922,7 @@ class DesktopActionRunTests(unittest.TestCase):
 
     def _run_with_final_url(self, final_url: str):
         execution = {
-            "status": "success",
+            "status": "sucesso",
             "texto": "concluida",
             "passos_executados": 1,
             "final_page": {"title": "Pagina", "url": final_url},
@@ -1306,6 +1327,27 @@ class DesktopActionRunTests(unittest.TestCase):
         self.assertEqual(payload["screenshot_path"], "data/runs/run_step_3_error.png")
         self.assertTrue(payload["whether_desktop_browser_used"])
         self.assertIn("Parei no passo 3", run.operational_summary or "")
+
+    def test_deterministic_replay_never_calls_learning_ai_provider(self) -> None:
+        execution = {
+            "status": "success",
+            "texto": "ok",
+            "dados_extraidos": {"Resultado": "ok"},
+            "passos_executados": 1,
+            "final_page": {"url": TARGET_URL, "title": "Consulta"},
+        }
+        with patch.dict(os.environ, {"AI_ENABLED": "true", "AI_API_KEY": "not-used"}), patch(
+            "backend.services.action_runner.append_run"
+        ), patch(
+            "backend.services.action_runner.update_run"
+        ), patch(
+            "backend.services.action_runner._run_desktop_browser_replay",
+            new=AsyncMock(return_value=execution),
+        ), patch("backend.services.learning_ai.configured_learning_ai_provider") as provider:
+            run = asyncio.run(run_action_sync(desktop_action(), ActionRunRequest(variables={"grupo": "935"})))
+
+        self.assertEqual(run.status, "success")
+        provider.assert_not_called()
 
     def test_session_checkpoint_diagnostics_persist_in_error_payload(self) -> None:
         diagnostic = {

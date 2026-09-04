@@ -1618,6 +1618,23 @@ async def executar_acao_rapida(
                     and index not in selected_indices
                 )
                 selected_indices = sorted(selected_indices)
+                invalid_indices = [
+                    index
+                    for index in selected_indices
+                    if index < 0 or index >= len(passos_playwright)
+                ]
+                if invalid_indices:
+                    raise SessionGuardianError(
+                        "O grafo aprendido referencia passos que não existem na versão publicada.",
+                        {
+                            "reason": "learned_graph_step_index_out_of_range",
+                            "execution_model": "learned_graph",
+                            "invalid_step_indices": invalid_indices,
+                            "steps_count": len(passos_playwright),
+                            "current_state_id": current_match["state_id"],
+                            "target_state_id": target_state_id,
+                        },
+                    )
                 passos_playwright = [passos_playwright[index] for index in selected_indices]
                 graph_plan = {
                     "execution_model": "learned_graph",
@@ -1797,16 +1814,20 @@ async def executar_acao_rapida(
 
                         for i in range(quantidade):
                             if await elementos.nth(i).is_visible():
-                                valor_atual = await elementos.nth(i).input_value(timeout=5000)
-                                if graph_mode and transition_satisfied(
-                                    {"action_type": tipo_acao}, passo,
-                                    current_value=valor_atual,
-                                    expected_value=valor_final,
-                                ):
-                                    trace_item["status"] = "skipped_satisfied"
-                                    trace_item["satisfaction"] = "input_value_matches"
-                                    sucesso_preencher = True
-                                    break
+                                try:
+                                    valor_atual = await elementos.nth(i).input_value(timeout=5000)
+                                except Exception:
+                                    valor_atual = None
+                                if valor_atual is not None:
+                                    if graph_mode and transition_satisfied(
+                                        {"action_type": tipo_acao}, passo,
+                                        current_value=valor_atual,
+                                        expected_value=valor_final,
+                                    ):
+                                        trace_item["status"] = "skipped_satisfied"
+                                        trace_item["satisfaction"] = "input_value_matches"
+                                        sucesso_preencher = True
+                                        break
                                 await elementos.nth(i).fill(valor_final, timeout=5000)
                                 valor_lido = await elementos.nth(i).input_value(timeout=5000)
                                 if valor_lido != valor_final:

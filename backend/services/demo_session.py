@@ -1127,7 +1127,7 @@ class DemoSessionManager:
         output_page_ref = str(contract.get("page_ref") or latest_event.get("page_ref") or "main")
         output_state_id = str(contract.get("state_id") or latest_event.get("after_state_id") or latest_event.get("before_state_id") or "")
         output = {
-            "output_id": f"output_{len(session.outputs) + 1}",
+            "output_id": f"output_{len(getattr(session, 'outputs', [])) + 1}",
             "label": str(contract.get("target_name") or target_name),
             "type": "data",
             "preferred_selector": str((contract.get("selector_data") or {}).get("primary") or contract.get("selector_hint") or ""),
@@ -1140,7 +1140,11 @@ class DemoSessionManager:
             "destination": destination,
             "contract": dict(contract),
         }
-        session.outputs = [item for item in session.outputs if str(item.get("output_id")) != output["output_id"]]
+        session.outputs = [
+            item
+            for item in getattr(session, "outputs", [])
+            if isinstance(item, dict) and str(item.get("output_id")) != output["output_id"]
+        ]
         session.outputs.append(output)
         session.result_selection = {
             "status": "confirmed",
@@ -1173,14 +1177,14 @@ class DemoSessionManager:
         return session.result_selection
 
     async def learning_outputs(self, session_id: str) -> list[dict[str, Any]]:
-        return [dict(item) for item in self._get(session_id).outputs]
+        return [dict(item) for item in getattr(self._get(session_id), "outputs", []) if isinstance(item, dict)]
 
     async def rename_learning_output(self, session_id: str, output_id: str, label: str) -> dict[str, Any]:
         session = self._get(session_id)
         clean_label = str(label or "").strip()
         if not clean_label:
             raise DemoSessionError("Informe um nome para o resultado.")
-        for output in session.outputs:
+        for output in getattr(session, "outputs", []):
             if str(output.get("output_id")) == output_id:
                 output["label"] = clean_label
                 if isinstance(output.get("contract"), dict):
@@ -1190,7 +1194,11 @@ class DemoSessionManager:
 
     async def remove_learning_output(self, session_id: str, output_id: str) -> list[dict[str, Any]]:
         session = self._get(session_id)
-        session.outputs = [item for item in session.outputs if str(item.get("output_id")) != output_id]
+        session.outputs = [
+            item
+            for item in getattr(session, "outputs", [])
+            if isinstance(item, dict) and str(item.get("output_id")) != output_id
+        ]
         return [dict(item) for item in session.outputs]
 
     async def detect_result_candidates(
@@ -2036,7 +2044,7 @@ class DemoSessionManager:
             "confirmed_page_title": session.confirmed_page_title,
             "result_selection": dict(session.result_selection),
             "extraction_review": dict(session.extraction_review),
-            "outputs": [dict(item) for item in session.outputs],
+            "outputs": [dict(item) for item in getattr(session, "outputs", []) if isinstance(item, dict)],
             "learning_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
             "data_source_id": session.guided_learning.get("data_source_id"),
         }
@@ -3141,7 +3149,7 @@ class DemoSessionManager:
             if selected_output_state:
                 output_states.append(selected_output_state)
 
-        outputs = [dict(item) for item in session.outputs if isinstance(item, dict)]
+        outputs = [dict(item) for item in getattr(session, "outputs", []) if isinstance(item, dict)]
         if selected_extraction_contract and not outputs:
             outputs.append({
                 "output_id": "output_1",
@@ -3318,7 +3326,7 @@ class DemoSessionManager:
             "ai_review_summary": "",
             "final_summary_instruction": "",
             "extraction_review": selected_extraction_contract,
-            "outputs": list(session.outputs),
+            "outputs": list(getattr(session, "outputs", [])),
             "raw_learning_trace": build_raw_learning_trace(learning_events),
             "learning_mode": (
                 "desktop_browser_mechanical_ai_reviewed"

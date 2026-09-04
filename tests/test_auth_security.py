@@ -66,6 +66,33 @@ class AuthSecurityTests(unittest.TestCase):
             self.assertEqual(ok.status_code, 200)
             self.assertEqual(ok.json()["user"]["role"], "operator")
 
+    def test_login_logout_cycle_preserves_valid_credentials(self) -> None:
+        with patch.dict("os.environ", TEST_AUTH_ENV, clear=False):
+            client = TestClient(app)
+            for _ in range(3):
+                login = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "admin-password"},
+                )
+                self.assertEqual(login.status_code, 200)
+                self.assertEqual(client.get("/api/v1/auth/me").status_code, 200)
+                logout = client.post(
+                    "/api/v1/auth/logout",
+                    headers={"X-CSRF-Token": login.json()["csrf_token"]},
+                )
+                self.assertEqual(logout.status_code, 200)
+                self.assertEqual(client.get("/api/v1/auth/me").status_code, 401)
+
+    def test_valid_login_replaces_stale_session_cookie(self) -> None:
+        with patch.dict("os.environ", TEST_AUTH_ENV, clear=False):
+            client = TestClient(app, cookies={"cotasync_session": "stale", "cotasync_csrf": "stale"})
+            response = client.post(
+                "/api/v1/auth/login",
+                json={"username": "operator", "password": "operator-password"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(client.get("/api/v1/auth/me").status_code, 200)
+
     def test_protected_endpoint_without_login_returns_401(self) -> None:
         with patch.dict("os.environ", TEST_AUTH_ENV, clear=False):
             response = TestClient(app).post("/api/desktop-browser/view-token")
