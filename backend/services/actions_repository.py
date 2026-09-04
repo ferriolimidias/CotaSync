@@ -26,6 +26,7 @@ from backend.db import (
 from backend.services.action_pages import url_host
 from backend.services.client_fields import canonical_client_field_key, client_field_label
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
+from backend.services.learned_graph import ensure_stable_step_ids, resolve_transition_step, validate_compiled_action_graph
 
 logger = logging.getLogger("cotasync.actions")
 
@@ -391,6 +392,41 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
     return ActionsCatalog(actions=actions, exists=exists, warning=warning)
 
 
+def repair_published_action_graph(action_id: str) -> dict[str, Any]:
+    """Repair legacy graph references only when each reference resolves deterministically."""
+    with SessionLocal.begin() as session:
+        action = session.get(DbAction, action_id)
+        if action is None or not action.published_version_id:
+            raise ActionsRepositoryError("ACTION_VERSION_NOT_FOUND")
+        version = session.get(ActionVersion, action.published_version_id)
+        if version is None:
+            raise ActionsRepositoryError("ACTION_VERSION_NOT_FOUND")
+        definition = dict(version.definition or {})
+        steps = ensure_stable_step_ids(definition.get("robust_steps") or definition.get("passos_playwright") or [])
+        if not steps:
+            raise ActionsRepositoryError("ACTION_STEPS_EMPTY")
+        transitions = [dict(item) for item in definition.get("learned_transitions") or [] if isinstance(item, dict)]
+        evidence: list[dict[str, Any]] = []
+        for transition in transitions:
+            resolved = resolve_transition_step(transition, steps)
+            if resolved is None:
+                raise ActionsRepositoryError(f"Grafo aprendido invalido: dangling_step_reference:{transition.get('transition_id')}")
+            old = transition.get("step_id")
+            transition["step_id"] = resolved["step_id"]
+            evidence.append({"transition_id": transition.get("transition_id"), "before": old or transition.get("step_index"), "after": resolved["step_id"], "source": resolved["source"]})
+        definition["passos_playwright"] = steps
+        definition["robust_steps"] = ensure_stable_step_ids(definition.get("robust_steps") or steps)
+        definition["learned_transitions"] = transitions
+        validation = validate_compiled_action_graph(definition)
+        if not validation["valid"]:
+            raise ActionsRepositoryError("Grafo aprendido invalido: " + ", ".join(str(item.get("code")) for item in validation["errors"]))
+        version.definition = definition
+        session.query(ActionStep).filter(ActionStep.action_version_id == version.id).delete(synchronize_session=False)
+        for index, step in enumerate(steps):
+            session.add(ActionStep(id=f"{version.id}-{step['step_id']}", action_version_id=version.id, step_index=index, step_type=str(step.get("tipo") or step.get("type") or "unknown"), selector=str(step.get("seletor") or step.get("selector") or "") or None, variable_key=str(step.get("variavel") or step.get("variable_key") or "") or None, step_data=step))
+        return {"version_id": version.id, "steps": steps, "transitions": transitions, "evidence": evidence, "validation": validation}
+
+
 def find_action(action_id: str, path: Path | None = None) -> ActionDetail | None:
     wanted = str(action_id or "").strip()
     wanted_slug = slugify_action_id(wanted)
@@ -541,6 +577,19 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
         version_id = f"{action.id}-v1"
         version = session.get(ActionVersion, version_id)
         definition = dict(learned_action)
+        if definition.get("execution_model") == "learned_graph":
+            definition["passos_playwright"] = ensure_stable_step_ids(definition.get("passos_playwright") or [])
+            definition["robust_steps"] = ensure_stable_step_ids(definition.get("robust_steps") or definition["passos_playwright"])
+            transitions = definition.get("learned_transitions") or []
+            for transition in transitions:
+                if isinstance(transition, dict) and not transition.get("step_id"):
+                    resolved = resolve_transition_step(transition, definition["robust_steps"])
+                    if resolved:
+                        transition["step_id"] = resolved["step_id"]
+            validation = validate_compiled_action_graph(definition)
+            if not validation["valid"]:
+                raise ActionsRepositoryError("Grafo aprendido invalido: " + ", ".join(str(item.get("code")) for item in validation["errors"]))
+            steps = definition["robust_steps"]
         version_variables = {"schema": variables}
         if version is None:
             version = ActionVersion(
@@ -571,7 +620,7 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
                 step = {"raw": step}
             session.add(
                 ActionStep(
-                    id=f"{version.id}-step-{index}",
+                    id=f"{version.id}-{str(step.get('step_id') or f'step-{index}')}",
                     action_version_id=version.id,
                     step_index=index,
                     step_type=str(step.get("tipo") or step.get("type") or "unknown"),

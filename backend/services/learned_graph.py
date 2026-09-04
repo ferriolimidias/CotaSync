@@ -6,6 +6,121 @@ from collections import deque
 from typing import Any
 from urllib.parse import urlsplit
 import json
+import hashlib
+
+
+def stable_step_id(step: dict[str, Any], occurrence: int = 0) -> str:
+    """Build a deterministic identity from captured step metadata, never position alone."""
+    explicit = str(step.get("step_id") or step.get("learned_step_id") or step.get("event_id") or "").strip()
+    if explicit:
+        return explicit
+    payload = {
+        "type": step.get("tipo") or step.get("type"),
+        "selector": step.get("seletor") or step.get("selector"),
+        "variable": step.get("variavel") or step.get("variable_key"),
+        "page_ref": step.get("page_ref") or "main",
+        "occurrence": occurrence,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+    return f"step_{digest}"
+
+
+def ensure_stable_step_ids(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    result: list[dict[str, Any]] = []
+    for raw in steps:
+        step = dict(raw) if isinstance(raw, dict) else {"raw": raw}
+        fingerprint = json.dumps({"type": step.get("tipo") or step.get("type"), "selector": step.get("seletor") or step.get("selector"), "variable": step.get("variavel") or step.get("variable_key"), "page_ref": step.get("page_ref") or "main"}, sort_keys=True, ensure_ascii=False)
+        occurrence = counts.get(fingerprint, 0)
+        counts[fingerprint] = occurrence + 1
+        step["step_id"] = stable_step_id(step, occurrence)
+        result.append(step)
+    return result
+
+
+def _transition_selector(transition: dict[str, Any]) -> str:
+    if transition.get("selector"):
+        return str(transition["selector"]).strip()
+    for item in transition.get("preconditions") or []:
+        if isinstance(item, dict) and item.get("selector"):
+            return str(item["selector"]).strip()
+    return str((transition.get("step") or {}).get("seletor") or "").strip()
+
+
+def resolve_transition_step(transition: dict[str, Any], steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Resolve stable references first, then legacy indexes with deterministic evidence."""
+    indexed = ensure_stable_step_ids(steps)
+    requested_id = str(transition.get("step_id") or transition.get("step_ref") or "").strip()
+    if requested_id:
+        for index, step in enumerate(indexed):
+            if step.get("step_id") == requested_id:
+                return {"index": index, "step_id": requested_id, "step": step, "source": "step_id"}
+        return None
+    raw_index = transition.get("step_index")
+    if str(raw_index).lstrip("-").isdigit():
+        index = int(raw_index)
+        if 0 <= index < len(indexed):
+            candidate = indexed[index]
+            selector = _transition_selector(transition)
+            action_type = str(transition.get("action_type") or transition.get("type") or "").strip().lower()
+            candidate_type = str(candidate.get("tipo") or candidate.get("type") or "").strip().lower()
+            if (not selector or selector == str(candidate.get("seletor") or candidate.get("selector") or "").strip()) and (not action_type or action_type in {candidate_type, "fill" if candidate_type == "preencher" else candidate_type, "click" if candidate_type == "clicar" else candidate_type}):
+                return {"index": index, "step_id": candidate["step_id"], "step": candidate, "source": "legacy_step_index"}
+    selector = _transition_selector(transition)
+    action_type = str(transition.get("action_type") or transition.get("type") or "").strip().lower()
+    matches = []
+    for index, step in enumerate(indexed):
+        candidate_selector = str(step.get("seletor") or step.get("selector") or "").strip()
+        candidate_type = str(step.get("tipo") or step.get("type") or "").strip().lower()
+        if selector and candidate_selector != selector:
+            continue
+        if action_type and action_type not in {candidate_type, "fill" if candidate_type == "preencher" else candidate_type, "click" if candidate_type == "clicar" else candidate_type}:
+            continue
+        matches.append((index, step))
+    if len(matches) == 1:
+        index, step = matches[0]
+        return {"index": index, "step_id": step["step_id"], "step": step, "source": "legacy_metadata_repair"}
+    return None
+
+
+def validate_compiled_action_graph(action: dict[str, Any]) -> dict[str, Any]:
+    steps = action.get("robust_steps") or action.get("passos_playwright") or []
+    states = action.get("learned_states") or []
+    transitions = action.get("learned_transitions") or []
+    output_states = action.get("output_states") or []
+    errors: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    if not isinstance(steps, list) or not isinstance(states, list) or not isinstance(transitions, list):
+        return {"valid": False, "errors": [{"code": "graph_collections_invalid"}], "warnings": warnings}
+    state_ids = {str(item.get("state_id")) for item in states if isinstance(item, dict) and item.get("state_id")}
+    output_state_ids = {str(item.get("state_id")) for item in output_states if isinstance(item, dict) and item.get("state_id")}
+    transition_ids: set[str] = set()
+    sequences: set[int] = set()
+    for transition in transitions:
+        if not isinstance(transition, dict):
+            errors.append({"code": "transition_invalid"})
+            continue
+        transition_id = str(transition.get("transition_id") or "")
+        if not transition_id or transition_id in transition_ids:
+            errors.append({"code": "duplicate_transition_id", "transition_id": transition_id})
+        transition_ids.add(transition_id)
+        sequence = transition.get("sequence_index")
+        if not isinstance(sequence, int) or sequence in sequences:
+            errors.append({"code": "invalid_sequence", "transition_id": transition_id})
+        sequences.add(sequence)
+        if str(transition.get("from_state_id") or transition.get("from_state") or "") not in state_ids:
+            errors.append({"code": "dangling_state_reference", "side": "from", "transition_id": transition_id})
+        if str(transition.get("to_state_id") or transition.get("to_state") or "") not in state_ids:
+            errors.append({"code": "dangling_state_reference", "side": "to", "transition_id": transition_id})
+        resolved = resolve_transition_step(transition, steps)
+        if resolved is None:
+            errors.append({"code": "dangling_step_reference", "transition_id": transition_id, "step_id": transition.get("step_id"), "step_index": transition.get("step_index")})
+        elif not transition.get("step_id"):
+            warnings.append(f"legacy_transition_resolved:{transition_id}:{resolved['source']}")
+    for output in output_states:
+        if isinstance(output, dict) and output.get("state_id") and str(output["state_id"]) not in state_ids:
+            errors.append({"code": "invalid_output_state_reference", "state_id": output["state_id"]})
+    return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
 def graph_metadata_available(action: dict[str, Any]) -> bool:
@@ -30,6 +145,10 @@ def graph_metadata_available(action: dict[str, Any]) -> bool:
 def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
     """Collapse structurally identical states without changing learned steps."""
     result = dict(action)
+    for steps_key in ("robust_steps", "passos_playwright"):
+        raw_steps = action.get(steps_key)
+        if isinstance(raw_steps, list):
+            result[steps_key] = ensure_stable_step_ids(raw_steps)
     raw_states = action.get("learned_states")
     raw_transitions = action.get("learned_transitions")
     if not isinstance(raw_states, list) or not isinstance(raw_transitions, list):
@@ -106,7 +225,10 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
                 "to_state": target,
                 "from_state_id": source,
                 "to_state_id": target,
-            }
+        }
+        resolved = resolve_transition_step(transition, result.get("robust_steps") or result.get("passos_playwright") or [])
+        if resolved:
+            transition["step_id"] = resolved["step_id"]
         if "preconditions" not in transition:
             selector = str((raw_transition.get("step") or {}).get("seletor") or raw_transition.get("selector") or "").strip()
             transition["preconditions"] = [{"kind": "selector_present", "selector": selector}] if selector else []

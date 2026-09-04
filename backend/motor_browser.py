@@ -34,6 +34,7 @@ from backend.services.learned_graph import (
     find_graph_path,
     graph_metadata_available,
     graph_step_indices,
+    resolve_transition_step,
     graph_target_state,
     match_observation_to_learned_state,
     observe_browser_pages,
@@ -1578,11 +1579,8 @@ async def executar_acao_rapida(
                     if sequence_index < 0:
                         continue
                     configured_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
-                    step_for_transition = (
-                        configured_steps[sequence_index]
-                        if isinstance(configured_steps, list) and sequence_index < len(configured_steps)
-                        else {}
-                    )
+                    resolved_reentry = resolve_transition_step(transition, configured_steps) if isinstance(configured_steps, list) else None
+                    step_for_transition = resolved_reentry["step"] if resolved_reentry else {}
                     satisfaction = await evaluate_transition_satisfaction(
                         current_match["evidence"]["page"],
                         transition,
@@ -1609,10 +1607,22 @@ async def executar_acao_rapida(
                             "target_state_id": target_state_id,
                         },
                     )
-                selected_indices = graph_step_indices(graph_path)
+                configured_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
+                canonical_passos_playwright = configured_steps if isinstance(configured_steps, list) else passos_playwright
+                selected_indices = []
+                selected_step_ids: list[str] = []
+                for transition in graph_path:
+                    resolved = resolve_transition_step(transition, configured_steps) if isinstance(configured_steps, list) else None
+                    if resolved is None:
+                        raise SessionGuardianError(
+                            "O grafo aprendido possui uma referência de step não resolvível.",
+                            {"reason": "dangling_step_reference", "transition_id": transition.get("transition_id"), "step_id": transition.get("step_id"), "step_index": transition.get("step_index")},
+                        )
+                    selected_indices.append(int(resolved["index"]))
+                    selected_step_ids.append(str(resolved["step_id"]))
                 selected_indices.extend(
                     index
-                    for index, step in enumerate(passos_playwright)
+                    for index, step in enumerate(canonical_passos_playwright)
                     if isinstance(step, dict)
                     and str(step.get("tipo") or step.get("type") or "").strip().lower() == "extrair_texto"
                     and index not in selected_indices
@@ -1621,7 +1631,7 @@ async def executar_acao_rapida(
                 invalid_indices = [
                     index
                     for index in selected_indices
-                    if index < 0 or index >= len(passos_playwright)
+                    if index < 0 or index >= len(canonical_passos_playwright)
                 ]
                 if invalid_indices:
                     raise SessionGuardianError(
@@ -1630,17 +1640,19 @@ async def executar_acao_rapida(
                             "reason": "learned_graph_step_index_out_of_range",
                             "execution_model": "learned_graph",
                             "invalid_step_indices": invalid_indices,
-                            "steps_count": len(passos_playwright),
+                            "steps_count": len(canonical_passos_playwright),
                             "current_state_id": current_match["state_id"],
                             "target_state_id": target_state_id,
                         },
                     )
-                passos_playwright = [passos_playwright[index] for index in selected_indices]
+                original_passos_playwright = canonical_passos_playwright
+                passos_playwright = [original_passos_playwright[index] for index in selected_indices]
                 graph_plan = {
                     "execution_model": "learned_graph",
                     "current_state_id": current_match["state_id"],
                     "target_state_id": target_state_id,
                     "path_step_indices": selected_indices,
+                    "path_step_ids": selected_step_ids,
                     "path_length": len(graph_path),
                 }
                 resume_index = 0

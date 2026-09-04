@@ -3136,6 +3136,10 @@ class DemoSessionManager:
             ):
                 step["transition_role"] = "client_query"
 
+        from backend.services.learned_graph import ensure_stable_step_ids
+        steps = ensure_stable_step_ids(steps)
+        robust_steps = ensure_stable_step_ids(robust_steps)
+
         output_states: list[dict[str, Any]] = []
         if selected_extraction_contract:
             expected_result_for_output = str(
@@ -3192,6 +3196,7 @@ class DemoSessionManager:
                 "page_ref": str(step.get("page_ref") or "main"),
                 "sequence_index": index,
                 "step_index": index,
+                "step_id": str(step.get("step_id") or ""),
                 "action_type": str(step.get("tipo") or ""),
                 "transition_kind": "branch" if step.get("branch_id") or step.get("alternative_group") else "sequence",
                 "branch_id": str(step.get("branch_id") or ""),
@@ -3298,18 +3303,37 @@ class DemoSessionManager:
             else []
         )
 
+        learned_state_ids = {str(item.get("state_id")) for item in learned_state_records if isinstance(item, dict) and item.get("state_id")}
+        graph_candidate_valid = bool(
+            learned_state_records
+            and learned_transitions
+            and all(
+                isinstance(item, dict)
+                and str(item.get("from_state_id") or "") in learned_state_ids
+                and str(item.get("to_state_id") or "") in learned_state_ids
+                for item in learned_transitions
+            )
+        )
+        if learned_transitions and not graph_candidate_valid:
+            learning_warnings = [*learning_warnings, "GRAPH_STATE_EVIDENCE_INSUFFICIENT_LINEAR_FALLBACK"]
+            learned_states = []
+            learned_transitions_to_publish: list[dict[str, Any]] = []
+        else:
+            learned_states = learned_state_records
+            learned_transitions_to_publish = learned_transitions
+
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
             "descricao": str(description or "Rotina aprendida por demonstracao manual.").strip(),
             "url_inicial": _initial_url_for_learned_action(session, learning_events, robust_steps),
             "passos_playwright": steps,
             "robust_steps": robust_steps,
-            "execution_model": "learned_graph" if learned_state_records and learned_transitions else "legacy_linear",
+            "execution_model": "learned_graph" if graph_candidate_valid else "legacy_linear",
             "output_states": output_states,
             "outputs": outputs,
             "page_refs": sorted({str(step.get("page_ref") or "main") for step in robust_steps}),
-            "learned_states": learned_state_records,
-            "learned_transitions": learned_transitions,
+            "learned_states": learned_states,
+            "learned_transitions": learned_transitions_to_publish,
             "original_steps": [dict(step) for step in steps],
             "learning_events": learning_events,
             "variaveis_necessarias": variables,
