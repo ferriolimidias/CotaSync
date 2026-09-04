@@ -27,6 +27,7 @@ class BatchCreateRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
     client_group: str | None = None
     list_id: str | None = None
+    spreadsheet_id: str | None = None
     client_ids: list[str] = Field(default_factory=list)
     requested_by: str = "api"
     delay_between_rows_seconds: float = 3
@@ -45,6 +46,7 @@ async def create_batch_endpoint(
             rows=payload.rows,
             client_group=payload.client_group,
             list_id=payload.list_id,
+            spreadsheet_id=payload.spreadsheet_id,
             client_ids=payload.client_ids,
             requested_by=payload.requested_by,
             delay_between_rows_seconds=payload.delay_between_rows_seconds,

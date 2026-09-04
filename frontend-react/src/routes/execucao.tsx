@@ -7,6 +7,7 @@ import { Download, Play, StopCircle } from "lucide-react";
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { ClientSearchCombobox } from "@/components/cotasync/ClientSearchCombobox";
+import { SearchableSelect } from "@/components/cotasync/SearchableSelect";
 import { DataTable, type Column } from "@/components/cotasync/DataTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,24 +15,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   cancelBatch,
   createBatch,
   exportBatchResultsCsv,
+  exportSystemSpreadsheet,
   getActions,
   getBatch,
   getBatches,
   getClients,
   getClientLists,
+  getSystemSpreadsheets,
   getRun,
   runAction,
   resumeBatch,
+  syncSystemSpreadsheetGoogle,
 } from "@/services/api";
 import type { ApiBatch, ApiClient, ApiRun, BatchItem } from "@/types/api";
 import { actionIsExecutable, batchStatusLabel, runStatusLabel } from "@/lib/status-labels";
@@ -49,6 +46,7 @@ function ExecucaoPage() {
     queryFn: () => getClients({ pageSize: 200, includeInactive: false }),
   });
   const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
+  const spreadsheets = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const batches = useQuery({
     queryKey: ["batches"],
     queryFn: () => getBatches({ pageSize: 10 }),
@@ -56,6 +54,7 @@ function ExecucaoPage() {
   });
   const [actionId, setActionId] = useState("");
   const [group, setGroup] = useState("");
+  const [spreadsheetId, setSpreadsheetId] = useState("");
   const [delay, setDelay] = useState(3);
   const [currentBatchId, setCurrentBatchId] = useState<string | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
@@ -78,13 +77,6 @@ function ExecucaoPage() {
     refetchInterval: (query) => (isFinalRun(query.state.data as ApiRun | undefined) ? false : 2500),
   });
 
-  const groups = useMemo(
-    () =>
-      Array.from(
-      new Set((clientLists.data ?? []).map((list) => list.id)),
-      ).sort(),
-    [clients.data],
-  );
   const selectedClients = useMemo(
     () => (clients.data?.items ?? []).filter((client) => !group || client.list_id === group),
     [clients.data, group],
@@ -98,9 +90,18 @@ function ExecucaoPage() {
     [actions.data],
   );
   const compatibleActions = useMemo(
-    () => executableActions.filter((action) => !group || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(group)),
+    () => executableActions.filter((action) => !group || action.scope_mode === "all" || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(group)),
     [executableActions, group],
   );
+  const compatibleSpreadsheets = useMemo(
+    () => (spreadsheets.data ?? []).filter((sheet) => !group || sheet.default_list_id === group),
+    [spreadsheets.data, group],
+  );
+  const selectedAction = useMemo(() => compatibleActions.find((action) => action.id === actionId), [compatibleActions, actionId]);
+  const selectedSpreadsheet = useMemo(() => compatibleSpreadsheets.find((sheet) => sheet.id === spreadsheetId), [compatibleSpreadsheets, spreadsheetId]);
+  const requiredFieldIds = useMemo(() => (selectedAction?.outputs ?? []).map((output) => output.destination?.field_id).filter(Boolean) as string[], [selectedAction]);
+  const requiresSpreadsheet = requiredFieldIds.length > 0;
+  const missingFieldIds = useMemo(() => requiredFieldIds.filter((fieldId) => !selectedSpreadsheet?.fields.some((field) => field.field_id === fieldId || field.id === fieldId)), [requiredFieldIds, selectedSpreadsheet]);
   const individualActions = useMemo(
     () => executableActions.filter((action) => !singleClient || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(singleClient.list_id || "")),
     [executableActions, singleClient],
@@ -147,6 +148,7 @@ function ExecucaoPage() {
       createBatch({
         action_id: actionId,
         list_id: group || undefined,
+        spreadsheet_id: spreadsheetId || undefined,
         delay_between_rows_seconds: delay,
         idempotencyKey,
       }),
@@ -161,6 +163,16 @@ function ExecucaoPage() {
     onError: (error) =>
       toast.error(error instanceof Error ? error.message : "Não foi possível criar a execução."),
   });
+
+  useEffect(() => {
+    setActionId("");
+    setSpreadsheetId("");
+  }, [group]);
+
+  useEffect(() => {
+    if (compatibleSpreadsheets.length === 1) setSpreadsheetId(compatibleSpreadsheets[0].id);
+    if (!compatibleSpreadsheets.some((sheet) => sheet.id === spreadsheetId)) setSpreadsheetId("");
+  }, [compatibleSpreadsheets, spreadsheetId]);
 
   const cancel = useMutation({
     mutationFn: (id: string) => cancelBatch(id),
@@ -185,13 +197,17 @@ function ExecucaoPage() {
       toast.error(error instanceof Error ? error.message : "Não foi possível retomar a execução."),
   });
 
-  const batch = currentBatch.data || batches.data?.items[0];
+  const batch = currentBatch.data;
+  const latestBatch = batches.data?.items[0];
   const batchId = batch?.batch_id || batch?.id || "";
   const progress = batch?.total_items
     ? Math.round((batch.processed_items / batch.total_items) * 100)
     : 0;
   const batchRows = batch?.rows || batch?.items || batch?.results || [];
   const attentionItem = batchRows.find((item) => item.status === "needs_attention");
+  const batchSheet = spreadsheets.data?.find((sheet) => sheet.id === batch?.spreadsheet_id);
+  const googleConnectors = batchSheet?.connectors.filter((connector) => connector.type === "google_sheets") ?? [];
+  const googlePending = googleConnectors.filter((connector) => connector.status !== "synced" && connector.status !== "active");
   const batchTableColumns = useMemo<Column<BatchItem>[]>(
     () => (batch?.result_columns || []).map((column) => ({
       key: column.key,
@@ -227,18 +243,12 @@ function ExecucaoPage() {
           <CardContent className="space-y-4">
             <div className="grid gap-2">
               <Label>Ação</Label>
-              <Select value={singleActionId} onValueChange={setSingleActionId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Selecione uma ação" />
-                </SelectTrigger>
-                <SelectContent>
-                  {individualActions.map((action) => (
-                    <SelectItem key={action.id} value={action.id}>
-                      {action.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                value={singleActionId}
+                options={individualActions.map((action) => ({ value: action.id, label: action.name }))}
+                onValueChange={setSingleActionId}
+                placeholder="Selecione uma ação"
+              />
             </div>
             <div className="grid gap-2">
               <Label>Cliente</Label>
@@ -313,38 +323,35 @@ function ExecucaoPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-2">
-              <Label>Ação</Label>
-              <Select value={actionId} onValueChange={setActionId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Selecione uma ação" />
-                </SelectTrigger>
-                <SelectContent>
-                {compatibleActions.map((action) => (
-                    <SelectItem key={action.id} value={action.id}>
-                      {action.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>Lista/grupo</Label>
+              <SearchableSelect
+                value={group}
+                options={[{ value: "", label: "Todos os clientes ativos" }, ...(clientLists.data ?? []).map((item) => ({ value: item.id, label: item.name }))]}
+                onValueChange={setGroup}
+                placeholder="Selecione uma lista"
+              />
             </div>
             <div className="grid gap-2">
-              <Label>Lista/grupo</Label>
-              <Select
-                value={group || "all"}
-                onValueChange={(value) => setGroup(value === "all" ? "" : value)}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Todos os clientes ativos</SelectItem>
-                  {(clientLists.data ?? []).map((item) => (
-                    <SelectItem key={item.id} value={item.id}>
-                      {item.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Label>Ação</Label>
+              <SearchableSelect
+                value={actionId}
+                options={compatibleActions.map((action) => ({ value: action.id, label: action.name, description: action.allowed_list_ids.length ? "Disponível para listas selecionadas" : "Disponível para todas as listas" }))}
+                onValueChange={setActionId}
+                placeholder="Selecione uma ação"
+                emptyLabel={group ? "Nenhuma ação disponível para esta lista." : "Nenhuma ação executável encontrada."}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label>Planilha do Sistema</Label>
+              <SearchableSelect
+                value={spreadsheetId}
+                options={compatibleSpreadsheets.map((sheet) => ({ value: sheet.id, label: sheet.name, description: `${sheet.client_count} clientes · ${sheet.fields.length} campos` }))}
+                onValueChange={setSpreadsheetId}
+                placeholder={group ? "Selecione a planilha da lista" : "Selecione uma planilha"}
+                emptyLabel={group ? "Nenhuma planilha associada a esta lista." : "Nenhuma Planilha do Sistema encontrada."}
+              />
+              {!compatibleSpreadsheets.length && <p className="text-xs text-amber-700">Nenhuma Planilha do Sistema está associada à seleção atual. Para uma ação livre, este destino é opcional.</p>}
+              {missingFieldIds.length > 0 && <p className="text-xs text-destructive">A ação usa {missingFieldIds.length} campo(s) que não existem nesta planilha.</p>}
             </div>
             <div className="grid gap-2">
               <Label>Intervalo entre clientes</Label>
@@ -356,16 +363,18 @@ function ExecucaoPage() {
               />
             </div>
             <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
-              <p className="font-medium text-foreground">
-                {selectedClients.length} clientes selecionados
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                O sistema processa 1 cliente por vez.
-              </p>
+              <p className="font-medium text-foreground">Resumo da execução</p>
+              <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
+                <span>Lista: <strong className="text-foreground">{(clientLists.data ?? []).find((item) => item.id === group)?.name || "Todas as listas"}</strong></span>
+                <span>Ação: <strong className="text-foreground">{selectedAction?.name || "-"}</strong></span>
+                <span>Planilha: <strong className="text-foreground">{selectedSpreadsheet?.name || "-"}</strong></span>
+                <span>Clientes ativos: <strong className="text-foreground">{selectedClients.length}</strong></span>
+                <span>Processamento: <strong className="text-foreground">1 cliente por vez · {delay}s entre clientes</strong></span>
+              </div>
             </div>
             <Button
               className="w-full"
-              disabled={!actionId || selectedClients.length === 0 || create.isPending}
+              disabled={!actionId || selectedClients.length === 0 || (requiresSpreadsheet && !spreadsheetId) || missingFieldIds.length > 0 || create.isPending}
               onClick={() => create.mutate()}
             >
               <Play className="h-4 w-4" /> {create.isPending ? "Enfileirando..." : "Executar agora"}
@@ -392,13 +401,22 @@ function ExecucaoPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             {!batch ? (
-              <p className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
-                Nenhuma execução em massa recente.
-              </p>
+              <div className="space-y-3">
+                <p className="rounded-md border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                  Nenhuma execução em massa ativa nesta configuração.
+                </p>
+                {latestBatch && <div className="rounded-md border border-border bg-muted/20 p-3 text-sm">
+                  <p className="font-medium text-foreground">Última execução</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{latestBatch.processed_items} de {latestBatch.total_items} processados · {batchStatusLabel(latestBatch.status)}</p>
+                </div>}
+              </div>
             ) : (
               <>
                 <div className="space-y-2">
                   <Progress value={progress} />
+                  {batch.current_client_name && (
+                    <p className="text-sm text-muted-foreground">Cliente atual: <strong className="text-foreground">{batch.current_client_name}</strong></p>
+                  )}
                   <div className="grid gap-2 text-sm sm:grid-cols-3">
                     <Info label="Total" value={batch.total_items} />
                     <Info label="Processados" value={batch.processed_items} />
@@ -406,6 +424,10 @@ function ExecucaoPage() {
                     <Info label="Erros" value={batch.error_items} />
                     <Info label="Interrompidos" value={batch.interrupted_items} />
                     <Info label="Cancelados" value={batch.cancelled_items} />
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                    <span className="rounded-full border px-2 py-1">Planilha: {batchSheet ? "resultados salvos" : "não selecionada"}</span>
+                    {googleConnectors.length > 0 && <span className="rounded-full border px-2 py-1">Google Sheets: {googlePending.length ? `${googlePending.length} pendência(s)` : "sincronizado"}</span>}
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -417,6 +439,19 @@ function ExecucaoPage() {
                   >
                     <StopCircle className="h-4 w-4" /> Cancelar execução
                   </Button>
+                  {googlePending.length > 0 && batch.spreadsheet_id && (
+                    <Button variant="outline" size="sm" onClick={async () => {
+                      try {
+                        await syncSystemSpreadsheetGoogle(batch.spreadsheet_id as string, "outbound");
+                        await queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] });
+                        toast.success("Sincronização Google repetida sem executar a ação novamente.");
+                      } catch (error) {
+                        toast.error(error instanceof Error ? error.message : "Não foi possível repetir a sincronização.");
+                      }
+                    }}>
+                      Repetir sincronização
+                    </Button>
+                  )}
                   {batch.status === "interrupted" && attentionItem && (
                     <>
                       <Button asChild variant="outline" size="sm">
@@ -432,25 +467,37 @@ function ExecucaoPage() {
                     </>
                   )}
                   <Button
-                    variant="outline"
+                    size="sm"
+                    disabled={!batch.spreadsheet_id}
+                    onClick={async () => {
+                      try {
+                        const blob = await exportSystemSpreadsheet(batch.spreadsheet_id as string);
+                        downloadBlob(`planilha_atualizada_${batch.spreadsheet_id}.xlsx`, blob);
+                      } catch (error) {
+                        toast.error(error instanceof Error ? error.message : "Não foi possível baixar o Excel atualizado.");
+                      }
+                    }}
+                  >
+                    <Download className="h-4 w-4" /> Baixar Excel atualizado
+                  </Button>
+                  <Button
+                    variant="ghost"
                     size="sm"
                     disabled={!batchId}
                     onClick={async () => {
                       try {
-                        downloadCsv(
-                          `batch_${batchId}_results.csv`,
-                          await exportBatchResultsCsv(batchId),
-                        );
+                        downloadCsv(`batch_${batchId}_results.csv`, await exportBatchResultsCsv(batchId));
                       } catch (error) {
-                        toast.error(
-                          error instanceof Error ? error.message : "Não foi possível baixar o CSV.",
-                        );
+                        toast.error(error instanceof Error ? error.message : "Não foi possível baixar o CSV.");
                       }
                     }}
                   >
-                    <Download className="h-4 w-4" /> Baixar CSV final
+                    CSV (opcional)
                   </Button>
                 </div>
+                {batch.spreadsheet_id && (
+                  <p className="text-xs text-muted-foreground">Os resultados persistidos podem ser baixados na Planilha do Sistema, inclusive em lotes com erros parciais.</p>
+                )}
                 {batch.status === "interrupted" && attentionItem && (
                   <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
                     <p className="font-medium text-foreground">Execução pausada</p>
@@ -559,6 +606,15 @@ function variablesFromClient(client: ApiClient) {
 
 function downloadCsv(filename: string, csvText: string) {
   const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

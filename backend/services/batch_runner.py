@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal
+from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, DataSource, DataSourceField, Run as DbRun, SessionLocal
 from backend.services.actions_repository import find_action
 from backend.services.clients_repository import (
     get_client_display_fields,
@@ -211,6 +211,7 @@ def _idempotency_payload(
     client_ids: list[str] | None,
     rows: list[dict[str, Any]],
     delay_between_rows_seconds: int | float,
+    spreadsheet_id: str | None,
 ) -> dict[str, Any]:
     return {
         "operation": "batch:create",
@@ -218,6 +219,7 @@ def _idempotency_payload(
         "source": str(source or ""),
         "client_group": str(client_group or ""),
         "client_ids": [str(item) for item in client_ids or []],
+        "spreadsheet_id": str(spreadsheet_id or ""),
         "delay_between_rows_seconds": max(0, float(delay_between_rows_seconds)),
         "rows": [
             {
@@ -389,6 +391,7 @@ def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem], *, action: Any = N
         "action_key": metadata.get("action_key", ""),
         "action_name": metadata.get("action_name", metadata.get("action_key", "")),
         "client_ids": metadata.get("client_ids", []),
+        "spreadsheet_id": metadata.get("spreadsheet_id") or None,
         "result_columns": result_columns,
         "output_definitions": output_definitions,
         "rows": [
@@ -469,6 +472,7 @@ def create_batch(
     rows: list[dict[str, Any]] | None = None,
     client_group: str | None = None,
     list_id: str | None = None,
+    spreadsheet_id: str | None = None,
     client_ids: list[str] | None = None,
     requested_by: str = "api",
     delay_between_rows_seconds: int | float = DEFAULT_DELAY_BETWEEN_ROWS_SECONDS,
@@ -481,6 +485,30 @@ def create_batch(
     action = find_action(action_id)
     if action is None:
         raise BatchRunnerError("Acao nao encontrada.")
+    destinations = [
+        output.get("destination")
+        for output in (getattr(action, "outputs", []) or [])
+        if isinstance(output, dict) and isinstance(output.get("destination"), dict) and output.get("destination", {}).get("field_id")
+    ]
+    if destinations and not spreadsheet_id:
+        raise BatchRunnerError("Esta ação possui resultados destinados à Planilha do Sistema; selecione uma planilha.")
+    if spreadsheet_id:
+        with SessionLocal() as session:
+            sheet = session.get(DataSource, spreadsheet_id)
+            if sheet is None or sheet.source_type != "system_spreadsheet":
+                raise BatchRunnerError("Planilha do Sistema não encontrada.")
+            configuration = sheet.configuration or {}
+            if list_id and configuration.get("default_list_id") != list_id:
+                raise BatchRunnerError("A Planilha do Sistema selecionada não pertence à lista escolhida.")
+            available_fields = {field.id for field in session.query(DataSourceField).filter(DataSourceField.data_source_id == spreadsheet_id, DataSourceField.active.is_(True)).all()}
+            missing_fields = []
+            for output in getattr(action, "outputs", []) or []:
+                destination = output.get("destination") if isinstance(output, dict) else None
+                field_id = destination.get("field_id") if isinstance(destination, dict) else None
+                if field_id and str(field_id) not in available_fields:
+                    missing_fields.append(str(field_id))
+            if missing_fields:
+                raise BatchRunnerError("A ação usa campos que não existem nesta planilha: " + ", ".join(missing_fields))
     source = "rows"
     prepared_rows = rows or []
     if client_group or list_id or client_ids:
@@ -500,6 +528,7 @@ def create_batch(
         client_ids=client_ids,
         rows=prepared_rows,
         delay_between_rows_seconds=delay_between_rows_seconds,
+        spreadsheet_id=spreadsheet_id,
     )
     fingerprint = batch_idempotency_fingerprint(fingerprint_payload)
     if normalized_key:
@@ -563,7 +592,7 @@ def create_batch(
                 idempotency_user_id=normalized_user_id if normalized_key else None,
                 idempotency_operation=operation if normalized_key else None,
                 idempotency_fingerprint=fingerprint if normalized_key else None,
-                metadata_json={"source": source, "action_key": action.key, "action_name": action.name, "client_ids": batch["client_ids"]},
+                metadata_json={"source": source, "action_key": action.key, "action_name": action.name, "client_ids": batch["client_ids"], "spreadsheet_id": spreadsheet_id or "", "list_id": list_id or ""},
             )
             session.add(db_batch)
             session.flush()

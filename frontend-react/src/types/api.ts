@@ -31,6 +31,7 @@ export type SystemSpreadsheet = {
   id: string;
   system_spreadsheet_id: string;
   name: string;
+  default_list_id?: string | null;
   active: boolean;
   client_count: number;
   last_sync?: string | null;
@@ -97,6 +98,8 @@ export type ApiAction = {
   name: string;
   description?: string;
   allowed_list_ids: string[];
+  scope_mode?: "all" | "selected" | string;
+  outputs?: Array<{ destination?: { type?: string; field_id?: string; system_spreadsheet_id?: string } }>;
   variables: Array<{ key: string; label?: string; required?: boolean }>;
   steps_count?: number;
   has_url?: boolean;
@@ -199,6 +202,7 @@ export type ApiBatch = {
   result_columns?: BatchResultColumn[];
   output_definitions?: BatchResultColumn[];
   metadata?: Record<string, unknown>;
+  spreadsheet_id?: string | null;
 };
 
 export type BrowserStatus = {

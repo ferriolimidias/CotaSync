@@ -399,6 +399,7 @@ export async function createBatch(input: {
   action_id: string;
   client_group?: string;
   list_id?: string;
+  spreadsheet_id?: string;
   client_ids?: string[];
   delay_between_rows_seconds?: number;
   idempotencyKey: string;
@@ -410,6 +411,7 @@ export async function createBatch(input: {
       action_id: input.action_id,
       client_group: input.client_group || null,
       list_id: input.list_id || null,
+      spreadsheet_id: input.spreadsheet_id || null,
       client_ids: input.client_ids || [],
       requested_by: "react",
       delay_between_rows_seconds: input.delay_between_rows_seconds ?? 3,
