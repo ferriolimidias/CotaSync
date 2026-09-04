@@ -170,9 +170,10 @@ def _rows_from_clients(
     action: Any,
     *,
     client_group: str | None = None,
+    list_id: str | None = None,
     client_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    validation = validate_clients_for_action(action, client_group=client_group, client_ids=client_ids)
+    validation = validate_clients_for_action(action, client_group=client_group, list_id=list_id, client_ids=client_ids)
     ready = validation.get("ready") if isinstance(validation, dict) else []
     rows: list[dict[str, Any]] = []
     for client in ready if isinstance(ready, list) else []:
@@ -467,6 +468,7 @@ def create_batch(
     action_id: str,
     rows: list[dict[str, Any]] | None = None,
     client_group: str | None = None,
+    list_id: str | None = None,
     client_ids: list[str] | None = None,
     requested_by: str = "api",
     delay_between_rows_seconds: int | float = DEFAULT_DELAY_BETWEEN_ROWS_SECONDS,
@@ -481,9 +483,9 @@ def create_batch(
         raise BatchRunnerError("Acao nao encontrada.")
     source = "rows"
     prepared_rows = rows or []
-    if client_group or client_ids:
+    if client_group or list_id or client_ids:
         source = "clients"
-        prepared_rows = _rows_from_clients(action, client_group=client_group, client_ids=client_ids)
+        prepared_rows = _rows_from_clients(action, client_group=client_group, list_id=list_id, client_ids=client_ids)
         if not prepared_rows:
             raise BatchRunnerError("Nenhum cliente ativo com dados completos para esta acao.")
     _validate_prepared_rows(action, prepared_rows)

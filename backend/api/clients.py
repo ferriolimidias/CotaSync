@@ -103,6 +103,7 @@ async def client_template_csv_endpoint() -> Response:
 async def validate_clients_for_action_endpoint(
     action_id: str,
     client_group: str | None = None,
+    list_id: str | None = None,
     client_ids: str | None = None,
 ) -> dict[str, Any]:
     try:
@@ -113,7 +114,7 @@ async def validate_clients_for_action_endpoint(
         raise HTTPException(status_code=404, detail="Acao nao encontrada.")
     ids = [item.strip() for item in str(client_ids or "").split(",") if item.strip()]
     try:
-        result = validate_clients_for_action(action, client_group=client_group, client_ids=ids)
+        result = validate_clients_for_action(action, client_group=client_group, list_id=list_id, client_ids=ids)
     except ClientsRepositoryError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"status": "ok", **result}

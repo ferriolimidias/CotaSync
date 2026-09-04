@@ -16,7 +16,7 @@ from uuid import uuid4
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
-from backend.db import Client, DataSource, DataSourceField, Run, SessionLocal, SpreadsheetConnector
+from backend.db import Client, ClientList, DataSource, DataSourceField, Run, SessionLocal, SpreadsheetConnector
 from backend.services.actions_repository import project_root
 from backend.services.client_fields import canonical_client_field_key
 
@@ -53,12 +53,14 @@ def _dump_field(field: DataSourceField) -> dict[str, Any]:
 
 
 def _dump_sheet(sheet: DataSource, fields: list[DataSourceField], connectors: list[SpreadsheetConnector], client_count: int) -> dict[str, Any]:
+    configuration = sheet.configuration or {}
     return {
         "id": sheet.id,
         "system_spreadsheet_id": sheet.id,
         "name": sheet.name,
         "active": sheet.status == "active",
         "identity_mapping": (sheet.configuration or {}).get("identity_mapping", {"grupo": None, "cota": None, "versao": None}),
+        "default_list_id": configuration.get("default_list_id"),
         "fields": [_dump_field(field) for field in fields if field.active],
         "client_count": client_count,
         "connectors": [
@@ -81,12 +83,27 @@ def _sheet(db, sheet_id: str) -> DataSource:
     return sheet
 
 
-def create_system_spreadsheet(name: str, headers: list[str], *, identity_mapping: dict[str, Any] | None = None, tenant_id: str = "default") -> dict[str, Any]:
+def _ensure_list(db, list_id: str | None, tenant_id: str) -> ClientList:
+    if list_id:
+        row = db.scalar(select(ClientList).where(ClientList.id == list_id, ClientList.tenant_id == tenant_id, ClientList.active.is_(True)))
+        if row is None:
+            raise SystemSpreadsheetError("Lista de clientes não encontrada.")
+        return row
+    row = db.scalar(select(ClientList).where(ClientList.tenant_id == tenant_id, ClientList.name == "Lista Principal", ClientList.active.is_(True)))
+    if row is None:
+        row = ClientList(id=str(uuid4()), tenant_id=tenant_id, name="Lista Principal", active=True)
+        db.add(row)
+        db.flush()
+    return row
+
+
+def create_system_spreadsheet(name: str, headers: list[str], *, identity_mapping: dict[str, Any] | None = None, list_id: str | None = None, tenant_id: str = "default") -> dict[str, Any]:
     clean = [str(value).strip() for value in headers if str(value).strip()]
     if not clean:
         raise SystemSpreadsheetError("A planilha precisa possuir pelo menos um campo.")
     with SessionLocal.begin() as db:
-        sheet = DataSource(id=str(uuid4()), name=str(name).strip() or "Planilha de clientes", source_type=SYSTEM_TYPE, status="active", schema_metadata={"headers": clean, "version": 1}, configuration={"tenant_id": tenant_id, "identity_mapping": identity_mapping or {}})
+        client_list = _ensure_list(db, list_id, tenant_id)
+        sheet = DataSource(id=str(uuid4()), name=str(name).strip() or "Planilha de clientes", source_type=SYSTEM_TYPE, status="active", schema_metadata={"headers": clean, "version": 1}, configuration={"tenant_id": tenant_id, "identity_mapping": identity_mapping or {}, "default_list_id": client_list.id})
         db.add(sheet)
         db.flush()
         for position, header in enumerate(clean):
@@ -213,8 +230,11 @@ def _upsert_fields(db, sheet: DataSource, headers: list[str]) -> list[DataSource
     return _fields(db, sheet.id)
 
 
-def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], identity_mapping: dict[str, Any] | None = None) -> int:
+def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], identity_mapping: dict[str, Any] | None = None, list_id: str | None = None) -> int:
     fields = _fields(db, sheet_id)
+    sheet = _sheet(db, sheet_id)
+    configured_list_id = list_id or (sheet.configuration or {}).get("default_list_id")
+    client_list = _ensure_list(db, configured_list_id, (sheet.configuration or {}).get("tenant_id", "default"))
     keys = [field.semantic_role or _key(field.display_name) for field in fields]
     identity = identity_mapping or {}
     role_to_key = {role: str(identity.get(role) or role) for role in ("grupo", "cota", "versao")}
@@ -230,11 +250,12 @@ def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], i
         row_key = f"{grupo}|{cota}|{versao}"
         client = existing.get(row_key)
         if client is None:
-            client = Client(id=str(uuid4()), name=values.get("name") or values.get("nome") or row_key, client_group=sheet_id, system_spreadsheet_id=sheet_id, active=True)
+            client = Client(id=str(uuid4()), name=values.get("name") or values.get("nome") or row_key, client_group=client_list.name, list_id=client_list.id, system_spreadsheet_id=sheet_id, active=True)
             db.add(client)
             existing[row_key] = client
         client.name = values.get("name") or values.get("nome") or client.name
-        client.client_group = sheet_id
+        client.client_group = client_list.name
+        client.list_id = client_list.id
         client.system_spreadsheet_id = sheet_id
         client.grupo, client.cota, client.versao = grupo, cota, versao
         client.variables = values
@@ -242,7 +263,7 @@ def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], i
     return count
 
 
-def import_excel(*, name: str, content: bytes, filename: str, sheet_name: str | None = None, header_row: int = 1, identity_mapping: dict[str, Any] | None = None, tenant_id: str = "default") -> dict[str, Any]:
+def import_excel(*, name: str, content: bytes, filename: str, sheet_name: str | None = None, header_row: int = 1, identity_mapping: dict[str, Any] | None = None, list_id: str | None = None, tenant_id: str = "default") -> dict[str, Any]:
     try:
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=False)
     except Exception as exc:
@@ -254,14 +275,14 @@ def import_excel(*, name: str, content: bytes, filename: str, sheet_name: str | 
     headers = [str(value or "").strip() for value in rows[header_row - 1]]
     if not any(headers):
         raise SystemSpreadsheetError("Não foi possível detectar o cabeçalho.")
-    sheet_data = create_system_spreadsheet(name, headers, identity_mapping=identity_mapping, tenant_id=tenant_id)
+    sheet_data = create_system_spreadsheet(name, headers, identity_mapping=identity_mapping, list_id=list_id, tenant_id=tenant_id)
     path = project_root() / "data" / "spreadsheets" / f"{sheet_data['id']}-{re.sub(r'[^A-Za-z0-9_.-]', '_', filename)}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(content)
     with SessionLocal.begin() as db:
         sheet = _sheet(db, sheet_data["id"])
         _upsert_connector(db, sheet.id, "excel", {"filename": filename, "workbook_path": str(path), "sheet_name": selected.title, "header_row": header_row})
-        _upsert_rows(db, sheet.id, headers, [list(row) for row in rows[header_row:]], identity_mapping)
+        _upsert_rows(db, sheet.id, headers, [list(row) for row in rows[header_row:]], identity_mapping, list_id)
     return get_system_spreadsheet(sheet_data["id"], tenant_id=tenant_id)
 
 
@@ -382,7 +403,7 @@ def test_google_connection(url_or_id: str) -> dict[str, Any]:
     return {"spreadsheet_id": sheet_id, "name": metadata.get("properties", {}).get("title", ""), "tabs": [item.get("properties", {}).get("title", "") for item in metadata.get("sheets", [])], "service_account_email": connector_service_account_email()}
 
 
-def import_google(*, name: str, url_or_id: str, tab: str, tenant_id: str = "default") -> dict[str, Any]:
+def import_google(*, name: str, url_or_id: str, tab: str, list_id: str | None = None, tenant_id: str = "default") -> dict[str, Any]:
     sheet_id = google_sheet_id(url_or_id)
     if not sheet_id or not tab:
         raise SystemSpreadsheetError("Informe a planilha e a aba Google.")
@@ -395,11 +416,11 @@ def import_google(*, name: str, url_or_id: str, tab: str, tenant_id: str = "defa
     if not values:
         raise SystemSpreadsheetError("A aba Google não possui dados.")
     headers = [str(value or "").strip() for value in values[0]]
-    result = create_system_spreadsheet(name, headers, tenant_id=tenant_id)
+    result = create_system_spreadsheet(name, headers, list_id=list_id, tenant_id=tenant_id)
     with SessionLocal.begin() as db:
         sheet = _sheet(db, result["id"])
         _upsert_connector(db, sheet.id, "google_sheets", {"spreadsheet_id": sheet_id, "tab": tab})
-        _upsert_rows(db, sheet.id, headers, values[1:])
+        _upsert_rows(db, sheet.id, headers, values[1:], list_id=list_id)
     return get_system_spreadsheet(result["id"], tenant_id=tenant_id)
 
 

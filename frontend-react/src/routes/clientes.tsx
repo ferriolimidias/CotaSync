@@ -45,6 +45,8 @@ import {
   getSystemSpreadsheetRows,
   updateSystemSpreadsheetRow,
   syncSystemSpreadsheetGoogle,
+  getClientLists,
+  createClientList,
 } from "@/services/api";
 import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, SystemSpreadsheet } from "@/types/api";
 
@@ -62,6 +64,7 @@ type FormState = {
   cota: string;
   versao: string;
   notes: string;
+  list_id?: string;
 };
 
 type PreviewRowWithId = ClientsCsvPreviewRow & { id: string };
@@ -74,12 +77,14 @@ const emptyForm: FormState = {
   cota: "",
   versao: "",
   notes: "",
+  list_id: undefined,
 };
 
 function ClientesPage() {
   const queryClient = useQueryClient();
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => getClients({ pageSize: 200 }) });
   const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
+  const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("all");
   const [status, setStatus] = useState("all");
@@ -95,30 +100,26 @@ function ClientesPage() {
   const [googleUrl, setGoogleUrl] = useState("");
   const [googleTabs, setGoogleTabs] = useState<string[]>([]);
   const [googleTab, setGoogleTab] = useState("");
+  const [spreadsheetListId, setSpreadsheetListId] = useState("");
+  const [newListName, setNewListName] = useState("");
   const [openSheetId, setOpenSheetId] = useState<string | null>(null);
   const openSheet = useQuery({ queryKey: ["system-spreadsheet-rows", openSheetId], queryFn: () => getSystemSpreadsheetRows(openSheetId as string), enabled: Boolean(openSheetId) });
   const updateSheetRow = useMutation({ mutationFn: ({ clientId, values }: { clientId: string; values: Record<string, string> }) => updateSystemSpreadsheetRow(openSheetId as string, clientId, values), onSuccess: () => { void openSheet.refetch(); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Valor salvo na Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar o valor.") });
   const syncSheet = useMutation({ mutationFn: (id: string) => syncSystemSpreadsheetGoogle(id), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Sincronização solicitada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível sincronizar.") });
   const createSpreadsheet = useMutation({
-    mutationFn: () => createSystemSpreadsheet({ name: spreadsheetName, headers: spreadsheetHeaders.split(",").map((value) => value.trim()).filter(Boolean) }),
+    mutationFn: () => createSystemSpreadsheet({ name: spreadsheetName, headers: spreadsheetHeaders.split(",").map((value) => value.trim()).filter(Boolean), list_id: spreadsheetListId || undefined }),
     onSuccess: () => { setSpreadsheetDialogOpen(false); setSpreadsheetName(""); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Planilha do Sistema criada."); },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível criar a planilha."),
   });
-  const importExcel = useMutation({ mutationFn: () => { if (!excelUpload) throw new Error("Selecione um arquivo .xlsx."); return importSystemSpreadsheetExcel({ name: spreadsheetName || excelUpload.filename, ...excelUpload }); }, onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Excel importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar o Excel.") });
+  const importExcel = useMutation({ mutationFn: () => { if (!excelUpload) throw new Error("Selecione um arquivo .xlsx."); return importSystemSpreadsheetExcel({ name: spreadsheetName || excelUpload.filename, ...excelUpload, list_id: spreadsheetListId || undefined }); }, onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); toast.success("Excel importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar o Excel.") });
   const testGoogle = useMutation({ mutationFn: () => testGoogleSpreadsheet(googleUrl), onSuccess: (result) => { setGoogleTabs(result.tabs); setGoogleTab(result.tabs[0] || ""); toast.success(`Planilha encontrada: ${result.name}`); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível conectar ao Google Sheets.") });
-  const importGoogle = useMutation({ mutationFn: () => importSystemSpreadsheetGoogle({ name: spreadsheetName || "Planilha Google", url_or_id: googleUrl, tab: googleTab }), onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Google Sheets importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar a aba Google.") });
+  const importGoogle = useMutation({ mutationFn: () => importSystemSpreadsheetGoogle({ name: spreadsheetName || "Planilha Google", url_or_id: googleUrl, tab: googleTab, list_id: spreadsheetListId || undefined }), onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Google Sheets importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar a aba Google.") });
+  const createList = useMutation({ mutationFn: () => createClientList(newListName), onSuccess: (list) => { setSpreadsheetListId(list.id); setNewListName(""); void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); toast.success("Lista criada e selecionada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível criar a lista.") });
 
-  const groups = useMemo(
-    () =>
-      Array.from(
-        new Set((clients.data?.items ?? []).map((client) => client.group).filter(Boolean)),
-      ).sort(),
-    [clients.data],
-  );
   const filtered = useMemo(() => {
     return (clients.data?.items ?? []).filter((client) => {
       const matchesText = client.name.toLowerCase().includes(query.toLowerCase());
-      const matchesGroup = group === "all" || client.group === group;
+      const matchesGroup = group === "all" || client.list_id === group;
       const matchesStatus =
         status === "all" || (status === "active" ? client.active : !client.active);
       return matchesText && matchesGroup && matchesStatus;
@@ -133,6 +134,7 @@ function ClientesPage() {
         active: input.active,
         notes: input.notes,
         variables: { grupo: input.grupo, cota: input.cota, versao: input.versao },
+        list_id: input.list_id,
       };
       return input.id ? updateClient(input.id, payload) : createClient(payload);
     },
@@ -197,7 +199,7 @@ function ClientesPage() {
       header: "Nome",
       cell: (client) => <span className="font-medium text-foreground">{client.name}</span>,
     },
-    { key: "l", header: "Lista/grupo", cell: (client) => client.group },
+    { key: "l", header: "Lista/grupo", cell: (client) => clientLists.data?.find((list) => list.id === client.list_id)?.name || client.group || "-" },
     { key: "g", header: "Grupo", cell: (client) => client.display_variables?.grupo || "-" },
     { key: "c", header: "Cota", cell: (client) => client.display_variables?.cota || "-" },
     { key: "v", header: "Versão", cell: (client) => client.display_variables?.versao || "-" },
@@ -257,9 +259,9 @@ function ClientesPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Todas as listas</SelectItem>
-              {groups.map((item) => (
-                <SelectItem key={item} value={item}>
-                  {item}
+              {(clientLists.data ?? []).map((item) => (
+                <SelectItem key={item.id} value={item.id}>
+                  {item.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -303,8 +305,8 @@ function ClientesPage() {
       <Dialog open={spreadsheetDialogOpen} onOpenChange={setSpreadsheetDialogOpen}>
         <DialogContent>
           <DialogHeader><DialogTitle>Nova planilha</DialogTitle></DialogHeader>
-          <div className="grid gap-3"><div className="grid grid-cols-3 gap-2"><Button variant={spreadsheetMode === "excel" ? "default" : "outline"} onClick={() => setSpreadsheetMode("excel")}>Importar Excel</Button><Button variant={spreadsheetMode === "google" ? "default" : "outline"} onClick={() => setSpreadsheetMode("google")}>Google Sheets</Button><Button variant={spreadsheetMode === "create" ? "default" : "outline"} onClick={() => setSpreadsheetMode("create")}>Criar no CotaSync</Button></div><div className="grid gap-2"><Label>Nome da Planilha do Sistema</Label><Input placeholder="Clientes Setembro" value={spreadsheetName} onChange={(event) => setSpreadsheetName(event.target.value)} /></div>{spreadsheetMode === "create" && <Input value={spreadsheetHeaders} onChange={(event) => setSpreadsheetHeaders(event.target.value)} placeholder="Campos separados por vírgula" />}{spreadsheetMode === "excel" && <Input type="file" accept=".xlsx" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; const encoded = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1] || ""); reader.onerror = () => reject(new Error("Falha ao ler arquivo.")); reader.readAsDataURL(file); }); setExcelUpload({ filename: file.name, content_base64: encoded }); }} />}{spreadsheetMode === "google" && <><Input placeholder="URL ou ID da planilha Google" value={googleUrl} onChange={(event) => setGoogleUrl(event.target.value)} /><Button variant="outline" onClick={() => testGoogle.mutate()} disabled={!googleUrl.trim() || testGoogle.isPending}>Testar conexão</Button>{googleTabs.length > 0 && <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={googleTab} onChange={(event) => setGoogleTab(event.target.value)}>{googleTabs.map((tab) => <option key={tab} value={tab}>{tab}</option>)}</select>}</>}</div>
-          <DialogFooter><Button onClick={() => spreadsheetMode === "create" ? createSpreadsheet.mutate() : spreadsheetMode === "excel" ? importExcel.mutate() : importGoogle.mutate()} disabled={!spreadsheetName.trim() || (spreadsheetMode === "excel" ? !excelUpload : spreadsheetMode === "google" ? !googleTab : false)}>{spreadsheetMode === "create" ? "Criar planilha" : "Importar para o sistema"}</Button></DialogFooter>
+          <div className="grid gap-3"><div className="grid grid-cols-3 gap-2"><Button variant={spreadsheetMode === "excel" ? "default" : "outline"} onClick={() => setSpreadsheetMode("excel")}>Importar Excel</Button><Button variant={spreadsheetMode === "google" ? "default" : "outline"} onClick={() => setSpreadsheetMode("google")}>Google Sheets</Button><Button variant={spreadsheetMode === "create" ? "default" : "outline"} onClick={() => setSpreadsheetMode("create")}>Criar no CotaSync</Button></div><div className="grid gap-2"><Label>Nome da Planilha do Sistema</Label><Input placeholder="Clientes Setembro" value={spreadsheetName} onChange={(event) => setSpreadsheetName(event.target.value)} /></div><div className="grid gap-2"><Label>Lista / grupo dos clientes</Label><Select value={spreadsheetListId} onValueChange={setSpreadsheetListId}><SelectTrigger><SelectValue placeholder="Selecionar lista existente" /></SelectTrigger><SelectContent>{(clientLists.data ?? []).map((list) => <SelectItem key={list.id} value={list.id}>{list.name}</SelectItem>)}</SelectContent></Select><div className="flex gap-2"><Input placeholder="Nome da nova lista" value={newListName} onChange={(event) => setNewListName(event.target.value)} /><Button type="button" variant="outline" onClick={() => createList.mutate()} disabled={!newListName.trim()}>Criar nova lista</Button></div></div>{spreadsheetMode === "create" && <Input value={spreadsheetHeaders} onChange={(event) => setSpreadsheetHeaders(event.target.value)} placeholder="Campos separados por vírgula" />}{spreadsheetMode === "excel" && <Input type="file" accept=".xlsx" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; const encoded = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1] || ""); reader.onerror = () => reject(new Error("Falha ao ler arquivo.")); reader.readAsDataURL(file); }); setExcelUpload({ filename: file.name, content_base64: encoded }); }} />}{spreadsheetMode === "google" && <><Input placeholder="URL ou ID da planilha Google" value={googleUrl} onChange={(event) => setGoogleUrl(event.target.value)} /><Button variant="outline" onClick={() => testGoogle.mutate()} disabled={!googleUrl.trim() || testGoogle.isPending}>Testar conexão</Button>{googleTabs.length > 0 && <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={googleTab} onChange={(event) => setGoogleTab(event.target.value)}>{googleTabs.map((tab) => <option key={tab} value={tab}>{tab}</option>)}</select>}</>}</div>
+          <DialogFooter><Button onClick={() => spreadsheetMode === "create" ? createSpreadsheet.mutate() : spreadsheetMode === "excel" ? importExcel.mutate() : importGoogle.mutate()} disabled={!spreadsheetName.trim() || !spreadsheetListId || (spreadsheetMode === "excel" ? !excelUpload : spreadsheetMode === "google" ? !googleTab : false)}>{spreadsheetMode === "create" ? "Criar planilha" : "Importar para o sistema"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -619,6 +621,7 @@ function fromClient(client: ApiClient): FormState {
     cota: client.display_variables?.cota || client.variables.cota || "",
     versao: client.display_variables?.versao || client.variables.versao || "",
     notes: client.notes || "",
+    list_id: client.list_id || undefined,
   };
 }
 

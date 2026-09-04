@@ -159,7 +159,7 @@ export async function getDashboard() {
 }
 
 export async function getClients(
-  params: { page?: number; pageSize?: number; group?: string; search?: string; includeInactive?: boolean } = {},
+  params: { page?: number; pageSize?: number; group?: string; listId?: string; search?: string; includeInactive?: boolean } = {},
 ) {
   const query = new URLSearchParams({
     page: String(params.page ?? 1),
@@ -167,6 +167,7 @@ export async function getClients(
     include_inactive: String(params.includeInactive ?? true),
   });
   if (params.group) query.set("group", params.group);
+  if (params.listId) query.set("list_id", params.listId);
   if (params.search?.trim()) query.set("search", params.search.trim());
   const payload = await apiFetch<{ clients: ApiPage<ApiClient> }>(`/api/v1/clients?${query}`);
   return payload.clients;
@@ -182,7 +183,17 @@ export async function getSystemSpreadsheets() {
   return payload.system_spreadsheets;
 }
 
-export async function createSystemSpreadsheet(input: { name: string; headers: string[] }) {
+export async function getClientLists() {
+  const payload = await apiFetch<{ client_lists: Array<{ id: string; name: string; active: boolean }> }>("/api/v1/client-lists");
+  return payload.client_lists;
+}
+
+export async function createClientList(name: string) {
+  const payload = await apiFetch<{ client_list: { id: string; name: string } }>("/api/v1/client-lists", { method: "POST", body: JSON.stringify({ name }) });
+  return payload.client_list;
+}
+
+export async function createSystemSpreadsheet(input: { name: string; headers: string[]; list_id?: string }) {
   const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets", { method: "POST", body: JSON.stringify(input) });
   return payload.system_spreadsheet;
 }
@@ -203,7 +214,7 @@ export async function syncSystemSpreadsheetGoogle(id: string, direction: "inboun
   return apiFetch(`/api/v1/system-spreadsheets/${id}/sync/google?direction=${direction}`, { method: "POST" });
 }
 
-export async function importSystemSpreadsheetExcel(input: { name: string; filename: string; content_base64: string; sheet_name?: string; header_row?: number }) {
+export async function importSystemSpreadsheetExcel(input: { name: string; filename: string; content_base64: string; sheet_name?: string; header_row?: number; list_id?: string }) {
   const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets/import-excel", { method: "POST", body: JSON.stringify(input) });
   return payload.system_spreadsheet;
 }
@@ -213,7 +224,7 @@ export async function testGoogleSpreadsheet(url_or_id: string) {
   return payload.google;
 }
 
-export async function importSystemSpreadsheetGoogle(input: { name: string; url_or_id: string; tab: string }) {
+export async function importSystemSpreadsheetGoogle(input: { name: string; url_or_id: string; tab: string; list_id?: string }) {
   const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets/import-google", { method: "POST", body: JSON.stringify(input) });
   return payload.system_spreadsheet;
 }
@@ -366,6 +377,7 @@ export async function getBatches(params: { page?: number; pageSize?: number } = 
 export async function createBatch(input: {
   action_id: string;
   client_group?: string;
+  list_id?: string;
   client_ids?: string[];
   delay_between_rows_seconds?: number;
   idempotencyKey: string;
@@ -376,6 +388,7 @@ export async function createBatch(input: {
     body: JSON.stringify({
       action_id: input.action_id,
       client_group: input.client_group || null,
+      list_id: input.list_id || null,
       client_ids: input.client_ids || [],
       requested_by: "react",
       delay_between_rows_seconds: input.delay_between_rows_seconds ?? 3,

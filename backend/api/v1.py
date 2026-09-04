@@ -70,6 +70,7 @@ from backend.services.system_spreadsheets import (
     update_system_spreadsheet_row,
 )
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
+from backend.services.client_lists import ClientListError, create_client_list, list_client_lists
 from backend.worker import latest_worker_status
 from playwright.async_api import async_playwright
 
@@ -87,6 +88,7 @@ class ClientPayload(BaseModel):
     active: bool = True
     notes: str = ""
     variables: dict[str, Any] = Field(default_factory=dict)
+    list_id: str | None = None
 
 
 class BatchCreatePayload(BaseModel):
@@ -133,12 +135,14 @@ class SystemSpreadsheetCreatePayload(BaseModel):
     name: str
     headers: list[str] = Field(default_factory=lambda: ["Nome", "Grupo", "Cota", "Versão"])
     identity_mapping: dict[str, Any] = Field(default_factory=dict)
+    list_id: str | None = None
 
 
 class GoogleSpreadsheetPayload(BaseModel):
     url_or_id: str
     name: str = "Planilha Google"
     tab: str = ""
+    list_id: str | None = None
 
 
 class ExcelSpreadsheetPayload(BaseModel):
@@ -148,6 +152,7 @@ class ExcelSpreadsheetPayload(BaseModel):
     sheet_name: str | None = None
     header_row: int = Field(default=1, ge=1)
     identity_mapping: dict[str, Any] = Field(default_factory=dict)
+    list_id: str | None = None
 
 
 class SystemSpreadsheetRowPayload(BaseModel):
@@ -570,12 +575,13 @@ async def clients_list(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     group: str | None = None,
+    list_id: str | None = None,
     search: str | None = None,
     include_inactive: bool = True,
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
-        clients = list_clients(group=group, include_inactive=include_inactive, search=search)
+        clients = list_clients(group=group, list_id=list_id, include_inactive=include_inactive, search=search)
     except ClientsRepositoryError as exc:
         raise _error(500, "CLIENTS_UNAVAILABLE", str(exc)) from exc
     return {"status": "ok", "clients": _paginate(clients, page, page_size)}
@@ -638,11 +644,24 @@ async def system_spreadsheets_list(_user: AuthUser = Depends(require_user)) -> d
     return {"status": "ok", "system_spreadsheets": list_system_spreadsheets()}
 
 
+@router.get("/client-lists", summary="Lista as listas operacionais de clientes")
+async def client_lists_list(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    return {"status": "ok", "client_lists": list_client_lists()}
+
+
+@router.post("/client-lists", summary="Cria uma lista operacional de clientes")
+async def client_list_create(payload: dict[str, Any], _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", "client_list": create_client_list(str(payload.get("name") or ""))}
+    except ClientListError as exc:
+        raise _error(422, "CLIENT_LIST_INVALID", str(exc)) from exc
+
+
 @router.post("/system-spreadsheets", summary="Cria uma planilha no CotaSync")
 async def system_spreadsheet_create(payload: SystemSpreadsheetCreatePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     from backend.services.system_spreadsheets import create_system_spreadsheet
     try:
-        sheet = create_system_spreadsheet(payload.name, payload.headers, identity_mapping=payload.identity_mapping)
+        sheet = create_system_spreadsheet(payload.name, payload.headers, identity_mapping=payload.identity_mapping, list_id=payload.list_id)
     except SystemSpreadsheetError as exc:
         raise _error(422, "SYSTEM_SPREADSHEET_INVALID", str(exc)) from exc
     return {"status": "ok", "system_spreadsheet": sheet}
@@ -687,7 +706,7 @@ async def system_spreadsheet_import_excel(payload: ExcelSpreadsheetPayload, _use
     import base64
     try:
         content = base64.b64decode(payload.content_base64, validate=True)
-        sheet = import_excel(name=payload.name, content=content, filename=payload.filename, sheet_name=payload.sheet_name, header_row=payload.header_row, identity_mapping=payload.identity_mapping)
+        sheet = import_excel(name=payload.name, content=content, filename=payload.filename, sheet_name=payload.sheet_name, header_row=payload.header_row, identity_mapping=payload.identity_mapping, list_id=payload.list_id)
     except (ValueError, SystemSpreadsheetError) as exc:
         raise _error(422, "EXCEL_IMPORT_FAILED", str(exc)) from exc
     return {"status": "ok", "system_spreadsheet": sheet}
@@ -723,7 +742,7 @@ async def system_spreadsheet_google_test(payload: GoogleSpreadsheetPayload, _use
 @router.post("/system-spreadsheets/import-google", summary="Importa uma aba Google para a planilha do sistema")
 async def system_spreadsheet_import_google(payload: GoogleSpreadsheetPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        sheet = import_google(name=payload.name, url_or_id=payload.url_or_id, tab=payload.tab)
+        sheet = import_google(name=payload.name, url_or_id=payload.url_or_id, tab=payload.tab, list_id=payload.list_id)
     except SystemSpreadsheetError as exc:
         raise _error(422, "GOOGLE_SHEETS_IMPORT_FAILED", str(exc)) from exc
     return {"status": "ok", "system_spreadsheet": sheet}

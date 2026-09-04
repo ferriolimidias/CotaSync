@@ -28,6 +28,7 @@ import {
   getBatch,
   getBatches,
   getClients,
+  getClientLists,
   getRun,
   runAction,
   resumeBatch,
@@ -47,6 +48,7 @@ function ExecucaoPage() {
     queryKey: ["clients"],
     queryFn: () => getClients({ pageSize: 200, includeInactive: false }),
   });
+  const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
   const batches = useQuery({
     queryKey: ["batches"],
     queryFn: () => getBatches({ pageSize: 10 }),
@@ -79,12 +81,12 @@ function ExecucaoPage() {
   const groups = useMemo(
     () =>
       Array.from(
-        new Set((clients.data?.items ?? []).map((client) => client.group).filter(Boolean)),
+      new Set((clientLists.data ?? []).map((list) => list.id)),
       ).sort(),
     [clients.data],
   );
   const selectedClients = useMemo(
-    () => (clients.data?.items ?? []).filter((client) => !group || client.group === group),
+    () => (clients.data?.items ?? []).filter((client) => !group || client.list_id === group),
     [clients.data, group],
   );
   const singleClients = useQuery({
@@ -136,7 +138,7 @@ function ExecucaoPage() {
     mutationFn: () =>
       createBatch({
         action_id: actionId,
-        client_group: group || undefined,
+        list_id: group || undefined,
         delay_between_rows_seconds: delay,
         idempotencyKey,
       }),
@@ -328,9 +330,9 @@ function ExecucaoPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Todos os clientes ativos</SelectItem>
-                  {groups.map((item) => (
-                    <SelectItem key={item} value={item}>
-                      {item}
+                  {(clientLists.data ?? []).map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {item.name}
                     </SelectItem>
                   ))}
                 </SelectContent>

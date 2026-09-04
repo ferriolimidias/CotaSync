@@ -20,6 +20,22 @@ from backend.services.system_spreadsheets import (
 
 
 class SystemSpreadsheetTests(unittest.TestCase):
+    def test_system_spreadsheet_import_assigns_stable_client_list(self) -> None:
+        from backend.db import Client, ClientList, SessionLocal
+        from backend.services.client_lists import create_client_list
+        from sqlalchemy import select
+        client_list = create_client_list(f"Lista teste {uuid4()}")
+        workbook = Workbook()
+        workbook.active.append(["Nome", "Grupo", "Cota", "Versão"])
+        workbook.active.append(["Cliente", "935", "112", "00"])
+        content = io.BytesIO()
+        workbook.save(content)
+        imported = import_excel(name="Planilha teste", content=content.getvalue(), filename="teste.xlsx", list_id=client_list["id"])
+        with SessionLocal() as db:
+            client = db.scalar(select(Client).where(Client.system_spreadsheet_id == imported["id"]))
+            self.assertEqual(client.list_id, client_list["id"])
+            self.assertEqual(db.scalar(select(ClientList).where(ClientList.id == client.list_id)).name, client_list["name"])
+
     def test_action_outputs_update_one_internal_client_row(self) -> None:
         from backend.db import Client, Run, SessionLocal
         from sqlalchemy import select

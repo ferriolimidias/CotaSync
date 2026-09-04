@@ -270,6 +270,7 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         name=name,
         description=description,
         variables=_friendly_variables(data),
+        allowed_list_ids=[str(item) for item in data.get("allowed_list_ids", []) if str(item).strip()] if isinstance(data.get("allowed_list_ids", []), list) else [],
         steps_count=steps_count,
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
         test_mode=bool(data.get("modo_teste", False)),
@@ -374,6 +375,7 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
                 raw = dict(version.definition or {})
                 raw.setdefault("nome_amigavel", db_action.name)
                 raw.setdefault("descricao", db_action.description)
+                raw.setdefault("allowed_list_ids", list(db_action.allowed_list_ids or []))
                 actions.append(_normalize_action(db_action.key, raw, used_ids))
             return ActionsCatalog(actions=actions, exists=True, warning=None)
     payload, exists, warning = _load_ui_map(path)
@@ -573,6 +575,7 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             action.name = action_name
             action.description = str(learned_action.get("descricao") or learned_action.get("description") or action.description)
             action.status = str(learned_action.get("status") or action.status or "published")
+        action.allowed_list_ids = [str(item) for item in learned_action.get("allowed_list_ids", action.allowed_list_ids or []) if str(item).strip()] if isinstance(learned_action.get("allowed_list_ids", action.allowed_list_ids or []), list) else []
 
         version_id = f"{action.id}-v1"
         version = session.get(ActionVersion, version_id)

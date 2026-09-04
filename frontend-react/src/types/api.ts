@@ -15,6 +15,7 @@ export type ApiClient = {
   name: string;
   active: boolean;
   group: string;
+  list_id?: string | null;
   notes: string;
   variables: Record<string, string>;
   display_variables: {

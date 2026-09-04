@@ -11,7 +11,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any
 from uuid import uuid4
 
-from backend.db import Client as DbClient, SessionLocal
+from backend.db import Client as DbClient, ClientList, SessionLocal
 from backend.services.client_fields import canonical_client_field_key
 
 from backend.services.actions_repository import project_root
@@ -156,6 +156,7 @@ def _normalize_client(raw: dict[str, Any], existing: dict[str, Any] | None = Non
         "name": name,
         "active": _parse_bool(raw.get("active"), bool(base.get("active", True))),
         "group": group,
+        "list_id": str(raw.get("list_id") or base.get("list_id") or "").strip() or None,
         "notes": str(raw.get("notes") if raw.get("notes") is not None else base.get("notes", "")).strip(),
         "created_at": str(base.get("created_at") or now),
         "updated_at": now,
@@ -175,6 +176,7 @@ def _db_client_dict(client: DbClient) -> dict[str, Any]:
         "name": client.name,
         "active": client.active,
         "group": client.client_group,
+        "list_id": client.list_id,
         "notes": client.notes or "",
         "created_at": client.created_at.isoformat() if client.created_at else utc_now_iso(),
         "updated_at": client.updated_at.isoformat() if client.updated_at else utc_now_iso(),
@@ -185,7 +187,11 @@ def _db_client_dict(client: DbClient) -> dict[str, Any]:
 
 def _db_clients() -> list[dict[str, Any]]:
     with SessionLocal() as session:
-        return [_db_client_dict(item) for item in session.query(DbClient).all()]
+        names = {row.id: row.name for row in session.query(ClientList).all()}
+        result = [_db_client_dict(item) for item in session.query(DbClient).all()]
+        for item in result:
+            item["group"] = names.get(item.get("list_id"), item.get("group", ""))
+        return result
 
 
 def load_clients(path: Path | None = None) -> list[dict[str, Any]]:
@@ -210,6 +216,7 @@ def save_clients(clients: list[dict[str, Any]], path: Path | None = None) -> Non
                     session.add(client)
                 client.name = normalized["name"]
                 client.client_group = normalized["group"]
+                client.list_id = normalized.get("list_id")
                 client.active = normalized["active"]
                 client.notes = normalized["notes"]
                 client.variables = normalized["variables"]
@@ -223,11 +230,14 @@ def save_clients(clients: list[dict[str, Any]], path: Path | None = None) -> Non
 def list_clients(
     *,
     group: str | None = None,
+    list_id: str | None = None,
     include_inactive: bool = True,
     search: str | None = None,
     path: Path | None = None,
 ) -> list[dict[str, Any]]:
     clients = load_clients(path)
+    if list_id and path is None:
+        clients = [client for client in clients if str(client.get("list_id") or "") == str(list_id)]
     if group:
         clients = [client for client in clients if str(client.get("group") or "") == group]
     if not include_inactive:
@@ -275,7 +285,14 @@ def create_client(data: dict[str, Any], path: Path | None = None) -> dict[str, A
         with SessionLocal.begin() as session:
             if session.get(DbClient, client["id"]) is not None:
                 raise ClientsRepositoryError("Cliente ja existe.")
-            session.add(DbClient(id=client["id"], name=client["name"], client_group=client["group"], active=client["active"], variables=client["variables"], notes=client["notes"], grupo=client["display_variables"]["grupo"], cota=client["display_variables"]["cota"], versao=client["display_variables"]["versao"]))
+            if not client.get("list_id"):
+                list_row = session.query(ClientList).filter(ClientList.tenant_id == "default", ClientList.name == client["group"], ClientList.active.is_(True)).first()
+                if list_row is None:
+                    list_row = ClientList(id=str(uuid4()), tenant_id="default", name=client["group"], active=True)
+                    session.add(list_row)
+                    session.flush()
+                client["list_id"] = list_row.id
+            session.add(DbClient(id=client["id"], name=client["name"], client_group=client["group"], list_id=client.get("list_id"), active=client["active"], variables=client["variables"], notes=client["notes"], grupo=client["display_variables"]["grupo"], cota=client["display_variables"]["cota"], versao=client["display_variables"]["versao"]))
         return client
     clients = load_clients(path)
     client = _normalize_client(data)
@@ -293,6 +310,7 @@ def update_client(client_id: str, data: dict[str, Any], path: Path | None = None
             current = _db_client_dict(db_client)
             client = _normalize_client({**data, "id": str(client_id)}, current)
             db_client.name, db_client.client_group = client["name"], client["group"]
+            db_client.list_id = client.get("list_id")
             db_client.active, db_client.notes, db_client.variables = client["active"], client["notes"], client["variables"]
             db_client.grupo, db_client.cota, db_client.versao = client["display_variables"]["grupo"], client["display_variables"]["cota"], client["display_variables"]["versao"]
         return client
@@ -411,6 +429,7 @@ def validate_clients_for_action(
     *,
     client_group: str | None = None,
     client_ids: list[str] | None = None,
+    list_id: str | None = None,
     path: Path | None = None,
 ) -> dict[str, Any]:
     required = [
@@ -418,7 +437,10 @@ def validate_clients_for_action(
         for variable in getattr(action, "variables", []) or []
         if bool(getattr(variable, "required", True)) and str(getattr(variable, "key", "") or "").strip()
     ]
-    selected = list_clients(group=client_group, include_inactive=True, path=path)
+    selected = list_clients(group=client_group, list_id=list_id, include_inactive=True, path=path)
+    allowed_list_ids = {str(item) for item in (getattr(action, "allowed_list_ids", []) or []) if str(item).strip()}
+    if allowed_list_ids:
+        selected = [client for client in selected if str(client.get("list_id") or "") in allowed_list_ids]
     wanted_ids = {str(item) for item in client_ids or [] if str(item).strip()}
     if wanted_ids:
         selected = [client for client in selected if str(client.get("id") or "") in wanted_ids]
