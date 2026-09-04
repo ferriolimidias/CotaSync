@@ -51,6 +51,7 @@ from backend.services.desktop_view_tokens import create_token, validate_token
 from backend.services.external_systems import ExternalSystemConfigError, load_current_external_system, save_current_external_system
 from backend.services.data_sources import DataSourceError, get_source, list_sources, upsert_source_schema
 from backend.services.learning_ai import LearningAIObserver
+from backend.services.ai_settings import public_settings, remove_key, save_settings
 from backend.services.learning_trace import build_raw_learning_trace
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.worker import latest_worker_status
@@ -110,6 +111,14 @@ class DataSourceSchemaPayload(BaseModel):
     source_type: str
     headers: list[str] = Field(default_factory=list)
     configuration: dict[str, Any] = Field(default_factory=dict)
+
+
+class AISettingsPayload(BaseModel):
+    enabled: bool = False
+    provider: str = "openai_compatible"
+    model: str = "gpt-4o-mini"
+    base_url: str = ""
+    api_key: str | None = None
 
 
 MAX_CLIENTS_CSV_BYTES = 1_048_576
@@ -1002,6 +1011,44 @@ async def external_system_config(_user: AuthUser = Depends(require_user)) -> dic
     except ExternalSystemConfigError as exc:
         raise _error(500, "EXTERNAL_SYSTEM_CONFIG_UNAVAILABLE", str(exc)) from exc
     return {"status": "ok", "external_system": _external_system_config_payload(config)}
+
+
+@router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")
+async def learning_ai_settings(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    return {"status": "ok", "learning_ai": public_settings()}
+
+
+@router.put("/settings/learning-ai", summary="Salva configuração da IA de aprendizado")
+async def learning_ai_settings_save(payload: AISettingsPayload, _admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        saved = save_settings(
+            enabled=payload.enabled,
+            provider=payload.provider,
+            model=payload.model,
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+        )
+    except ValueError as exc:
+        raise _error(422, str(exc), "Verifique os campos da configuração da IA.") from exc
+    return {"status": "ok", "learning_ai": saved}
+
+
+@router.delete("/settings/learning-ai/key", summary="Remove explicitamente a chave da IA")
+async def learning_ai_key_remove(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    return {"status": "ok", "learning_ai": remove_key()}
+
+
+@router.post("/settings/learning-ai/test", summary="Testa conexão com a IA de aprendizado")
+async def learning_ai_test(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    settings = public_settings()
+    if not settings["enabled"] or not settings["api_key_configured"]:
+        raise _error(409, "AI_NOT_CONFIGURED", "Ative a IA e configure uma chave antes de testar.")
+    result = LearningAIObserver().analyze([
+        {"event": "click", "page_ref": "fixture-page", "selector": "#target-a", "before_selectors": ["#target-a"], "after_selectors": ["#target-a", "#target-b"], "next_target_selector": "#target-b"}
+    ])
+    if result.get("warnings") and not result.get("selector_analysis") and not result.get("transition_analysis") and not result.get("output_analysis") and not result.get("state_analysis"):
+        raise _error(502, "AI_PROVIDER_UNAVAILABLE", "Não foi possível validar a conexão com a IA.")
+    return {"status": "ok", "message": "Conexão funcionando"}
 
 
 @router.put("/external-system/config", summary="Salva configuração do sistema externo")

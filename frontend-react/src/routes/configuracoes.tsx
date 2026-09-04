@@ -2,7 +2,7 @@ import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tansta
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ExternalLink, Save, ShieldCheck } from "lucide-react";
+import { Check, ExternalLink, KeyRound, Save, ShieldCheck, Trash2 } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -10,12 +10,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   getExternalSessionStatus,
   getExternalSystemConfig,
   openExternalLogin,
   saveExternalSystemConfig,
   validateExternalSession,
+  getLearningAISettings,
+  removeLearningAIKey,
+  saveLearningAISettings,
+  testLearningAI,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
 import { externalSessionStatusLabel, loginModeLabel } from "@/lib/status-labels";
@@ -37,6 +42,7 @@ function ConfigPage() {
     access_profile_email_or_identifier: "",
     expected_system_host: "",
   });
+  const [aiForm, setAiForm] = useState({ enabled: false, provider: "openai_compatible", model: "gpt-4o-mini", base_url: "", api_key: "" });
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
@@ -48,6 +54,18 @@ function ConfigPage() {
     queryFn: getExternalSystemConfig,
     retry: 1,
   });
+  const aiSettings = useQuery({ queryKey: ["learning-ai-settings"], queryFn: getLearningAISettings, retry: 1, enabled: user?.role === "admin" });
+  const saveAI = useMutation({
+    mutationFn: saveLearningAISettings,
+    onSuccess: (saved) => { setAiForm((current) => ({ ...current, ...saved, api_key: "" })); toast.success("Configuração da IA salva."); void queryClient.invalidateQueries({ queryKey: ["learning-ai-settings"] }); },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar a IA."),
+  });
+  const removeAIKey = useMutation({
+    mutationFn: removeLearningAIKey,
+    onSuccess: (saved) => { setAiForm((current) => ({ ...current, ...saved, api_key: "" })); toast.success("Chave removida."); void queryClient.invalidateQueries({ queryKey: ["learning-ai-settings"] }); },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível remover a chave."),
+  });
+  const testAI = useMutation({ mutationFn: testLearningAI, onSuccess: () => toast.success("Conexão funcionando"), onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível testar a IA.") });
   const saveConfig = useMutation({
     mutationFn: saveExternalSystemConfig,
     onSuccess: (saved) => {
@@ -104,6 +122,10 @@ function ConfigPage() {
     }
   }, [externalConfig.data]);
 
+  useEffect(() => {
+    if (aiSettings.data) setAiForm((current) => ({ ...current, ...aiSettings.data, api_key: "" }));
+  }, [aiSettings.data]);
+
   function updateForm(key: keyof ExternalSystemConfig, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
   }
@@ -131,6 +153,25 @@ function ConfigPage() {
             </p>
           </CardContent>
         </Card>
+
+        {user?.role === "admin" && (
+          <Card className="xl:col-start-2 xl:row-start-2">
+            <CardHeader className="pb-3"><CardTitle className="text-base">IA do aprendizado</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border bg-muted/20 px-3 py-3">
+                <div><Label htmlFor="learning-ai-enabled">Usar IA para aprimorar o aprendizado</Label><p className="mt-1 text-xs text-muted-foreground">A IA analisa ações durante o ensino. Execuções automáticas não utilizam IA.</p></div>
+                <Switch id="learning-ai-enabled" checked={aiForm.enabled} onCheckedChange={(enabled) => setAiForm((current) => ({ ...current, enabled }))} />
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-2"><Label htmlFor="learning-ai-provider">Provider</Label><select id="learning-ai-provider" className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={aiForm.provider} onChange={(event) => setAiForm((current) => ({ ...current, provider: event.target.value }))}><option value="openai_compatible">OpenAI-compatible</option><option value="openai">OpenAI</option></select></div>
+                <div className="grid gap-2"><Label htmlFor="learning-ai-model">Modelo</Label><Input id="learning-ai-model" value={aiForm.model} onChange={(event) => setAiForm((current) => ({ ...current, model: event.target.value }))} /></div>
+              </div>
+              <div className="grid gap-2"><Label htmlFor="learning-ai-key">API Key</Label><div className="flex gap-2"><Input id="learning-ai-key" type="password" autoComplete="new-password" placeholder={aiSettings.data?.api_key_configured ? "Chave configurada; digite para substituir" : "Cole a chave da API"} value={aiForm.api_key} onChange={(event) => setAiForm((current) => ({ ...current, api_key: event.target.value }))} /><Button type="button" variant="outline" title="Remover chave" aria-label="Remover chave" disabled={!aiSettings.data?.api_key_configured || removeAIKey.isPending} onClick={() => removeAIKey.mutate()}><Trash2 className="h-4 w-4" /></Button></div>{aiSettings.data?.api_key_configured && <p className="flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3 w-3" /> Chave configurada ({aiSettings.data.api_key_source === "stored" ? "painel" : "ambiente"})</p>}</div>
+              <div className="grid gap-2"><Label htmlFor="learning-ai-base-url">Base URL <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="learning-ai-base-url" type="url" placeholder="https://api.openai.com/v1" value={aiForm.base_url} onChange={(event) => setAiForm((current) => ({ ...current, base_url: event.target.value }))} /></div>
+              <div className="flex flex-col gap-2 sm:flex-row"><Button type="button" variant="outline" onClick={() => testAI.mutate()} disabled={testAI.isPending || !aiSettings.data?.api_key_configured}><KeyRound className="h-4 w-4" /> Testar IA</Button><Button type="button" onClick={() => saveAI.mutate({ enabled: aiForm.enabled, provider: aiForm.provider, model: aiForm.model, base_url: aiForm.base_url, ...(aiForm.api_key.trim() ? { api_key: aiForm.api_key } : {}) })} disabled={saveAI.isPending}><Save className="h-4 w-4" /> Salvar configurações</Button></div>
+            </CardContent>
+          </Card>
+        )}
 
         <Card className="xl:col-start-1 xl:row-span-2 xl:row-start-1">
           <CardHeader className="pb-3">
@@ -247,7 +288,7 @@ function ConfigPage() {
           </CardContent>
         </Card>
 
-        <Card className="xl:col-start-2 xl:row-start-2">
+        <Card className="xl:col-start-2 xl:row-start-3">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Configurações operacionais</CardTitle>
           </CardHeader>

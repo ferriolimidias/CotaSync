@@ -18,6 +18,7 @@ import type {
   ResultSelectionCandidate,
   WorkerStatus,
   DataSource,
+  LearningAISettings,
 } from "@/types/api";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
@@ -173,6 +174,36 @@ export async function getClients(
 export async function getDataSources() {
   const payload = await apiFetch<{ data_sources: DataSource[] }>("/api/v1/data-sources");
   return payload.data_sources;
+}
+
+export async function getLearningAISettings() {
+  const payload = await apiFetch<{ learning_ai: LearningAISettings }>("/api/v1/settings/learning-ai");
+  return payload.learning_ai;
+}
+
+export async function saveLearningAISettings(input: {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key?: string;
+}) {
+  const payload = await apiFetch<{ learning_ai: LearningAISettings }>("/api/v1/settings/learning-ai", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+  return payload.learning_ai;
+}
+
+export async function removeLearningAIKey() {
+  const payload = await apiFetch<{ learning_ai: LearningAISettings }>("/api/v1/settings/learning-ai/key", {
+    method: "DELETE",
+  });
+  return payload.learning_ai;
+}
+
+export async function testLearningAI() {
+  return apiFetch<{ status: string; message: string }>("/api/v1/settings/learning-ai/test", { method: "POST" });
 }
 
 export async function createClient(input: {

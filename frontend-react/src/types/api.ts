@@ -217,6 +217,15 @@ export type ExternalSystemConfig = {
   updated_at?: string | null;
 };
 
+export type LearningAISettings = {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key_configured: boolean;
+  api_key_source: "stored" | "environment" | "none" | string;
+};
+
 export type LearningSession = {
   id?: string;
   session_id?: string;

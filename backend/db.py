@@ -78,6 +78,17 @@ class DataSourceField(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class AISettings(Base):
+    __tablename__ = "ai_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="openai_compatible")
+    model: Mapped[str] = mapped_column(String(255), nullable=False, default="gpt-4o-mini")
+    base_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class Action(Base):
     __tablename__ = "actions"
     id: Mapped[str] = mapped_column(String(255), primary_key=True)

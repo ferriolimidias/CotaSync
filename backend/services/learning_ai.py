@@ -105,22 +105,27 @@ class OpenAICompatibleLearningProvider:
 
 
 def configured_learning_ai_provider() -> LearningAIProvider:
-    provider_name = os.getenv("AI_PROVIDER", "openai").strip().lower() or "openai"
+    from backend.services.ai_settings import effective_settings
+
+    settings = effective_settings()
+    provider_name = settings.provider
     if provider_name not in {"openai", "openai_compatible"}:
         return UnavailableLearningAIProvider("AI_PROVIDER_UNSUPPORTED")
-    api_key = os.getenv("AI_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = settings.api_key
     if not api_key:
         return DisabledLearningAIProvider()
     return OpenAICompatibleLearningProvider(
         api_key=api_key,
-        model=os.getenv("AI_MODEL", "").strip() or os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
-        base_url=os.getenv("AI_BASE_URL", "").strip() or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
+        model=settings.model,
+        base_url=settings.base_url,
     )
 
 
 class LearningAIObserver:
     def __init__(self, provider: LearningAIProvider | None = None) -> None:
-        self.enabled = os.getenv("AI_ENABLED", "false").lower() in {"1", "true", "yes"}
+        from backend.services.ai_settings import effective_settings
+
+        self.enabled = effective_settings().enabled
         self.provider = provider or (configured_learning_ai_provider() if self.enabled else DisabledLearningAIProvider())
 
     def analyze(self, trace: list[dict[str, Any]]) -> dict[str, Any]:
