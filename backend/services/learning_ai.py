@@ -60,6 +60,14 @@ class DisabledLearningAIProvider:
         return {"enabled": False, "suggestions": [], "reason": "AI_DISABLED"}
 
 
+class UnavailableLearningAIProvider:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def analyze(self, trace: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"enabled": False, "suggestions": [], "reason": self.reason, "warnings": [self.reason]}
+
+
 class OpenAICompatibleLearningProvider:
     """Small provider client kept inside learning services, never replay services."""
 
@@ -97,6 +105,9 @@ class OpenAICompatibleLearningProvider:
 
 
 def configured_learning_ai_provider() -> LearningAIProvider:
+    provider_name = os.getenv("AI_PROVIDER", "openai").strip().lower() or "openai"
+    if provider_name not in {"openai", "openai_compatible"}:
+        return UnavailableLearningAIProvider("AI_PROVIDER_UNSUPPORTED")
     api_key = os.getenv("AI_API_KEY", "").strip() or os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return DisabledLearningAIProvider()
@@ -116,7 +127,11 @@ class LearningAIObserver:
         safe_trace = sanitize_trace(trace)
         if not self.enabled:
             return DisabledLearningAIProvider().analyze(safe_trace)
-        return sanitize_trace(self.provider.analyze(safe_trace))
+        try:
+            return sanitize_trace(self.provider.analyze(safe_trace))
+        except Exception as exc:
+            logger.warning("Learning AI provider failed: %s", type(exc).__name__)
+            return UnavailableLearningAIProvider("AI_PROVIDER_UNAVAILABLE").analyze(safe_trace)
 
 
 def validate_selector_candidate(*, candidate: dict[str, Any], captured_node_id: str, resolved_node_ids: list[str]) -> bool:
