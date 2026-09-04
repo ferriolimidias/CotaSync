@@ -275,9 +275,17 @@ def canonicalize_graph_metadata(action: dict[str, Any]) -> dict[str, Any]:
 
 def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> int:
     score = 0
-    if observation.get("host") and observation.get("host") == signature.get("host"):
+    expected_host = str(signature.get("host") or "").strip().lower()
+    observed_host = str(observation.get("host") or "").strip().lower()
+    if expected_host and observed_host != expected_host:
+        return 0
+    expected_path = str(signature.get("path") or "").strip()
+    observed_path = str(observation.get("path") or "").strip()
+    if expected_path and observed_path != expected_path:
+        return 0
+    if observed_host and observed_host == expected_host:
         score += 4
-    if observation.get("path") and observation.get("path") == signature.get("path"):
+    if observed_path and observed_path == expected_path:
         score += 3
     if observation.get("title") and signature.get("title") and observation["title"] == signature["title"]:
         score += 2
@@ -291,6 +299,8 @@ def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> 
     observed_selectors = set(observation.get("visible_selectors") or [])
     if expected_selectors:
         overlap = expected_selectors & observed_selectors
+        if not overlap:
+            return 0
         score += min(8, len(overlap) * 2)
         if overlap and len(overlap) >= max(1, min(3, len(expected_selectors))):
             score += 3
