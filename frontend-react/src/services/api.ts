@@ -329,6 +329,11 @@ export async function getActions(params: { page?: number; pageSize?: number } = 
   return payload.actions;
 }
 
+export async function updateActionScope(id: string, allowedListIds: string[]) {
+  const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/actions/${id}/scope`, { method: "PATCH", body: JSON.stringify({ allowed_list_ids: allowedListIds }) });
+  return payload.action;
+}
+
 export async function getAction(id: string) {
   const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/actions/${id}`);
   return payload.action;
@@ -658,6 +663,7 @@ export async function saveLearnedAction(
     objective: string;
     expected_result: string;
     variable_names: Record<string, string>;
+    allowed_list_ids?: string[];
   },
 ) {
   const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/learning/sessions/${id}/actions`, {

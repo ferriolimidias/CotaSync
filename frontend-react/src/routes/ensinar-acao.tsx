@@ -21,6 +21,7 @@ import {
   confirmLearningResultSelection,
   getLearningSession,
   getSystemSpreadsheets,
+  getClientLists,
   removeLearningOutput,
   renameLearningOutput,
   saveLearnedAction,
@@ -48,8 +49,11 @@ function EnsinarPage() {
   const [learningMode, setLearningMode] = useState<"free_action" | "spreadsheet">("free_action");
   const [dataSourceId, setDataSourceId] = useState<string>("");
   const [dataSourceFieldId, setDataSourceFieldId] = useState<string>("");
+  const [scopeAllLists, setScopeAllLists] = useState(true);
+  const [scopeListIds, setScopeListIds] = useState<string[]>([]);
   const [outputLabels, setOutputLabels] = useState<Record<string, string>>({});
   const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
+  const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
   const session = useQuery({
     queryKey: ["learning-session", sessionId],
     queryFn: () => getLearningSession(sessionId as string),
@@ -91,6 +95,7 @@ function EnsinarPage() {
           cota: "Cota",
           versao: "Versão",
         },
+        allowed_list_ids: scopeAllLists ? [] : scopeListIds,
       }),
     onSuccess: () => toast.success("Ação publicada."),
     onError: (error) => {
@@ -253,6 +258,14 @@ function EnsinarPage() {
                 onChange={(event) => setName(event.target.value)}
                 placeholder="Quantidade de parcelas"
               />
+            </div>
+            <div className="grid gap-2">
+              <Label>Disponível para</Label>
+              <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={scopeAllLists ? "all" : "specific"} onChange={(event) => setScopeAllLists(event.target.value === "all")}>
+                <option value="all">Todas as listas</option>
+                <option value="specific">Listas específicas</option>
+              </select>
+              {!scopeAllLists && <div className="grid gap-1 rounded-md border border-border p-2">{(clientLists.data ?? []).map((list) => <label className="flex items-center gap-2 text-sm" key={list.id}><input type="checkbox" checked={scopeListIds.includes(list.id)} onChange={() => setScopeListIds((current) => current.includes(list.id) ? current.filter((id) => id !== list.id) : [...current, list.id])} /> {list.name}</label>)}</div>}
             </div>
             <div className="grid gap-2">
               <Label>Objetivo</Label>

@@ -33,6 +33,7 @@ class SaveDemoActionRequest(BaseModel):
     action_timeout_seconds: int | None = None
     learning_mode: str = "free_action"
     data_source_id: str | None = None
+    allowed_list_ids: list[str] = Field(default_factory=list)
 
 
 class GuidedLearningRequest(BaseModel):

@@ -97,9 +97,17 @@ function ExecucaoPage() {
     () => (actions.data?.items ?? []).filter(actionIsExecutable),
     [actions.data],
   );
+  const compatibleActions = useMemo(
+    () => executableActions.filter((action) => !group || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(group)),
+    [executableActions, group],
+  );
+  const individualActions = useMemo(
+    () => executableActions.filter((action) => !singleClient || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(singleClient.list_id || "")),
+    [executableActions, singleClient],
+  );
   const selectedSingleAction = useMemo(
-    () => executableActions.find((action) => action.id === singleActionId),
-    [executableActions, singleActionId],
+    () => individualActions.find((action) => action.id === singleActionId),
+    [individualActions, singleActionId],
   );
 
   useEffect(() => {
@@ -120,7 +128,7 @@ function ExecucaoPage() {
         const labels: Record<string, string> = { grupo: "Grupo", cota: "Cota", versao: "Versão" };
         throw new Error(`O cliente ${singleClient.name} não possui ${labels[missingClientField.key] || missingClientField.label} cadastrada.`);
       }
-      return runAction(singleActionId, variables);
+      return runAction(singleActionId, { ...variables, client_id: singleClient.id });
     },
     onSuccess: (run) => {
       setCurrentRunId(run.id);
@@ -224,7 +232,7 @@ function ExecucaoPage() {
                   <SelectValue placeholder="Selecione uma ação" />
                 </SelectTrigger>
                 <SelectContent>
-                  {executableActions.map((action) => (
+                  {individualActions.map((action) => (
                     <SelectItem key={action.id} value={action.id}>
                       {action.name}
                     </SelectItem>
@@ -311,7 +319,7 @@ function ExecucaoPage() {
                   <SelectValue placeholder="Selecione uma ação" />
                 </SelectTrigger>
                 <SelectContent>
-                  {executableActions.map((action) => (
+                {compatibleActions.map((action) => (
                     <SelectItem key={action.id} value={action.id}>
                       {action.name}
                     </SelectItem>

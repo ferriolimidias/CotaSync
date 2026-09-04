@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { History, MoreVertical, Play, Plus, Trash2 } from "lucide-react";
+import { History, MoreVertical, Play, Plus, Trash2, Settings2 } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -17,7 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { ApiError, deleteAction, getActions, getActionVersions } from "@/services/api";
+import { ApiError, deleteAction, getActions, getActionVersions, getClientLists, updateActionScope } from "@/services/api";
 import type { ApiAction } from "@/types/api";
 import { actionIsExecutable, runStatusLabel } from "@/lib/status-labels";
 
@@ -63,6 +63,7 @@ function AcoesPage() {
 function ActionCard({ action }: { action: ApiAction }) {
   const [open, setOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [scopeOpen, setScopeOpen] = useState(false);
   const queryClient = useQueryClient();
   const remove = useMutation({
     mutationFn: () => deleteAction(action.id),
@@ -73,6 +74,8 @@ function ActionCard({ action }: { action: ApiAction }) {
     },
     onError: (error) => toast.error(error instanceof ApiError ? error.message : "Não foi possível excluir a ação."),
   });
+  const lists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists, enabled: scopeOpen });
+  const scope = useMutation({ mutationFn: (ids: string[]) => updateActionScope(action.id, ids), onSuccess: () => { setScopeOpen(false); void queryClient.invalidateQueries({ queryKey: ["actions"] }); toast.success("Escopo da ação atualizado."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível atualizar o escopo.") });
   const executable = actionIsExecutable(action);
   const versionLabel = executable ? "Publicada" : "Não executável";
   return (
@@ -96,6 +99,7 @@ function ActionCard({ action }: { action: ApiAction }) {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setScopeOpen(true)}><Settings2 className="h-4 w-4" /> Disponibilidade por lista</DropdownMenuItem>
                 <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setDeleteOpen(true)}>
                   <Trash2 className="h-4 w-4" /> Excluir ação
                 </DropdownMenuItem>
@@ -141,6 +145,7 @@ function ActionCard({ action }: { action: ApiAction }) {
         </div>
       </CardContent>
       <VersionsDialog action={action} open={open} onOpenChange={setOpen} />
+      <ActionScopeDialog action={action} lists={lists.data ?? []} open={scopeOpen} onOpenChange={setScopeOpen} saving={scope.isPending} onSave={(ids) => scope.mutate(ids)} />
       <Dialog open={deleteOpen} onOpenChange={(nextOpen) => !remove.isPending && setDeleteOpen(nextOpen)}>
         <DialogContent>
           <DialogHeader>
@@ -161,6 +166,13 @@ function ActionCard({ action }: { action: ApiAction }) {
       </Dialog>
     </Card>
   );
+}
+
+function ActionScopeDialog({ action, lists, open, onOpenChange, saving, onSave }: { action: ApiAction; lists: Array<{ id: string; name: string }>; open: boolean; onOpenChange: (open: boolean) => void; saving: boolean; onSave: (ids: string[]) => void }) {
+  const [all, setAll] = useState(action.allowed_list_ids.length === 0);
+  const [selected, setSelected] = useState<string[]>(action.allowed_list_ids);
+  function toggle(id: string) { setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]); }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>Disponibilidade de {action.name}</DialogTitle></DialogHeader><div className="space-y-3 text-sm"><label className="flex items-center gap-2"><input type="radio" checked={all} onChange={() => setAll(true)} /> Todas as listas</label><label className="flex items-center gap-2"><input type="radio" checked={!all} onChange={() => setAll(false)} /> Listas específicas</label>{!all && <div className="grid gap-2 rounded-md border border-border p-3">{lists.map((list) => <label className="flex items-center gap-2" key={list.id}><input type="checkbox" checked={selected.includes(list.id)} onChange={() => toggle(list.id)} /> {list.name}</label>)}</div>}</div><DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button><Button disabled={saving || (!all && selected.length === 0)} onClick={() => onSave(all ? [] : selected)}>Salvar escopo</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 function VersionsDialog({

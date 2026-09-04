@@ -96,6 +96,7 @@ export type ApiAction = {
   key?: string;
   name: string;
   description?: string;
+  allowed_list_ids: string[];
   variables: Array<{ key: string; label?: string; required?: boolean }>;
   steps_count?: number;
   has_url?: boolean;

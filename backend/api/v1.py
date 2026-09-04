@@ -9,11 +9,11 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from backend.api.demo import GuidedLearningRequest, OperatorInsertActiveRequest, OperatorPressRequest, SaveDemoActionRequest
 from backend.api.desktop_browser import _public_view_url
-from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal
+from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal
 from backend.services.action_pages import is_reauthentication_url, url_host
 from backend.services.actions_repository import (
     ActionDeletionError,
@@ -165,6 +165,10 @@ class AISettingsPayload(BaseModel):
     model: str = "gpt-4o-mini"
     base_url: str = ""
     api_key: str | None = None
+
+
+class ActionScopePayload(BaseModel):
+    allowed_list_ids: list[str] = Field(default_factory=list)
 
 
 MAX_CLIENTS_CSV_BYTES = 1_048_576
@@ -858,6 +862,25 @@ async def actions_get(action_id: str, _user: AuthUser = Depends(require_user)) -
     return {"status": "ok", "action": payload}
 
 
+@router.patch("/actions/{action_id}/scope", summary="Atualiza o escopo operacional de uma ação")
+async def action_scope_update(action_id: str, payload: ActionScopePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    from backend.db import ClientList
+    requested = list(dict.fromkeys(str(item).strip() for item in payload.allowed_list_ids if str(item).strip()))
+    with SessionLocal.begin() as session:
+        action = session.get(DbAction, action_id)
+        if action is None:
+            action = session.scalar(select(DbAction).where(DbAction.key == action_id))
+        if action is None:
+            raise _error(404, "ACTION_NOT_FOUND", "Acao nao encontrada.")
+        if requested:
+            valid = {row.id for row in session.scalars(select(ClientList).where(ClientList.id.in_(requested), ClientList.tenant_id == "default", ClientList.active.is_(True)))}
+            if valid != set(requested):
+                raise _error(422, "ACTION_SCOPE_INVALID", "Ação referencia uma lista inexistente ou não autorizada.")
+        action.allowed_list_ids = requested
+    result = find_action(action_id)
+    return {"status": "ok", "action": result.model_dump() if result else {}}
+
+
 @router.delete("/actions/{action_id}", summary="Exclui ação definitivamente")
 async def actions_delete(action_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
@@ -900,6 +923,12 @@ async def action_run(action_id: str, payload: ActionRunPayload, _user: AuthUser 
     action = find_action(action_id)
     if action is None:
         raise _error(404, "ACTION_NOT_FOUND", "Acao nao encontrada.")
+    client_id = str(payload.variables.get("client_id") or "").strip()
+    if client_id and action.allowed_list_ids:
+        with SessionLocal() as session:
+            client = session.get(DbClient, client_id)
+        if client is None or str(client.list_id or "") not in set(action.allowed_list_ids):
+            raise _error(403, "ACTION_LIST_NOT_ALLOWED", "Esta ação não está disponível para a lista deste cliente.")
     missing = missing_required_variables(action, payload.variables)
     if missing:
         raise _error(422, "ACTION_VARIABLES_MISSING", f"Variaveis obrigatorias ausentes: {', '.join(missing)}.")
@@ -1116,6 +1145,14 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
         )
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_SAVE_ERROR", str(exc)) from exc
+    if payload.allowed_list_ids:
+        from backend.db import ClientList
+        with SessionLocal.begin() as session:
+            db_action = session.scalar(select(DbAction).where(DbAction.id == action.get("id")))
+            valid = {row.id for row in session.scalars(select(ClientList).where(ClientList.id.in_(payload.allowed_list_ids), ClientList.tenant_id == "default", ClientList.active.is_(True)))}
+            if db_action is None or valid != set(payload.allowed_list_ids):
+                raise _error(422, "ACTION_SCOPE_INVALID", "Ação referencia uma lista inexistente ou não autorizada.")
+            db_action.allowed_list_ids = list(dict.fromkeys(payload.allowed_list_ids))
     return {"status": "ok", "action": action}
 
 
