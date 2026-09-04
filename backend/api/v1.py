@@ -71,6 +71,7 @@ from backend.services.system_spreadsheets import (
 )
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.services.client_lists import ClientListError, create_client_list, list_client_lists
+from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
 from backend.worker import latest_worker_status
 from playwright.async_api import async_playwright
 
@@ -169,6 +170,10 @@ class AISettingsPayload(BaseModel):
 
 class ActionScopePayload(BaseModel):
     allowed_list_ids: list[str] = Field(default_factory=list)
+
+
+class BulkDeletePayload(BaseModel):
+    client_ids: list[str] = Field(default_factory=list)
 
 
 MAX_CLIENTS_CSV_BYTES = 1_048_576
@@ -680,6 +685,14 @@ async def system_spreadsheet_get(spreadsheet_id: str, _user: AuthUser = Depends(
     return {"status": "ok", "system_spreadsheet": sheet}
 
 
+@router.delete("/system-spreadsheets/{spreadsheet_id}", summary="Exclui Planilha do Sistema")
+async def system_spreadsheet_delete(spreadsheet_id: str, delete_clients_too: bool = False, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", **delete_system_spreadsheet(spreadsheet_id, delete_clients_too=delete_clients_too)}
+    except DeletionError as exc:
+        raise _error(422, "SYSTEM_SPREADSHEET_DELETE_FAILED", str(exc)) from exc
+
+
 @router.get("/system-spreadsheets/{spreadsheet_id}/rows", summary="Lista as linhas internas da planilha")
 async def system_spreadsheet_rows(spreadsheet_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
@@ -840,6 +853,30 @@ async def clients_deactivate(client_id: str, _user: AuthUser = Depends(require_u
     return {"status": "ok", "client": client}
 
 
+@router.delete("/clients/{client_id}/delete", summary="Exclui cliente definitivamente")
+async def clients_delete(client_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", **delete_client(client_id)}
+    except DeletionError as exc:
+        raise _error(422, "CLIENT_DELETE_FAILED", str(exc)) from exc
+
+
+@router.post("/clients/bulk-delete", summary="Exclui clientes selecionados")
+async def clients_bulk_delete(payload: BulkDeletePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", **delete_clients(payload.client_ids)}
+    except DeletionError as exc:
+        raise _error(422, "CLIENT_BULK_DELETE_FAILED", str(exc)) from exc
+
+
+@router.delete("/client-lists/{list_id}", summary="Exclui lista de clientes")
+async def client_list_delete(list_id: str, delete_clients_too: bool = False, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", **delete_client_list(list_id, delete_clients_too=delete_clients_too)}
+    except DeletionError as exc:
+        raise _error(422, "CLIENT_LIST_DELETE_FAILED", str(exc)) from exc
+
+
 @router.get("/actions", summary="Lista ações publicadas")
 async def actions_list(page: int = Query(default=1, ge=1), page_size: int = Query(default=50, ge=1, le=200), _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
@@ -877,6 +914,7 @@ async def action_scope_update(action_id: str, payload: ActionScopePayload, _user
             if valid != set(requested):
                 raise _error(422, "ACTION_SCOPE_INVALID", "Ação referencia uma lista inexistente ou não autorizada.")
         action.allowed_list_ids = requested
+        action.scope_mode = "selected" if requested else "all"
     result = find_action(action_id)
     return {"status": "ok", "action": result.model_dump() if result else {}}
 
@@ -1153,6 +1191,7 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
             if db_action is None or valid != set(payload.allowed_list_ids):
                 raise _error(422, "ACTION_SCOPE_INVALID", "Ação referencia uma lista inexistente ou não autorizada.")
             db_action.allowed_list_ids = list(dict.fromkeys(payload.allowed_list_ids))
+            db_action.scope_mode = "selected"
     return {"status": "ok", "action": action}
 
 

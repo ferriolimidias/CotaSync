@@ -297,6 +297,22 @@ export async function deactivateClient(id: string) {
   return payload.client;
 }
 
+export async function deleteClient(id: string) {
+  return apiFetch(`/api/v1/clients/${id}/delete`, { method: "DELETE" });
+}
+
+export async function deleteClients(clientIds: string[]) {
+  return apiFetch(`/api/v1/clients/bulk-delete`, { method: "POST", body: JSON.stringify({ client_ids: clientIds }) });
+}
+
+export async function deleteClientList(id: string, deleteClientsToo = false) {
+  return apiFetch(`/api/v1/client-lists/${id}?delete_clients_too=${deleteClientsToo}`, { method: "DELETE" });
+}
+
+export async function deleteSystemSpreadsheet(id: string, deleteClientsToo = false) {
+  return apiFetch(`/api/v1/system-spreadsheets/${id}?delete_clients_too=${deleteClientsToo}`, { method: "DELETE" });
+}
+
 export async function previewClientsCsv(input: { filename: string; csvText: string }) {
   const payload = await apiFetch<{ preview: ClientsCsvPreview }>("/api/v1/clients/import/preview", {
     method: "POST",

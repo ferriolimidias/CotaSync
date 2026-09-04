@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Download, FileSpreadsheet, Pencil, Plus, PowerOff, Search, Upload, RefreshCw, Table2 } from "lucide-react";
+import { Download, FileSpreadsheet, Pencil, Plus, PowerOff, Search, Upload, RefreshCw, Table2, Trash2 } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -47,6 +47,10 @@ import {
   syncSystemSpreadsheetGoogle,
   getClientLists,
   createClientList,
+  deleteClient,
+  deleteClients,
+  deleteClientList,
+  deleteSystemSpreadsheet,
 } from "@/services/api";
 import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, SystemSpreadsheet } from "@/types/api";
 
@@ -88,6 +92,8 @@ function ClientesPage() {
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("all");
   const [status, setStatus] = useState("all");
+  const [selectedClientIds, setSelectedClientIds] = useState<string[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<ApiClient | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
   const [csvDialogOpen, setCsvDialogOpen] = useState(false);
   const [csvFile, setCsvFile] = useState<{ name: string; text: string } | null>(null);
@@ -115,6 +121,10 @@ function ClientesPage() {
   const testGoogle = useMutation({ mutationFn: () => testGoogleSpreadsheet(googleUrl), onSuccess: (result) => { setGoogleTabs(result.tabs); setGoogleTab(result.tabs[0] || ""); toast.success(`Planilha encontrada: ${result.name}`); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível conectar ao Google Sheets.") });
   const importGoogle = useMutation({ mutationFn: () => importSystemSpreadsheetGoogle({ name: spreadsheetName || "Planilha Google", url_or_id: googleUrl, tab: googleTab, list_id: spreadsheetListId || undefined }), onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Google Sheets importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar a aba Google.") });
   const createList = useMutation({ mutationFn: () => createClientList(newListName), onSuccess: (list) => { setSpreadsheetListId(list.id); setNewListName(""); void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); toast.success("Lista criada e selecionada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível criar a lista.") });
+  const removeClient = useMutation({ mutationFn: deleteClient, onSuccess: () => { setDeleteTarget(null); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Cliente excluído."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir o cliente.") });
+  const removeSelected = useMutation({ mutationFn: () => deleteClients(selectedClientIds), onSuccess: () => { setSelectedClientIds([]); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Clientes excluídos."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir os clientes.") });
+  const removeList = useMutation({ mutationFn: ({ id, deleteClientsToo }: { id: string; deleteClientsToo: boolean }) => deleteClientList(id, deleteClientsToo), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Lista excluída."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir a lista. Verifique as dependências.") });
+  const removeSpreadsheet = useMutation({ mutationFn: ({ id, deleteClientsToo }: { id: string; deleteClientsToo: boolean }) => deleteSystemSpreadsheet(id, deleteClientsToo), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Planilha do Sistema excluída."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir a planilha. Verifique as dependências.") });
 
   const filtered = useMemo(() => {
     return (clients.data?.items ?? []).filter((client) => {
@@ -194,6 +204,7 @@ function ClientesPage() {
   });
 
   const columns: Column<ApiClient>[] = [
+    { key: "select", header: "", cell: (client) => <input aria-label={`Selecionar ${client.name}`} type="checkbox" checked={selectedClientIds.includes(client.id)} onChange={(event) => setSelectedClientIds((current) => event.target.checked ? [...new Set([...current, client.id])] : current.filter((id) => id !== client.id))} /> },
     {
       key: "n",
       header: "Nome",
@@ -235,6 +246,7 @@ function ClientesPage() {
           >
             <PowerOff className="h-3.5 w-3.5" /> Desativar
           </Button>
+          <Button size="sm" variant="ghost" onClick={() => setDeleteTarget(client)}><Trash2 className="h-3.5 w-3.5" /> Excluir</Button>
         </div>
       ),
     },
@@ -277,6 +289,7 @@ function ClientesPage() {
             </SelectContent>
           </Select>
           <div className="ml-auto flex gap-2">
+            {selectedClientIds.length > 0 && <Button variant="destructive" size="sm" onClick={() => removeSelected.mutate()} disabled={removeSelected.isPending}><Trash2 className="h-4 w-4" /> Excluir selecionados ({selectedClientIds.length})</Button>}
             <Button variant="outline" size="sm" onClick={() => exportCsv.mutate()}>
               <Download className="h-4 w-4" /> Exportar CSV
             </Button>
@@ -297,8 +310,15 @@ function ClientesPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={() => setSpreadsheetDialogOpen(true)}><Plus className="h-4 w-4" /> Nova planilha</Button>
-            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => connector.type === "google_sheets" ? "Google Sheets" : "Excel").join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={() => setOpenSheetId(sheet.id)}><Table2 className="h-4 w-4" /> Abrir</Button><Button size="sm" variant="ghost" onClick={() => syncSheet.mutate(sheet.id)} disabled={!sheet.connectors.some((connector) => connector.type === "google_sheets")}><RefreshCw className="h-4 w-4" /> Sincronizar</Button><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}><Download className="h-4 w-4" /> Baixar Excel</Button></div>)}
+            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => connector.type === "google_sheets" ? "Google Sheets" : "Excel").join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={() => setOpenSheetId(sheet.id)}><Table2 className="h-4 w-4" /> Abrir</Button><Button size="sm" variant="ghost" onClick={() => syncSheet.mutate(sheet.id)} disabled={!sheet.connectors.some((connector) => connector.type === "google_sheets")}><RefreshCw className="h-4 w-4" /> Sincronizar</Button><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}><Download className="h-4 w-4" /> Baixar Excel</Button><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a Planilha do Sistema ${sheet.name}?`)) return; const deleteClientsToo = sheet.client_count > 0 && window.confirm(`Excluir também os ${sheet.client_count} clientes associados?`); removeSpreadsheet.mutate({ id: sheet.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>)}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card className="mb-4">
+        <CardContent className="space-y-3 p-4">
+          <div><p className="text-sm font-medium">Listas / grupos</p><p className="text-xs text-muted-foreground">Segmentação operacional independente do nome da Planilha do Sistema.</p></div>
+          <div className="flex flex-wrap gap-2">{(clientLists.data ?? []).map((list) => { const count = (clients.data?.items ?? []).filter((client) => client.list_id === list.id).length; return <div key={list.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><span>{list.name} · {count} clientes</span><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a lista ${list.name}?`)) return; const deleteClientsToo = count > 0 && window.confirm(`Excluir também os ${count} clientes associados?`); removeList.mutate({ id: list.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>; })}</div>
         </CardContent>
       </Card>
 
@@ -330,6 +350,13 @@ function ClientesPage() {
         onSubmit={(input) => save.mutate(input)}
         saving={save.isPending}
       />
+      <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Excluir cliente?</DialogTitle></DialogHeader>
+          {deleteTarget && <div className="space-y-1 text-sm"><p><strong>Nome:</strong> {deleteTarget.name}</p><p><strong>Lista:</strong> {clientLists.data?.find((list) => list.id === deleteTarget.list_id)?.name || deleteTarget.group}</p><p><strong>Grupo:</strong> {deleteTarget.display_variables.grupo || "-"}</p><p><strong>Cota:</strong> {deleteTarget.display_variables.cota || "-"}</p><p><strong>Versão:</strong> {deleteTarget.display_variables.versao || "-"}</p><p className="pt-2 text-muted-foreground">Esta ação remove o cliente do CotaSync e impede seu retorno automático pelo sync.</p></div>}
+          <DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancelar</Button><Button variant="destructive" disabled={removeClient.isPending} onClick={() => deleteTarget && removeClient.mutate(deleteTarget.id)}><Trash2 className="h-4 w-4" /> Excluir cliente</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       <CsvImportDialog
         open={csvDialogOpen}
         onOpenChange={(open) => {

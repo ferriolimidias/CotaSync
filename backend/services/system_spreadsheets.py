@@ -235,6 +235,7 @@ def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], i
     sheet = _sheet(db, sheet_id)
     configured_list_id = list_id or (sheet.configuration or {}).get("default_list_id")
     client_list = _ensure_list(db, configured_list_id, (sheet.configuration or {}).get("tenant_id", "default"))
+    suppressed = {str(item) for item in (sheet.configuration or {}).get("suppressed_client_identities", [])}
     keys = [field.semantic_role or _key(field.display_name) for field in fields]
     identity = identity_mapping or {}
     role_to_key = {role: str(identity.get(role) or role) for role in ("grupo", "cota", "versao")}
@@ -248,6 +249,8 @@ def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], i
         if not grupo or not cota:
             continue
         row_key = f"{grupo}|{cota}|{versao}"
+        if row_key in suppressed:
+            continue
         client = existing.get(row_key)
         if client is None:
             client = Client(id=str(uuid4()), name=values.get("name") or values.get("nome") or row_key, client_group=client_list.name, list_id=client_list.id, system_spreadsheet_id=sheet_id, active=True)

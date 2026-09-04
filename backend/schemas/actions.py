@@ -19,6 +19,7 @@ class ActionSummary(BaseModel):
     description: str
     variables: list[ActionVariable] = Field(default_factory=list)
     allowed_list_ids: list[str] = Field(default_factory=list)
+    scope_mode: str = "all"
     steps_count: int
     has_url: bool
     test_mode: bool = False
