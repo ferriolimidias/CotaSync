@@ -1593,6 +1593,18 @@ async def executar_acao_rapida(
                             {"reason": "transition_satisfaction_unknown", "transition_id": transition.get("transition_id"), "sequence_index": sequence_index},
                         )
                     if satisfaction != "satisfied":
+                        has_current_state_continuation = any(
+                            str(candidate.get("from_state_id") or candidate.get("from_state") or "") == str(current_match["state_id"])
+                            and int(candidate.get("sequence_index", candidate.get("step_index", -1)) or -1) > sequence_index
+                            for candidate in ordered_transitions
+                        )
+                        if has_current_state_continuation:
+                            # A legacy state signature can be both the target
+                            # of a prior edge and the source of the next edge.
+                            # If the browser state has a valid continuation,
+                            # do not rewind to the prior transition merely
+                            # because its historical postcondition is stale.
+                            continue
                         reentry_sequence_index = sequence_index
                         break
                 if reentry_sequence_index is not None:
