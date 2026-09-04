@@ -26,6 +26,17 @@ export type ApiClient = {
   updated_at?: string;
 };
 
+export type SystemSpreadsheet = {
+  id: string;
+  system_spreadsheet_id: string;
+  name: string;
+  active: boolean;
+  client_count: number;
+  last_sync?: string | null;
+  fields: Array<{ id: string; field_id: string; display_name: string; internal_key: string; position: number; type: string }>;
+  connectors: Array<{ id: string; type: string; status: string; last_synced_at?: string | null; last_error?: string | null }>;
+};
+
 export type ClientsCsvPreviewRow = {
   row_number: number;
   operation: "create" | "update";

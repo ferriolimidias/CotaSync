@@ -53,6 +53,18 @@ from backend.services.data_sources import DataSourceError, get_source, list_sour
 from backend.services.learning_ai import LearningAIObserver
 from backend.services.ai_settings import public_settings, remove_key, save_settings
 from backend.services.learning_trace import build_raw_learning_trace
+from backend.services.system_spreadsheets import (
+    SystemSpreadsheetError,
+    connector_service_account_email,
+    export_excel,
+    get_system_spreadsheet,
+    import_excel,
+    import_google,
+    list_system_spreadsheets,
+    reconcile_schema,
+    sync_google,
+    test_google_connection,
+)
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.worker import latest_worker_status
 from playwright.async_api import async_playwright
@@ -111,6 +123,27 @@ class DataSourceSchemaPayload(BaseModel):
     source_type: str
     headers: list[str] = Field(default_factory=list)
     configuration: dict[str, Any] = Field(default_factory=dict)
+
+
+class SystemSpreadsheetCreatePayload(BaseModel):
+    name: str
+    headers: list[str] = Field(default_factory=lambda: ["Nome", "Grupo", "Cota", "Versão"])
+    identity_mapping: dict[str, Any] = Field(default_factory=dict)
+
+
+class GoogleSpreadsheetPayload(BaseModel):
+    url_or_id: str
+    name: str = "Planilha Google"
+    tab: str = ""
+
+
+class ExcelSpreadsheetPayload(BaseModel):
+    name: str
+    filename: str = "clientes.xlsx"
+    content_base64: str
+    sheet_name: str | None = None
+    header_row: int = Field(default=1, ge=1)
+    identity_mapping: dict[str, Any] = Field(default_factory=dict)
 
 
 class AISettingsPayload(BaseModel):
@@ -590,6 +623,90 @@ async def clients_import(payload: ClientsCsvPayload, _user: AuthUser = Depends(r
 @router.get("/data-sources", summary="Lista fontes de dados configuradas")
 async def data_sources_list(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     return {"status": "ok", "data_sources": list_sources()}
+
+
+@router.get("/system-spreadsheets", summary="Lista as planilhas canônicas do sistema")
+async def system_spreadsheets_list(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    return {"status": "ok", "system_spreadsheets": list_system_spreadsheets()}
+
+
+@router.post("/system-spreadsheets", summary="Cria uma planilha no CotaSync")
+async def system_spreadsheet_create(payload: SystemSpreadsheetCreatePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    from backend.services.system_spreadsheets import create_system_spreadsheet
+    try:
+        sheet = create_system_spreadsheet(payload.name, payload.headers, identity_mapping=payload.identity_mapping)
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "SYSTEM_SPREADSHEET_INVALID", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.get("/system-spreadsheets/{spreadsheet_id}", summary="Abre uma planilha do sistema")
+async def system_spreadsheet_get(spreadsheet_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        sheet = get_system_spreadsheet(spreadsheet_id)
+    except SystemSpreadsheetError as exc:
+        raise _error(404, "SYSTEM_SPREADSHEET_NOT_FOUND", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.post("/system-spreadsheets/{spreadsheet_id}/schema", summary="Reconcilia campos da planilha do sistema")
+async def system_spreadsheet_schema(spreadsheet_id: str, payload: SystemSpreadsheetCreatePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        sheet = reconcile_schema(spreadsheet_id, payload.headers)
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "SYSTEM_SPREADSHEET_SCHEMA_INVALID", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.post("/system-spreadsheets/import-excel", summary="Importa um workbook Excel para a planilha do sistema")
+async def system_spreadsheet_import_excel(payload: ExcelSpreadsheetPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    import base64
+    try:
+        content = base64.b64decode(payload.content_base64, validate=True)
+        sheet = import_excel(name=payload.name, content=content, filename=payload.filename, sheet_name=payload.sheet_name, header_row=payload.header_row, identity_mapping=payload.identity_mapping)
+    except (ValueError, SystemSpreadsheetError) as exc:
+        raise _error(422, "EXCEL_IMPORT_FAILED", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.get("/system-spreadsheets/{spreadsheet_id}/export.xlsx", summary="Baixa a planilha do sistema em Excel")
+async def system_spreadsheet_export_excel(spreadsheet_id: str, _user: AuthUser = Depends(require_user)) -> FastAPIResponse:
+    try:
+        content = export_excel(spreadsheet_id)
+    except SystemSpreadsheetError as exc:
+        raise _error(404, "EXCEL_EXPORT_FAILED", str(exc)) from exc
+    return FastAPIResponse(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": 'attachment; filename="cotasync.xlsx"'})
+
+
+@router.post("/system-spreadsheets/google/test", summary="Testa acesso Google Sheets")
+async def system_spreadsheet_google_test(payload: GoogleSpreadsheetPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", "google": test_google_connection(payload.url_or_id)}
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "GOOGLE_SHEETS_CONNECTION_FAILED", str(exc)) from exc
+
+
+@router.post("/system-spreadsheets/import-google", summary="Importa uma aba Google para a planilha do sistema")
+async def system_spreadsheet_import_google(payload: GoogleSpreadsheetPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        sheet = import_google(name=payload.name, url_or_id=payload.url_or_id, tab=payload.tab)
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "GOOGLE_SHEETS_IMPORT_FAILED", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.get("/system-spreadsheets/google/config", summary="Status da conta de serviço Google")
+async def system_spreadsheet_google_config(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    return {"status": "ok", "configured": bool(connector_service_account_email()), "service_account_email": connector_service_account_email()}
+
+
+@router.post("/system-spreadsheets/{spreadsheet_id}/sync/google", summary="Sincroniza uma planilha Google sem repetir ações")
+async def system_spreadsheet_sync_google(spreadsheet_id: str, direction: str = Query(default="inbound", pattern="^(inbound|outbound)$"), _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        sheet = sync_google(spreadsheet_id, direction=direction)
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "GOOGLE_SHEETS_SYNC_FAILED", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet, "direction": direction}
 
 
 @router.get("/data-sources/{source_id}", summary="Mostra schema de uma fonte")

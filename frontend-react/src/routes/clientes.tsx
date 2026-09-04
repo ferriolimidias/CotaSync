@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Download, Pencil, Plus, PowerOff, Search, Upload } from "lucide-react";
+import { Download, FileSpreadsheet, Pencil, Plus, PowerOff, Search, Upload } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -36,9 +36,14 @@ import {
   importClientsCsv,
   previewClientsCsv,
   updateClient,
-  getDataSources,
+  getSystemSpreadsheets,
+  createSystemSpreadsheet,
+  exportSystemSpreadsheet,
+  importSystemSpreadsheetExcel,
+  importSystemSpreadsheetGoogle,
+  testGoogleSpreadsheet,
 } from "@/services/api";
-import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, DataSource } from "@/types/api";
+import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, SystemSpreadsheet } from "@/types/api";
 
 export const Route = createFileRoute("/clientes")({
   head: () => ({ meta: [{ title: "Clientes — CotaSync" }] }),
@@ -71,7 +76,7 @@ const emptyForm: FormState = {
 function ClientesPage() {
   const queryClient = useQueryClient();
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => getClients({ pageSize: 200 }) });
-  const dataSources = useQuery({ queryKey: ["data-sources"], queryFn: getDataSources });
+  const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("all");
   const [status, setStatus] = useState("all");
@@ -79,6 +84,22 @@ function ClientesPage() {
   const [csvDialogOpen, setCsvDialogOpen] = useState(false);
   const [csvFile, setCsvFile] = useState<{ name: string; text: string } | null>(null);
   const [csvPreview, setCsvPreview] = useState<ClientsCsvPreview | null>(null);
+  const [spreadsheetDialogOpen, setSpreadsheetDialogOpen] = useState(false);
+  const [spreadsheetName, setSpreadsheetName] = useState("");
+  const [spreadsheetHeaders, setSpreadsheetHeaders] = useState("Nome,Grupo,Cota,Versão");
+  const [spreadsheetMode, setSpreadsheetMode] = useState<"create" | "excel" | "google">("create");
+  const [excelUpload, setExcelUpload] = useState<{ filename: string; content_base64: string } | null>(null);
+  const [googleUrl, setGoogleUrl] = useState("");
+  const [googleTabs, setGoogleTabs] = useState<string[]>([]);
+  const [googleTab, setGoogleTab] = useState("");
+  const createSpreadsheet = useMutation({
+    mutationFn: () => createSystemSpreadsheet({ name: spreadsheetName, headers: spreadsheetHeaders.split(",").map((value) => value.trim()).filter(Boolean) }),
+    onSuccess: () => { setSpreadsheetDialogOpen(false); setSpreadsheetName(""); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Planilha do Sistema criada."); },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível criar a planilha."),
+  });
+  const importExcel = useMutation({ mutationFn: () => { if (!excelUpload) throw new Error("Selecione um arquivo .xlsx."); return importSystemSpreadsheetExcel({ name: spreadsheetName || excelUpload.filename, ...excelUpload }); }, onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Excel importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar o Excel.") });
+  const testGoogle = useMutation({ mutationFn: () => testGoogleSpreadsheet(googleUrl), onSuccess: (result) => { setGoogleTabs(result.tabs); setGoogleTab(result.tabs[0] || ""); toast.success(`Planilha encontrada: ${result.name}`); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível conectar ao Google Sheets.") });
+  const importGoogle = useMutation({ mutationFn: () => importSystemSpreadsheetGoogle({ name: spreadsheetName || "Planilha Google", url_or_id: googleUrl, tab: googleTab }), onSuccess: () => { setSpreadsheetDialogOpen(false); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Google Sheets importado para a Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível importar a aba Google.") });
 
   const groups = useMemo(
     () =>
@@ -260,17 +281,25 @@ function ClientesPage() {
         </CardContent>
       </Card>
       <Card className="mb-4">
-        <CardContent className="flex flex-wrap items-center gap-3 p-4">
+        <CardContent className="space-y-3 p-4">
           <div>
-            <p className="text-sm font-medium">Fonte de dados</p>
-            <p className="text-xs text-muted-foreground">Schema reutilizado durante o ensino de ações.</p>
+            <p className="text-sm font-medium">Planilhas do sistema</p>
+            <p className="text-xs text-muted-foreground">A representação canônica de clientes, campos e resultados.</p>
           </div>
-          <div className="ml-auto text-sm text-muted-foreground">
-            {dataSources.isLoading ? "Carregando..." : dataSources.data?.length ? dataSources.data.map((source: DataSource) => `${source.name} (${source.type})`).join(" · ") : "Nenhuma fonte importada"}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => setSpreadsheetDialogOpen(true)}><Plus className="h-4 w-4" /> Nova planilha</Button>
+            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => connector.type === "google_sheets" ? "Google Sheets" : "Excel").join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}>Baixar Excel</Button></div>)}
           </div>
-          <span className="text-xs text-muted-foreground">Google Sheets: integração em breve</span>
         </CardContent>
       </Card>
+
+      <Dialog open={spreadsheetDialogOpen} onOpenChange={setSpreadsheetDialogOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Nova planilha</DialogTitle></DialogHeader>
+          <div className="grid gap-3"><div className="grid grid-cols-3 gap-2"><Button variant={spreadsheetMode === "excel" ? "default" : "outline"} onClick={() => setSpreadsheetMode("excel")}>Importar Excel</Button><Button variant={spreadsheetMode === "google" ? "default" : "outline"} onClick={() => setSpreadsheetMode("google")}>Google Sheets</Button><Button variant={spreadsheetMode === "create" ? "default" : "outline"} onClick={() => setSpreadsheetMode("create")}>Criar no CotaSync</Button></div><div className="grid gap-2"><Label>Nome da Planilha do Sistema</Label><Input placeholder="Clientes Setembro" value={spreadsheetName} onChange={(event) => setSpreadsheetName(event.target.value)} /></div>{spreadsheetMode === "create" && <Input value={spreadsheetHeaders} onChange={(event) => setSpreadsheetHeaders(event.target.value)} placeholder="Campos separados por vírgula" />}{spreadsheetMode === "excel" && <Input type="file" accept=".xlsx" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; const encoded = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(",")[1] || ""); reader.onerror = () => reject(new Error("Falha ao ler arquivo.")); reader.readAsDataURL(file); }); setExcelUpload({ filename: file.name, content_base64: encoded }); }} />}{spreadsheetMode === "google" && <><Input placeholder="URL ou ID da planilha Google" value={googleUrl} onChange={(event) => setGoogleUrl(event.target.value)} /><Button variant="outline" onClick={() => testGoogle.mutate()} disabled={!googleUrl.trim() || testGoogle.isPending}>Testar conexão</Button>{googleTabs.length > 0 && <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={googleTab} onChange={(event) => setGoogleTab(event.target.value)}>{googleTabs.map((tab) => <option key={tab} value={tab}>{tab}</option>)}</select>}</>}</div>
+          <DialogFooter><Button onClick={() => spreadsheetMode === "create" ? createSpreadsheet.mutate() : spreadsheetMode === "excel" ? importExcel.mutate() : importGoogle.mutate()} disabled={!spreadsheetName.trim() || (spreadsheetMode === "excel" ? !excelUpload : spreadsheetMode === "google" ? !googleTab : false)}>{spreadsheetMode === "create" ? "Criar planilha" : "Importar para o sistema"}</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <DataTable
         columns={columns}

@@ -122,6 +122,7 @@ export async function apiFetch<T>(
     if (response.status === 204) return undefined as T;
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/csv")) return (await response.text()) as T;
+    if (contentType.includes("spreadsheetml")) return (await response.blob()) as T;
     return (await response.json()) as T;
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
@@ -174,6 +175,35 @@ export async function getClients(
 export async function getDataSources() {
   const payload = await apiFetch<{ data_sources: DataSource[] }>("/api/v1/data-sources");
   return payload.data_sources;
+}
+
+export async function getSystemSpreadsheets() {
+  const payload = await apiFetch<{ system_spreadsheets: import("@/types/api").SystemSpreadsheet[] }>("/api/v1/system-spreadsheets");
+  return payload.system_spreadsheets;
+}
+
+export async function createSystemSpreadsheet(input: { name: string; headers: string[] }) {
+  const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets", { method: "POST", body: JSON.stringify(input) });
+  return payload.system_spreadsheet;
+}
+
+export async function exportSystemSpreadsheet(id: string) {
+  return apiFetch<Blob>(`/api/v1/system-spreadsheets/${id}/export.xlsx`);
+}
+
+export async function importSystemSpreadsheetExcel(input: { name: string; filename: string; content_base64: string; sheet_name?: string; header_row?: number }) {
+  const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets/import-excel", { method: "POST", body: JSON.stringify(input) });
+  return payload.system_spreadsheet;
+}
+
+export async function testGoogleSpreadsheet(url_or_id: string) {
+  const payload = await apiFetch<{ google: { name: string; tabs: string[]; service_account_email?: string | null } }>("/api/v1/system-spreadsheets/google/test", { method: "POST", body: JSON.stringify({ url_or_id }) });
+  return payload.google;
+}
+
+export async function importSystemSpreadsheetGoogle(input: { name: string; url_or_id: string; tab: string }) {
+  const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets/import-google", { method: "POST", body: JSON.stringify(input) });
+  return payload.system_spreadsheet;
 }
 
 export async function getLearningAISettings() {

@@ -20,7 +20,7 @@ import {
   captureLearningResultSelection,
   confirmLearningResultSelection,
   getLearningSession,
-  getDataSources,
+  getSystemSpreadsheets,
   removeLearningOutput,
   renameLearningOutput,
   saveLearnedAction,
@@ -49,7 +49,7 @@ function EnsinarPage() {
   const [dataSourceId, setDataSourceId] = useState<string>("");
   const [dataSourceFieldId, setDataSourceFieldId] = useState<string>("");
   const [outputLabels, setOutputLabels] = useState<Record<string, string>>({});
-  const dataSources = useQuery({ queryKey: ["data-sources"], queryFn: getDataSources });
+  const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const session = useQuery({
     queryKey: ["learning-session", sessionId],
     queryFn: () => getLearningSession(sessionId as string),
@@ -159,7 +159,7 @@ function EnsinarPage() {
         candidate: selectionCandidate as ResultSelectionCandidate,
         normalization,
         destination: learningMode === "spreadsheet" && dataSourceId && dataSourceFieldId
-          ? { type: "data_source_field", data_source_id: dataSourceId, field_id: dataSourceFieldId }
+          ? { type: "system_sheet_field", system_spreadsheet_id: dataSourceId, field_id: dataSourceFieldId }
           : null,
       }),
     onSuccess: () => {
@@ -232,11 +232,11 @@ function EnsinarPage() {
                   Atualizar planilha
                 </Button>
               </div>
-              {learningMode === "spreadsheet" && <p className="text-xs text-muted-foreground">A fonte e os campos são definidos em Clientes. O vínculo será associado ao resultado selecionado.</p>}
+              {learningMode === "spreadsheet" && <p className="text-xs text-muted-foreground">Escolha a Planilha do Sistema e o campo que receberá o resultado.</p>}
               {learningMode === "spreadsheet" && (
                 <>
                   <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={dataSourceId} onChange={(event) => { setDataSourceId(event.target.value); setDataSourceFieldId(""); }}>
-                    <option value="">Selecione a fonte</option>
+                    <option value="">Selecione a Planilha do Sistema</option>
                     {(dataSources.data || []).map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
                   </select>
                   <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={dataSourceFieldId} onChange={(event) => setDataSourceFieldId(event.target.value)} disabled={!dataSourceId}>
