@@ -52,8 +52,9 @@ def _secret() -> bytes:
     return str(generated).encode("utf-8")
 
 
-def hash_password(password: str, *, salt: str | None = None, iterations: int = 260_000) -> str:
-    validate_password_policy(password)
+def _derive_password_hash(password: str, *, salt: str | None = None, iterations: int = 260_000) -> str:
+    if not password:
+        raise ValueError("Senha vazia nao pode ser armazenada.")
     salt_bytes = base64.urlsafe_b64decode(salt.encode("ascii")) if salt else secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, iterations)
     return "pbkdf2_sha256${}${}${}".format(
@@ -63,13 +64,18 @@ def hash_password(password: str, *, salt: str | None = None, iterations: int = 2
     )
 
 
+def hash_password(password: str, *, salt: str | None = None, iterations: int = 260_000) -> str:
+    validate_password_policy(password)
+    return _derive_password_hash(password, salt=salt, iterations=iterations)
+
+
 def verify_password(password: str, stored_hash: str) -> bool:
     try:
         algorithm, raw_iterations, salt, expected = str(stored_hash or "").split("$", 3)
         if algorithm != "pbkdf2_sha256":
             return False
         iterations = int(raw_iterations)
-        candidate = hash_password(password, salt=salt, iterations=iterations)
+        candidate = _derive_password_hash(password, salt=salt, iterations=iterations)
     except Exception:
         return False
     return hmac.compare_digest(candidate, stored_hash)

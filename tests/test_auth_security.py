@@ -14,9 +14,11 @@ from backend.db import SessionLocal, User
 from backend.services.auth import (
     MIN_PASSWORD_LENGTH,
     AuthUser,
+    _derive_password_hash,
     create_session_token,
     hash_password,
     reset_user_password,
+    verify_password,
 )
 from scripts.reset_user_password import _read_password
 from tests.auth_helpers import TEST_AUTH_ENV, authenticated_client
@@ -71,6 +73,10 @@ class AuthSecurityTests(unittest.TestCase):
         for password in ("Abc1!xy", "Abc1!xyz"):
             stored_hash = hash_password(password)
             self.assertTrue(stored_hash.startswith("pbkdf2_sha256$"))
+
+    def test_login_verification_keeps_legacy_short_password_compatible(self) -> None:
+        legacy_hash = _derive_password_hash("legacy")
+        self.assertTrue(verify_password("legacy", legacy_hash))
 
     def test_reset_password_accepts_seven_characters_and_login_still_works(self) -> None:
         password = "Abc1!xy"
