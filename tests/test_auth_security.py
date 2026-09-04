@@ -11,7 +11,14 @@ from sqlalchemy import select
 
 from backend.main import app
 from backend.db import SessionLocal, User
-from backend.services.auth import AuthUser, create_session_token, hash_password, reset_user_password
+from backend.services.auth import (
+    MIN_PASSWORD_LENGTH,
+    AuthUser,
+    create_session_token,
+    hash_password,
+    reset_user_password,
+)
+from scripts.reset_user_password import _read_password
 from tests.auth_helpers import TEST_AUTH_ENV, authenticated_client
 
 
@@ -56,6 +63,31 @@ class AuthSecurityTests(unittest.TestCase):
             logout = client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})
             self.assertEqual(logout.status_code, 200)
             self.assertEqual(client.get("/api/v1/auth/me").status_code, 401)
+
+    def test_password_policy_rejects_six_and_accepts_seven_or_more(self) -> None:
+        self.assertEqual(MIN_PASSWORD_LENGTH, 7)
+        with self.assertRaisesRegex(ValueError, "7"):
+            hash_password("Abc1!")
+        for password in ("Abc1!xy", "Abc1!xyz"):
+            stored_hash = hash_password(password)
+            self.assertTrue(stored_hash.startswith("pbkdf2_sha256$"))
+
+    def test_reset_password_accepts_seven_characters_and_login_still_works(self) -> None:
+        password = "Abc1!xy"
+        reset_user_password("operator", password)
+        with patch.dict("os.environ", TEST_AUTH_ENV, clear=False):
+            client = TestClient(app)
+            response = client.post("/api/v1/auth/login", json={"username": "operator", "password": password})
+        self.assertEqual(response.status_code, 200)
+
+    def test_reset_script_accepts_seven_characters(self) -> None:
+        with patch("scripts.reset_user_password.getpass.getpass", side_effect=["Abc1!xy", "Abc1!xy"]):
+            self.assertEqual(_read_password("operator"), "Abc1!xy")
+
+    def test_reset_script_rejects_six_characters(self) -> None:
+        with patch("scripts.reset_user_password.getpass.getpass", side_effect=["Abc1!", "Abc1!"]):
+            with self.assertRaisesRegex(ValueError, "7"):
+                _read_password("operator")
 
     def test_operator_login_and_wrong_password(self) -> None:
         with patch.dict("os.environ", TEST_AUTH_ENV, clear=False):

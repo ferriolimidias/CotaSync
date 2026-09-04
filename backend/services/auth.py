@@ -21,6 +21,7 @@ Role = Literal["admin", "operator"]
 SESSION_COOKIE = os.getenv("COTASYNC_SESSION_COOKIE", "cotasync_session")
 CSRF_COOKIE = os.getenv("COTASYNC_CSRF_COOKIE", "cotasync_csrf")
 SESSION_TTL_SECONDS = int(os.getenv("COTASYNC_SESSION_TTL_SECONDS", "28800"))
+MIN_PASSWORD_LENGTH = 7
 
 logger = logging.getLogger("cotasync.auth")
 
@@ -30,6 +31,13 @@ class AuthUser:
     username: str
     role: Role
     auth_version: int = 1
+
+
+def validate_password_policy(password: str) -> None:
+    if not password:
+        raise ValueError("Senha vazia nao pode ser armazenada.")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Senha deve ter pelo menos {MIN_PASSWORD_LENGTH} caracteres.")
 
 
 def _secret() -> bytes:
@@ -45,8 +53,7 @@ def _secret() -> bytes:
 
 
 def hash_password(password: str, *, salt: str | None = None, iterations: int = 260_000) -> str:
-    if not password:
-        raise ValueError("Senha vazia nao pode ser armazenada.")
+    validate_password_policy(password)
     salt_bytes = base64.urlsafe_b64decode(salt.encode("ascii")) if salt else secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, iterations)
     return "pbkdf2_sha256${}${}${}".format(
