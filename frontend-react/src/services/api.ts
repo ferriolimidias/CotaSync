@@ -191,6 +191,18 @@ export async function exportSystemSpreadsheet(id: string) {
   return apiFetch<Blob>(`/api/v1/system-spreadsheets/${id}/export.xlsx`);
 }
 
+export async function getSystemSpreadsheetRows(id: string) {
+  return apiFetch<import("@/types/api").SystemSpreadsheetRows>(`/api/v1/system-spreadsheets/${id}/rows`);
+}
+
+export async function updateSystemSpreadsheetRow(id: string, clientId: string, values: Record<string, string>) {
+  return apiFetch<import("@/types/api").SystemSpreadsheetRows>(`/api/v1/system-spreadsheets/${id}/rows/${clientId}`, { method: "PATCH", body: JSON.stringify({ values }) });
+}
+
+export async function syncSystemSpreadsheetGoogle(id: string, direction: "inbound" | "outbound" = "outbound") {
+  return apiFetch(`/api/v1/system-spreadsheets/${id}/sync/google?direction=${direction}`, { method: "POST" });
+}
+
 export async function importSystemSpreadsheetExcel(input: { name: string; filename: string; content_base64: string; sheet_name?: string; header_row?: number }) {
   const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>("/api/v1/system-spreadsheets/import-excel", { method: "POST", body: JSON.stringify(input) });
   return payload.system_spreadsheet;

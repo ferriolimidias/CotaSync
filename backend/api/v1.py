@@ -56,14 +56,18 @@ from backend.services.learning_trace import build_raw_learning_trace
 from backend.services.system_spreadsheets import (
     SystemSpreadsheetError,
     connector_service_account_email,
+    attach_excel,
+    attach_google,
     export_excel,
     get_system_spreadsheet,
+    get_system_spreadsheet_rows,
     import_excel,
     import_google,
     list_system_spreadsheets,
     reconcile_schema,
     sync_google,
     test_google_connection,
+    update_system_spreadsheet_row,
 )
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.worker import latest_worker_status
@@ -144,6 +148,10 @@ class ExcelSpreadsheetPayload(BaseModel):
     sheet_name: str | None = None
     header_row: int = Field(default=1, ge=1)
     identity_mapping: dict[str, Any] = Field(default_factory=dict)
+
+
+class SystemSpreadsheetRowPayload(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
 
 
 class AISettingsPayload(BaseModel):
@@ -649,6 +657,22 @@ async def system_spreadsheet_get(spreadsheet_id: str, _user: AuthUser = Depends(
     return {"status": "ok", "system_spreadsheet": sheet}
 
 
+@router.get("/system-spreadsheets/{spreadsheet_id}/rows", summary="Lista as linhas internas da planilha")
+async def system_spreadsheet_rows(spreadsheet_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", **get_system_spreadsheet_rows(spreadsheet_id)}
+    except SystemSpreadsheetError as exc:
+        raise _error(404, "SYSTEM_SPREADSHEET_NOT_FOUND", str(exc)) from exc
+
+
+@router.patch("/system-spreadsheets/{spreadsheet_id}/rows/{client_id}", summary="Edita campos não identitários de uma linha")
+async def system_spreadsheet_row_update(spreadsheet_id: str, client_id: str, payload: SystemSpreadsheetRowPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", **update_system_spreadsheet_row(spreadsheet_id, client_id, payload.values)}
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "SYSTEM_SPREADSHEET_ROW_UPDATE_FAILED", str(exc)) from exc
+
+
 @router.post("/system-spreadsheets/{spreadsheet_id}/schema", summary="Reconcilia campos da planilha do sistema")
 async def system_spreadsheet_schema(spreadsheet_id: str, payload: SystemSpreadsheetCreatePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
@@ -666,6 +690,16 @@ async def system_spreadsheet_import_excel(payload: ExcelSpreadsheetPayload, _use
         sheet = import_excel(name=payload.name, content=content, filename=payload.filename, sheet_name=payload.sheet_name, header_row=payload.header_row, identity_mapping=payload.identity_mapping)
     except (ValueError, SystemSpreadsheetError) as exc:
         raise _error(422, "EXCEL_IMPORT_FAILED", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.post("/system-spreadsheets/{spreadsheet_id}/connectors/excel", summary="Anexa Excel a uma planilha existente")
+async def system_spreadsheet_attach_excel(spreadsheet_id: str, payload: ExcelSpreadsheetPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    import base64
+    try:
+        sheet = attach_excel(sheet_id=spreadsheet_id, content=base64.b64decode(payload.content_base64, validate=True), filename=payload.filename, sheet_name=payload.sheet_name, header_row=payload.header_row)
+    except (ValueError, SystemSpreadsheetError) as exc:
+        raise _error(422, "EXCEL_CONNECTOR_FAILED", str(exc)) from exc
     return {"status": "ok", "system_spreadsheet": sheet}
 
 
@@ -692,6 +726,15 @@ async def system_spreadsheet_import_google(payload: GoogleSpreadsheetPayload, _u
         sheet = import_google(name=payload.name, url_or_id=payload.url_or_id, tab=payload.tab)
     except SystemSpreadsheetError as exc:
         raise _error(422, "GOOGLE_SHEETS_IMPORT_FAILED", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
+
+
+@router.post("/system-spreadsheets/{spreadsheet_id}/connectors/google", summary="Anexa Google Sheets a uma planilha existente")
+async def system_spreadsheet_attach_google(spreadsheet_id: str, payload: GoogleSpreadsheetPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        sheet = attach_google(sheet_id=spreadsheet_id, url_or_id=payload.url_or_id, tab=payload.tab)
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "GOOGLE_SHEETS_CONNECTOR_FAILED", str(exc)) from exc
     return {"status": "ok", "system_spreadsheet": sheet}
 
 

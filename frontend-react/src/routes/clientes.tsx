@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Download, FileSpreadsheet, Pencil, Plus, PowerOff, Search, Upload } from "lucide-react";
+import { Download, FileSpreadsheet, Pencil, Plus, PowerOff, Search, Upload, RefreshCw, Table2 } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -42,6 +42,9 @@ import {
   importSystemSpreadsheetExcel,
   importSystemSpreadsheetGoogle,
   testGoogleSpreadsheet,
+  getSystemSpreadsheetRows,
+  updateSystemSpreadsheetRow,
+  syncSystemSpreadsheetGoogle,
 } from "@/services/api";
 import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, SystemSpreadsheet } from "@/types/api";
 
@@ -92,6 +95,10 @@ function ClientesPage() {
   const [googleUrl, setGoogleUrl] = useState("");
   const [googleTabs, setGoogleTabs] = useState<string[]>([]);
   const [googleTab, setGoogleTab] = useState("");
+  const [openSheetId, setOpenSheetId] = useState<string | null>(null);
+  const openSheet = useQuery({ queryKey: ["system-spreadsheet-rows", openSheetId], queryFn: () => getSystemSpreadsheetRows(openSheetId as string), enabled: Boolean(openSheetId) });
+  const updateSheetRow = useMutation({ mutationFn: ({ clientId, values }: { clientId: string; values: Record<string, string> }) => updateSystemSpreadsheetRow(openSheetId as string, clientId, values), onSuccess: () => { void openSheet.refetch(); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Valor salvo na Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar o valor.") });
+  const syncSheet = useMutation({ mutationFn: (id: string) => syncSystemSpreadsheetGoogle(id), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Sincronização solicitada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível sincronizar.") });
   const createSpreadsheet = useMutation({
     mutationFn: () => createSystemSpreadsheet({ name: spreadsheetName, headers: spreadsheetHeaders.split(",").map((value) => value.trim()).filter(Boolean) }),
     onSuccess: () => { setSpreadsheetDialogOpen(false); setSpreadsheetName(""); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Planilha do Sistema criada."); },
@@ -288,7 +295,7 @@ function ClientesPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={() => setSpreadsheetDialogOpen(true)}><Plus className="h-4 w-4" /> Nova planilha</Button>
-            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => connector.type === "google_sheets" ? "Google Sheets" : "Excel").join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}>Baixar Excel</Button></div>)}
+            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => connector.type === "google_sheets" ? "Google Sheets" : "Excel").join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={() => setOpenSheetId(sheet.id)}><Table2 className="h-4 w-4" /> Abrir</Button><Button size="sm" variant="ghost" onClick={() => syncSheet.mutate(sheet.id)} disabled={!sheet.connectors.some((connector) => connector.type === "google_sheets")}><RefreshCw className="h-4 w-4" /> Sincronizar</Button><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}><Download className="h-4 w-4" /> Baixar Excel</Button></div>)}
           </div>
         </CardContent>
       </Card>
@@ -300,6 +307,14 @@ function ClientesPage() {
           <DialogFooter><Button onClick={() => spreadsheetMode === "create" ? createSpreadsheet.mutate() : spreadsheetMode === "excel" ? importExcel.mutate() : importGoogle.mutate()} disabled={!spreadsheetName.trim() || (spreadsheetMode === "excel" ? !excelUpload : spreadsheetMode === "google" ? !googleTab : false)}>{spreadsheetMode === "create" ? "Criar planilha" : "Importar para o sistema"}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <SystemSpreadsheetDialog
+        open={Boolean(openSheetId)}
+        onOpenChange={(open) => !open && setOpenSheetId(null)}
+        data={openSheet.data}
+        saving={updateSheetRow.isPending}
+        onSave={(clientId, values) => updateSheetRow.mutate({ clientId, values })}
+      />
 
       <DataTable
         columns={columns}
@@ -459,6 +474,36 @@ function CsvImportDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function SystemSpreadsheetDialog({
+  open,
+  onOpenChange,
+  data,
+  saving,
+  onSave,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  data?: import("@/types/api").SystemSpreadsheetRows;
+  saving: boolean;
+  onSave: (clientId: string, values: Record<string, string>) => void;
+}) {
+  const fields = data?.system_spreadsheet.fields ?? [];
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] max-w-6xl overflow-auto">
+        <DialogHeader><DialogTitle>{data?.system_spreadsheet.name || "Planilha do Sistema"}</DialogTitle></DialogHeader>
+        <p className="text-xs text-muted-foreground">Valores internos da planilha. Grupo, Cota e Versão são protegidos nesta edição rápida.</p>
+        {data && <div className="overflow-auto rounded-md border border-border"><table className="w-full text-sm"><thead><tr className="border-b border-border bg-muted/30"><th className="p-2 text-left">Cliente</th>{fields.map((field) => <th className="p-2 text-left" key={field.field_id}>{field.display_name}</th>)}<th className="p-2" /></tr></thead><tbody>{data.rows.map((row) => <SpreadsheetRow key={row.client_id} row={row} fields={fields} saving={saving} onSave={onSave} />)}</tbody></table></div>}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SpreadsheetRow({ row, fields, saving, onSave }: { row: { client_id: string; name: string; values: Record<string, string> }; fields: SystemSpreadsheet["fields"]; saving: boolean; onSave: (clientId: string, values: Record<string, string>) => void }) {
+  const [values, setValues] = useState(row.values);
+  return <tr className="border-b border-border last:border-0"><td className="whitespace-nowrap p-2 font-medium">{row.name}</td>{fields.map((field) => { const protectedField = ["grupo", "cota", "versao"].includes(field.internal_key); return <td className="min-w-32 p-2" key={field.field_id}><Input disabled={protectedField} value={values[field.internal_key] || ""} onChange={(event) => setValues({ ...values, [field.internal_key]: event.target.value })} /></td>; })}<td className="p-2"><Button size="sm" disabled={saving} onClick={() => onSave(row.client_id, Object.fromEntries(fields.filter((field) => !["grupo", "cota", "versao"].includes(field.internal_key)).map((field) => [field.internal_key, values[field.internal_key] || ""])))}>Salvar</Button></td></tr>;
 }
 
 function CsvMetric({ label, value }: { label: string; value: number }) {

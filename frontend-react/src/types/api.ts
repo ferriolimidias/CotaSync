@@ -37,6 +37,11 @@ export type SystemSpreadsheet = {
   connectors: Array<{ id: string; type: string; status: string; last_synced_at?: string | null; last_error?: string | null }>;
 };
 
+export type SystemSpreadsheetRows = {
+  system_spreadsheet: SystemSpreadsheet;
+  rows: Array<{ client_id: string; name: string; active: boolean; values: Record<string, string> }>;
+};
+
 export type ClientsCsvPreviewRow = {
   row_number: number;
   operation: "create" | "update";

@@ -16,7 +16,7 @@ from uuid import uuid4
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
-from backend.db import Client, DataSource, DataSourceField, SessionLocal, SpreadsheetConnector
+from backend.db import Client, DataSource, DataSourceField, Run, SessionLocal, SpreadsheetConnector
 from backend.services.actions_repository import project_root
 from backend.services.client_fields import canonical_client_field_key
 
@@ -119,6 +119,38 @@ def get_system_spreadsheet(sheet_id: str, *, tenant_id: str = "default") -> dict
         return _dump_sheet(sheet, _fields(db, sheet.id), connectors, count)
 
 
+def get_system_spreadsheet_rows(sheet_id: str, *, tenant_id: str = "default") -> dict[str, Any]:
+    sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+    with SessionLocal() as db:
+        clients = list(db.scalars(select(Client).where(Client.system_spreadsheet_id == sheet_id).order_by(Client.name)))
+        rows = []
+        for client in clients:
+            values = dict(client.variables or {})
+            rows.append({"client_id": client.id, "name": client.name, "active": client.active, "values": {field["internal_key"]: values.get(field["internal_key"], "") for field in sheet["fields"]}})
+    return {"system_spreadsheet": sheet, "rows": rows}
+
+
+def update_system_spreadsheet_row(sheet_id: str, client_id: str, values: dict[str, Any], *, tenant_id: str = "default") -> dict[str, Any]:
+    sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+    identity_keys = {"grupo", "cota", "versao"}
+    if identity_keys.intersection(values):
+        raise SystemSpreadsheetError("Campos de identidade devem ser alterados pela reconciliação da planilha.")
+    allowed = {field["internal_key"] for field in sheet["fields"]}
+    unknown = set(values) - allowed
+    if unknown:
+        raise SystemSpreadsheetError("A linha contém campos que não pertencem à Planilha do Sistema.")
+    with SessionLocal.begin() as db:
+        client = db.scalar(select(Client).where(Client.id == client_id, Client.system_spreadsheet_id == sheet_id))
+        if client is None:
+            raise SystemSpreadsheetError("Cliente não pertence à Planilha do Sistema.")
+        merged = dict(client.variables or {})
+        merged.update({key: "" if value is None else str(value) for key, value in values.items()})
+        client.variables = merged
+        for connector in db.scalars(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id)):
+            connector.status = "pending"
+    return get_system_spreadsheet_rows(sheet_id, tenant_id=tenant_id)
+
+
 def reconcile_schema(sheet_id: str, headers: list[str], *, tenant_id: str = "default") -> dict[str, Any]:
     with SessionLocal.begin() as db:
         sheet = _sheet(db, sheet_id)
@@ -137,6 +169,28 @@ def _upsert_connector(db, sheet_id: str, connector_type: str, configuration: dic
     connector.status = "pending"
     connector.last_error = None
     return connector
+
+
+def attach_excel(*, sheet_id: str, content: bytes, filename: str, sheet_name: str | None = None, header_row: int = 1, tenant_id: str = "default") -> dict[str, Any]:
+    sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=False)
+    except Exception as exc:
+        raise SystemSpreadsheetError("Arquivo Excel inválido.") from exc
+    selected = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook[workbook.sheetnames[0]]
+    rows = list(selected.iter_rows(values_only=True))
+    if header_row < 1 or header_row > len(rows):
+        raise SystemSpreadsheetError("Linha de cabeçalho inválida.")
+    headers = [str(value or "").strip() for value in rows[header_row - 1]]
+    path = project_root() / "data" / "spreadsheets" / f"{sheet_id}-{re.sub(r'[^A-Za-z0-9_.-]', '_', filename)}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    with SessionLocal.begin() as db:
+        canonical = _sheet(db, sheet_id)
+        _upsert_fields(db, canonical, headers)
+        _upsert_connector(db, sheet_id, "excel", {"filename": filename, "workbook_path": str(path), "sheet_name": selected.title, "header_row": header_row})
+        _upsert_rows(db, sheet_id, headers, [list(row) for row in rows[header_row:]])
+    return get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
 
 
 def _upsert_fields(db, sheet: DataSource, headers: list[str]) -> list[DataSourceField]:
@@ -213,13 +267,40 @@ def import_excel(*, name: str, content: bytes, filename: str, sheet_name: str | 
 
 def export_excel(sheet_id: str, *, tenant_id: str = "default") -> bytes:
     sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Clientes"
     fields = sheet["fields"]
-    ws.append([field["display_name"] for field in fields])
     with SessionLocal() as db:
         clients = list(db.scalars(select(Client).where(Client.system_spreadsheet_id == sheet_id).order_by(Client.name)))
+        connector = db.scalar(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id, SpreadsheetConnector.connector_type == "excel"))
+        config = dict(connector.configuration or {}) if connector else {}
+    workbook_path = Path(str(config.get("workbook_path") or ""))
+    if workbook_path.is_file():
+        wb = load_workbook(workbook_path, data_only=False)
+        ws = wb[str(config.get("sheet_name") or wb.sheetnames[0])]
+        header_row = int(config.get("header_row") or 1)
+        headers = {str(ws.cell(header_row, column).value or "").strip(): column for column in range(1, ws.max_column + 1)}
+        positions = {field["internal_key"]: headers.get(field["display_name"]) for field in fields}
+        identity = {key: positions.get(key) for key in ("grupo", "cota", "versao")}
+        existing: dict[str, int] = {}
+        for row_number in range(header_row + 1, ws.max_row + 1):
+            key = "|".join(str(ws.cell(row_number, identity[key]).value or "") if identity[key] else "" for key in ("grupo", "cota", "versao"))
+            if key.strip("|"):
+                existing[key] = row_number
+        next_row = ws.max_row + 1
+        for client in clients:
+            values = client.variables or {}
+            key = "|".join(str(values.get(item, "")) for item in ("grupo", "cota", "versao"))
+            row_number = existing.get(key, next_row)
+            if row_number == next_row:
+                next_row += 1
+            for field in fields:
+                column = positions.get(field["internal_key"])
+                if column:
+                    ws.cell(row_number, column).value = values.get(field["internal_key"], "")
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Clientes"
+        ws.append([field["display_name"] for field in fields])
         for client in clients:
             values = client.variables or {}
             ws.append([values.get(field["internal_key"], "") for field in fields])
@@ -322,6 +403,22 @@ def import_google(*, name: str, url_or_id: str, tab: str, tenant_id: str = "defa
     return get_system_spreadsheet(result["id"], tenant_id=tenant_id)
 
 
+def attach_google(*, sheet_id: str, url_or_id: str, tab: str, tenant_id: str = "default") -> dict[str, Any]:
+    get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+    spreadsheet_id = google_sheet_id(url_or_id)
+    if not spreadsheet_id or not tab:
+        raise SystemSpreadsheetError("Informe a planilha e a aba Google.")
+    values = _google_request("GET", f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{quote(tab, safe='')}", readonly=True).get("values", [])
+    if not values:
+        raise SystemSpreadsheetError("A aba Google não possui dados.")
+    headers = [str(value or "").strip() for value in values[0]]
+    with SessionLocal.begin() as db:
+        _upsert_fields(db, _sheet(db, sheet_id), headers)
+        _upsert_connector(db, sheet_id, "google_sheets", {"spreadsheet_id": spreadsheet_id, "tab": tab})
+        _upsert_rows(db, sheet_id, headers, values[1:])
+    return get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+
+
 def sync_google(sheet_id: str, *, direction: str = "inbound", tenant_id: str = "default") -> dict[str, Any]:
     sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
     connector_data: dict[str, Any] | None = None
@@ -363,3 +460,65 @@ def sync_google(sheet_id: str, *, direction: str = "inbound", tenant_id: str = "
         if connector:
             connector.status, connector.last_error, connector.last_synced_at = "synchronized", None, datetime.now(UTC)
     return get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+
+
+def apply_action_outputs_to_system_spreadsheet(*, run_id: str, action_id: str, client_id: str | None, variables: dict[str, Any], result_payload: dict[str, Any], outputs: list[dict[str, Any]]) -> dict[str, Any]:
+    if result_payload.get("_system_sheet_outputs_applied"):
+        return {"applied": list(result_payload.get("system_sheet_outputs") or []), "synchronized_sheets": []}
+    extracted = result_payload.get("dados_extraidos") if isinstance(result_payload.get("dados_extraidos"), dict) else {}
+    applied: list[dict[str, Any]] = []
+    sheet_ids: set[str] = set()
+    with SessionLocal.begin() as db:
+        client = db.get(Client, client_id) if client_id else None
+        if client is None:
+            grupo, cota, versao = (str(variables.get(key) or "") for key in ("grupo", "cota", "versao"))
+            if grupo and cota:
+                client = db.scalar(select(Client).where(Client.grupo == grupo, Client.cota == cota, Client.versao == versao).limit(1))
+        for output in outputs:
+            if not isinstance(output, dict):
+                continue
+            destination = output.get("destination") if isinstance(output.get("destination"), dict) else {}
+            if destination.get("type") not in {"system_sheet_field", "data_source_field"}:
+                continue
+            field_id = str(destination.get("field_id") or "").strip()
+            sheet_id = str(destination.get("system_spreadsheet_id") or destination.get("data_source_id") or "").strip()
+            if not field_id or not sheet_id:
+                raise SystemSpreadsheetError("Destino de output sem Planilha do Sistema ou field_id.")
+            sheet = _sheet(db, sheet_id)
+            field = db.get(DataSourceField, field_id)
+            if field is None or field.data_source_id != sheet.id or not field.active:
+                raise SystemSpreadsheetError("Output referencia um campo inexistente na Planilha do Sistema.")
+            if client is None or client.system_spreadsheet_id != sheet.id:
+                raise SystemSpreadsheetError("Cliente não pertence à Planilha do Sistema do output.")
+            keys = {str(output.get("output_id") or ""), str(output.get("key") or ""), str(output.get("label") or ""), str(output.get("target_name") or "")}
+            value = next((extracted[key] for key in extracted if str(key) in keys), None)
+            if value is None and len(extracted) == 1:
+                value = next(iter(extracted.values()))
+            if value is None:
+                continue
+            variables_copy = dict(client.variables or {})
+            internal_key = field.semantic_role or _key(field.display_name)
+            variables_copy[internal_key] = str(value)
+            client.variables = variables_copy
+            if internal_key == "grupo": client.grupo = str(value)
+            if internal_key == "cota": client.cota = str(value)
+            if internal_key == "versao": client.versao = str(value)
+            client.system_spreadsheet_id = sheet.id
+            sheet_ids.add(sheet.id)
+            applied.append({"output_id": output.get("output_id"), "field_id": field.id, "value": str(value), "system_spreadsheet_id": sheet.id})
+        run = db.get(Run, run_id)
+        if run is not None:
+            diagnostics = dict(run.diagnostics or {})
+            diagnostics["system_sheet_outputs"] = applied
+            run.diagnostics = diagnostics
+        result_payload["system_sheet_outputs"] = applied
+        result_payload["_system_sheet_outputs_applied"] = True
+    for sheet_id in sheet_ids:
+        with SessionLocal() as db:
+            connector = db.scalar(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id, SpreadsheetConnector.connector_type == "google_sheets"))
+        if connector is not None:
+            try:
+                sync_google(sheet_id, direction="outbound")
+            except SystemSpreadsheetError:
+                pass
+    return {"applied": applied, "synchronized_sheets": sorted(sheet_ids)}

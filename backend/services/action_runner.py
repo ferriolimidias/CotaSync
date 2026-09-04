@@ -656,6 +656,17 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             )
             run.finished_at = utc_now_iso()
             update_run(run)
+            if run.status == "success" and isinstance(run.result_payload, dict):
+                from backend.services.system_spreadsheets import apply_action_outputs_to_system_spreadsheet
+
+                apply_action_outputs_to_system_spreadsheet(
+                    run_id=run.id,
+                    action_id=action.id,
+                    client_id=None,
+                    variables=request.variables,
+                    result_payload=run.result_payload,
+                    outputs=[dict(item) for item in (action.outputs or []) if isinstance(item, dict)],
+                )
         except Exception as persistence_error:
             logger.exception("Run %s falhou no fechamento/persistencia", run.id)
             run.status = "error"
