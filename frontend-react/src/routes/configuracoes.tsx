@@ -2,7 +2,7 @@ import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tansta
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Check, ExternalLink, KeyRound, Save, ShieldCheck, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, FileKey2, KeyRound, Save, ShieldCheck, Trash2 } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -21,6 +21,10 @@ import {
   removeLearningAIKey,
   saveLearningAISettings,
   testLearningAI,
+  getGoogleSheetsSettings,
+  saveGoogleSheetsCredential,
+  removeGoogleSheetsCredential,
+  testGoogleSheetsCredential,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
 import { externalSessionStatusLabel, loginModeLabel } from "@/lib/status-labels";
@@ -43,6 +47,7 @@ function ConfigPage() {
     expected_system_host: "",
   });
   const [aiForm, setAiForm] = useState({ enabled: false, provider: "openai_compatible", model: "gpt-4o-mini", base_url: "", api_key: "" });
+  const [googleCredential, setGoogleCredential] = useState<File | null>(null);
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
@@ -55,6 +60,7 @@ function ConfigPage() {
     retry: 1,
   });
   const aiSettings = useQuery({ queryKey: ["learning-ai-settings"], queryFn: getLearningAISettings, retry: 1, enabled: user?.role === "admin" });
+  const googleSettings = useQuery({ queryKey: ["google-sheets-settings"], queryFn: getGoogleSheetsSettings, retry: 1, enabled: user?.role === "admin" });
   const saveAI = useMutation({
     mutationFn: saveLearningAISettings,
     onSuccess: (saved) => { setAiForm((current) => ({ ...current, ...saved, api_key: "" })); toast.success("Configuração da IA salva."); void queryClient.invalidateQueries({ queryKey: ["learning-ai-settings"] }); },
@@ -66,6 +72,17 @@ function ConfigPage() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível remover a chave."),
   });
   const testAI = useMutation({ mutationFn: testLearningAI, onSuccess: () => toast.success("Conexão funcionando"), onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível testar a IA.") });
+  const saveGoogle = useMutation({
+    mutationFn: async () => {
+      if (!googleCredential) throw new Error("Selecione um arquivo JSON.");
+      if (!googleCredential.name.toLowerCase().endsWith(".json")) throw new Error("Selecione um arquivo .json.");
+      return saveGoogleSheetsCredential(await googleCredential.text());
+    },
+    onSuccess: (saved) => { setGoogleCredential(null); toast.success("Credencial Google configurada."); void queryClient.invalidateQueries({ queryKey: ["google-sheets-settings"] }); void saved; },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível configurar o Google Sheets."),
+  });
+  const removeGoogle = useMutation({ mutationFn: removeGoogleSheetsCredential, onSuccess: () => { toast.success("Credencial Google removida."); void queryClient.invalidateQueries({ queryKey: ["google-sheets-settings"] }); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível remover a credencial Google.") });
+  const testGoogle = useMutation({ mutationFn: testGoogleSheetsCredential, onSuccess: () => { toast.success("Credencial Google válida."); void queryClient.invalidateQueries({ queryKey: ["google-sheets-settings"] }); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Falha ao autenticar com Google.") });
   const saveConfig = useMutation({
     mutationFn: saveExternalSystemConfig,
     onSuccess: (saved) => {
@@ -169,6 +186,35 @@ function ConfigPage() {
               <div className="grid gap-2"><Label htmlFor="learning-ai-key">API Key</Label><div className="flex gap-2"><Input id="learning-ai-key" type="password" autoComplete="new-password" placeholder={aiSettings.data?.api_key_configured ? "Chave configurada; digite para substituir" : "Cole a chave da API"} value={aiForm.api_key} onChange={(event) => setAiForm((current) => ({ ...current, api_key: event.target.value }))} /><Button type="button" variant="outline" title="Remover chave" aria-label="Remover chave" disabled={!aiSettings.data?.api_key_configured || removeAIKey.isPending} onClick={() => removeAIKey.mutate()}><Trash2 className="h-4 w-4" /></Button></div>{aiSettings.data?.api_key_configured && <p className="flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3 w-3" /> Chave configurada ({aiSettings.data.api_key_source === "stored" ? "painel" : "ambiente"})</p>}</div>
               <div className="grid gap-2"><Label htmlFor="learning-ai-base-url">Base URL <span className="font-normal text-muted-foreground">(opcional)</span></Label><Input id="learning-ai-base-url" type="url" placeholder="https://api.openai.com/v1" value={aiForm.base_url} onChange={(event) => setAiForm((current) => ({ ...current, base_url: event.target.value }))} /></div>
               <div className="flex flex-col gap-2 sm:flex-row"><Button type="button" variant="outline" onClick={() => testAI.mutate()} disabled={testAI.isPending || !aiSettings.data?.api_key_configured}><KeyRound className="h-4 w-4" /> Testar IA</Button><Button type="button" onClick={() => saveAI.mutate({ enabled: aiForm.enabled, provider: aiForm.provider, model: aiForm.model, base_url: aiForm.base_url, ...(aiForm.api_key.trim() ? { api_key: aiForm.api_key } : {}) })} disabled={saveAI.isPending}><Save className="h-4 w-4" /> Salvar configurações</Button></div>
+            </CardContent>
+          </Card>
+        )}
+
+        {user?.role === "admin" && (
+          <Card className="xl:col-start-2 xl:row-start-3">
+            <CardHeader className="pb-3"><CardTitle className="text-base">Google Sheets</CardTitle></CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-xs text-muted-foreground">Conecte o CotaSync às planilhas compartilhadas com a conta de serviço. A chave fica criptografada somente no backend.</p>
+              <StatusRow label="Status">
+                <BadgeStatus tone={googleSettings.data?.configured ? "success" : "warning"}>{googleSettings.data?.configured ? "Configurado" : "Não configurado"}</BadgeStatus>
+              </StatusRow>
+              {googleSettings.data?.configured && <>
+                <StatusRow label="Conta de serviço"><span className="break-all text-sm text-foreground">{googleSettings.data.client_email}</span></StatusRow>
+                <StatusRow label="Projeto"><span className="text-sm text-foreground">{googleSettings.data.project_id || "-"}</span></StatusRow>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => googleSettings.data?.client_email && navigator.clipboard.writeText(googleSettings.data.client_email).then(() => toast.success("E-mail copiado."))}><Copy className="h-4 w-4" /> Copiar e-mail</Button>
+                  <Button type="button" variant="outline" size="sm" onClick={() => testGoogle.mutate()} disabled={testGoogle.isPending}><ShieldCheck className="h-4 w-4" /> Testar conexão</Button>
+                </div>
+              </>}
+              <div className="grid gap-2">
+                <Label htmlFor="google-service-account-json">{googleSettings.data?.configured ? "Substituir credencial" : "Selecionar arquivo JSON"}</Label>
+                <Input id="google-service-account-json" type="file" accept="application/json,.json" onChange={(event) => setGoogleCredential(event.target.files?.[0] || null)} />
+                <p className="text-xs text-muted-foreground">Compartilhe depois a planilha como Editor com o e-mail exibido acima.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" onClick={() => saveGoogle.mutate()} disabled={!googleCredential || saveGoogle.isPending}><FileKey2 className="h-4 w-4" /> {googleSettings.data?.configured ? "Substituir credencial" : "Configurar Google Sheets"}</Button>
+                {googleSettings.data?.configured && <Button type="button" variant="outline" onClick={() => { if (window.confirm("Remover a credencial Google? As planilhas e clientes não serão apagados.")) removeGoogle.mutate(); }} disabled={removeGoogle.isPending}><Trash2 className="h-4 w-4" /> Remover credencial</Button>}
+              </div>
             </CardContent>
           </Card>
         )}
@@ -288,7 +334,7 @@ function ConfigPage() {
           </CardContent>
         </Card>
 
-        <Card className="xl:col-start-2 xl:row-start-3">
+        <Card className="xl:col-start-2 xl:row-start-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Configurações operacionais</CardTitle>
           </CardHeader>

@@ -104,6 +104,15 @@ class AISettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class GoogleSettings(Base):
+    __tablename__ = "google_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True, default="default")
+    credentials_encrypted: Mapped[str | None] = mapped_column(Text)
+    configured_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connection_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_configured")
+
+
 class ClientList(Base):
     __tablename__ = "client_lists"
     id: Mapped[str] = mapped_column(String(128), primary_key=True)

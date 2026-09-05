@@ -334,19 +334,9 @@ def export_excel(sheet_id: str, *, tenant_id: str = "default") -> bytes:
 
 
 def connector_service_account_email() -> str | None:
-    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    if raw:
-        try:
-            return str(json.loads(raw).get("client_email") or "") or None
-        except json.JSONDecodeError:
-            return None
-    path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
-    if path:
-        try:
-            return str(json.loads(Path(path).read_text()).get("client_email") or "") or None
-        except (OSError, json.JSONDecodeError):
-            return None
-    return None
+    from backend.services.google_settings import effective_credentials
+    credentials, _source = effective_credentials()
+    return str(credentials.get("client_email") or "") or None
 
 
 def google_sheet_id(value: str) -> str:
@@ -356,12 +346,10 @@ def google_sheet_id(value: str) -> str:
 
 
 def _service_account() -> dict[str, Any]:
-    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    path = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
-    if raw:
-        return json.loads(raw)
-    if path:
-        return json.loads(Path(path).read_text())
+    from backend.services.google_settings import effective_credentials
+    credentials, _source = effective_credentials()
+    if credentials:
+        return credentials
     raise SystemSpreadsheetError("Service Account Google não configurada no servidor.")
 
 
@@ -384,6 +372,17 @@ def _google_token(*, readonly: bool) -> str:
     return str(response.json().get("access_token") or "")
 
 
+def test_service_account_auth() -> None:
+    """Obtain a short-lived token without persisting it or touching a sheet."""
+    try:
+        if not _google_token(readonly=True):
+            raise SystemSpreadsheetError("O Google não retornou um token de acesso.")
+    except SystemSpreadsheetError:
+        raise
+    except Exception as exc:
+        raise SystemSpreadsheetError("Não foi possível autenticar com o Google.") from exc
+
+
 def _google_request(method: str, url: str, *, readonly: bool, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     import requests
     try:
@@ -403,7 +402,7 @@ def test_google_connection(url_or_id: str) -> dict[str, Any]:
         metadata = _google_request("GET", f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}", readonly=True)
     except Exception as exc:
         raise SystemSpreadsheetError("Não foi possível acessar a planilha Google compartilhada.") from exc
-    return {"spreadsheet_id": sheet_id, "name": metadata.get("properties", {}).get("title", ""), "tabs": [item.get("properties", {}).get("title", "") for item in metadata.get("sheets", [])], "service_account_email": connector_service_account_email()}
+    return {"spreadsheet_id": sheet_id, "name": metadata.get("properties", {}).get("title", ""), "tabs": [item.get("properties", {}).get("title", "") for item in metadata.get("sheets", [])]}
 
 
 def import_google(*, name: str, url_or_id: str, tab: str, list_id: str | None = None, tenant_id: str = "default") -> dict[str, Any]:

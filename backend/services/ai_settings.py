@@ -1,8 +1,6 @@
 """Persistent, backend-only settings for the learning AI provider."""
 from __future__ import annotations
 
-import base64
-import hashlib
 import os
 from dataclasses import dataclass
 
@@ -10,6 +8,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 
 from backend.db import AISettings, SessionLocal
+from backend.services.secret_storage import get_settings_fernet
 
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -25,11 +24,7 @@ def _env_value(*names: str) -> str:
 
 
 def _fernet() -> Fernet:
-    master = _env_value("COTASYNC_AI_SETTINGS_SECRET", "COTASYNC_SESSION_SECRET")
-    if not master:
-        raise RuntimeError("COTASYNC_AI_SETTINGS_SECRET is required to use stored AI secrets.")
-    key = base64.urlsafe_b64encode(hashlib.sha256(master.encode("utf-8")).digest())
-    return Fernet(key)
+    return get_settings_fernet()
 
 
 @dataclass(frozen=True)

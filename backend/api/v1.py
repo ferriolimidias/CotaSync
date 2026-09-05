@@ -55,7 +55,6 @@ from backend.services.ai_settings import public_settings, remove_key, save_setti
 from backend.services.learning_trace import build_raw_learning_trace
 from backend.services.system_spreadsheets import (
     SystemSpreadsheetError,
-    connector_service_account_email,
     attach_excel,
     attach_google,
     export_excel,
@@ -67,11 +66,13 @@ from backend.services.system_spreadsheets import (
     reconcile_schema,
     sync_google,
     test_google_connection,
+    test_service_account_auth,
     update_system_spreadsheet_row,
 )
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.services.client_lists import ClientListError, create_client_list, list_client_lists
 from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
+from backend.services.google_settings import public_settings as public_google_settings, remove_credentials as remove_google_credentials, save_credentials as save_google_credentials
 from backend.worker import latest_worker_status
 from playwright.async_api import async_playwright
 
@@ -101,6 +102,10 @@ class BatchCreatePayload(BaseModel):
     client_ids: list[str] = Field(default_factory=list)
     requested_by: str = "api-v1"
     delay_between_rows_seconds: float = 3
+
+
+class GoogleCredentialPayload(BaseModel):
+    credential_json: str
 
 
 class ActionRunPayload(BaseModel):
@@ -777,8 +782,39 @@ async def system_spreadsheet_attach_google(spreadsheet_id: str, payload: GoogleS
 
 
 @router.get("/system-spreadsheets/google/config", summary="Status da conta de serviço Google")
-async def system_spreadsheet_google_config(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
-    return {"status": "ok", "configured": bool(connector_service_account_email()), "service_account_email": connector_service_account_email()}
+async def system_spreadsheet_google_config(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    return {"status": "ok", "google_sheets": public_google_settings()}
+
+
+@router.get("/settings/google-sheets", summary="Status seguro da credencial Google")
+async def google_settings_get(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    return {"status": "ok", "google_sheets": public_google_settings()}
+
+
+@router.put("/settings/google-sheets", summary="Salva credencial Google criptografada")
+async def google_settings_save(payload: GoogleCredentialPayload, _admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        result = save_google_credentials(payload.credential_json)
+    except (ValueError, RuntimeError) as exc:
+        raise _error(422, "GOOGLE_CREDENTIAL_INVALID", str(exc)) from exc
+    return {"status": "ok", "google_sheets": result}
+
+
+@router.delete("/settings/google-sheets", summary="Remove credencial Google")
+async def google_settings_delete(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    return {"status": "ok", "google_sheets": remove_google_credentials()}
+
+
+@router.post("/settings/google-sheets/test", summary="Testa autenticação Google")
+async def google_settings_test(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        test_service_account_auth()
+    except SystemSpreadsheetError as exc:
+        message = str(exc)
+        if "API" in message or "habilitada" in message:
+            message = "Google Sheets API não está habilitada neste projeto."
+        raise _error(422, "GOOGLE_CREDENTIAL_TEST_FAILED", message) from exc
+    return {"status": "ok", "message": "Credencial Google válida."}
 
 
 @router.post("/system-spreadsheets/{spreadsheet_id}/sync/google", summary="Sincroniza uma planilha Google sem repetir ações")

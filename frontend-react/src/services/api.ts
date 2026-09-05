@@ -19,6 +19,7 @@ import type {
   WorkerStatus,
   DataSource,
   LearningAISettings,
+  GoogleSheetsSettings,
 } from "@/types/api";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
@@ -257,6 +258,28 @@ export async function removeLearningAIKey() {
 
 export async function testLearningAI() {
   return apiFetch<{ status: string; message: string }>("/api/v1/settings/learning-ai/test", { method: "POST" });
+}
+
+export async function getGoogleSheetsSettings() {
+  const payload = await apiFetch<{ google_sheets: GoogleSheetsSettings }>("/api/v1/settings/google-sheets");
+  return payload.google_sheets;
+}
+
+export async function saveGoogleSheetsCredential(credentialJson: string) {
+  const payload = await apiFetch<{ google_sheets: GoogleSheetsSettings }>("/api/v1/settings/google-sheets", {
+    method: "PUT",
+    body: JSON.stringify({ credential_json: credentialJson }),
+  });
+  return payload.google_sheets;
+}
+
+export async function removeGoogleSheetsCredential() {
+  const payload = await apiFetch<{ google_sheets: GoogleSheetsSettings }>("/api/v1/settings/google-sheets", { method: "DELETE" });
+  return payload.google_sheets;
+}
+
+export async function testGoogleSheetsCredential() {
+  return apiFetch<{ status: string; message: string }>("/api/v1/settings/google-sheets/test", { method: "POST" });
 }
 
 export async function createClient(input: {

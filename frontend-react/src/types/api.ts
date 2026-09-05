@@ -248,6 +248,15 @@ export type LearningAISettings = {
   api_key_source: "stored" | "environment" | "none" | string;
 };
 
+export type GoogleSheetsSettings = {
+  configured: boolean;
+  client_email?: string | null;
+  project_id?: string | null;
+  configured_at?: string | null;
+  connection_status: string;
+  source: "stored" | "environment" | "none" | string;
+};
+
 export type LearningSession = {
   id?: string;
   session_id?: string;
