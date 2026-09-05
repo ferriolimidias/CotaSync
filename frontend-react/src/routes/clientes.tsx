@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Download, FileSpreadsheet, Pencil, Plus, PowerOff, Search, Upload, RefreshCw, Table2, Trash2 } from "lucide-react";
 
@@ -51,6 +51,8 @@ import {
   deleteClients,
   deleteClientList,
   deleteSystemSpreadsheet,
+  renameClientList,
+  updateSystemSpreadsheetMapping,
 } from "@/services/api";
 import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, SystemSpreadsheet } from "@/types/api";
 
@@ -109,8 +111,9 @@ function ClientesPage() {
   const [spreadsheetListId, setSpreadsheetListId] = useState("");
   const [newListName, setNewListName] = useState("");
   const [openSheetId, setOpenSheetId] = useState<string | null>(null);
+  const [mappingSheetId, setMappingSheetId] = useState<string | null>(null);
   const openSheet = useQuery({ queryKey: ["system-spreadsheet-rows", openSheetId], queryFn: () => getSystemSpreadsheetRows(openSheetId as string), enabled: Boolean(openSheetId) });
-  const updateSheetRow = useMutation({ mutationFn: ({ clientId, values }: { clientId: string; values: Record<string, string> }) => updateSystemSpreadsheetRow(openSheetId as string, clientId, values), onSuccess: () => { void openSheet.refetch(); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Valor salvo na Planilha do Sistema."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar o valor.") });
+  const updateSheetRow = useMutation({ mutationFn: ({ clientId, values }: { clientId: string; values: Record<string, string> }) => updateSystemSpreadsheetRow(openSheetId as string, clientId, values), onSuccess: (result) => { void openSheet.refetch(); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success(result.sync_status === "synchronized" ? "Valor salvo e sincronizado no Google Sheets." : "Valor salvo no CotaSync; sincronização Google pendente."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar o valor.") });
   const syncSheet = useMutation({ mutationFn: (id: string) => syncSystemSpreadsheetGoogle(id), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); toast.success("Sincronização solicitada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível sincronizar.") });
   const createSpreadsheet = useMutation({
     mutationFn: () => createSystemSpreadsheet({ name: spreadsheetName, headers: spreadsheetHeaders.split(",").map((value) => value.trim()).filter(Boolean), list_id: spreadsheetListId || undefined }),
@@ -125,6 +128,8 @@ function ClientesPage() {
   const removeSelected = useMutation({ mutationFn: () => deleteClients(selectedClientIds), onSuccess: () => { setSelectedClientIds([]); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Clientes excluídos."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir os clientes.") });
   const removeList = useMutation({ mutationFn: ({ id, deleteClientsToo }: { id: string; deleteClientsToo: boolean }) => deleteClientList(id, deleteClientsToo), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Lista excluída."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir a lista. Verifique as dependências.") });
   const removeSpreadsheet = useMutation({ mutationFn: ({ id, deleteClientsToo }: { id: string; deleteClientsToo: boolean }) => deleteSystemSpreadsheet(id, deleteClientsToo), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Planilha do Sistema excluída."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir a planilha. Verifique as dependências.") });
+  const renameList = useMutation({ mutationFn: ({ id, name }: { id: string; name: string }) => renameClientList(id, name), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Lista renomeada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível renomear a lista.") });
+  const saveMapping = useMutation({ mutationFn: ({ id, input }: { id: string; input: { identity_mapping: Record<string, string | null>; version_default?: string | null; name_field_id?: string | null } }) => updateSystemSpreadsheetMapping(id, input), onSuccess: () => { setMappingSheetId(null); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); if (openSheetId) void openSheet.refetch(); toast.success("Mapeamento da planilha atualizado."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar o mapeamento.") });
 
   const filtered = useMemo(() => {
     return (clients.data?.items ?? []).filter((client) => {
@@ -302,6 +307,7 @@ function ClientesPage() {
           </div>
         </CardContent>
       </Card>
+      <p className="mb-3 text-xs text-muted-foreground">Exibindo {filtered.length} de {clients.data?.total ?? 0} clientes nesta página. Os totais das listas e planilhas consideram todos os registros.</p>
       <Card className="mb-4">
         <CardContent className="space-y-3 p-4">
           <div>
@@ -310,7 +316,7 @@ function ClientesPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" onClick={() => setSpreadsheetDialogOpen(true)}><Plus className="h-4 w-4" /> Nova planilha</Button>
-            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => connector.type === "google_sheets" ? "Google Sheets" : "Excel").join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={() => setOpenSheetId(sheet.id)}><Table2 className="h-4 w-4" /> Abrir</Button><Button size="sm" variant="ghost" onClick={() => syncSheet.mutate(sheet.id)} disabled={!sheet.connectors.some((connector) => connector.type === "google_sheets")}><RefreshCw className="h-4 w-4" /> Sincronizar</Button><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}><Download className="h-4 w-4" /> Baixar Excel</Button><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a Planilha do Sistema ${sheet.name}?`)) return; const deleteClientsToo = sheet.client_count > 0 && window.confirm(`Excluir também os ${sheet.client_count} clientes associados?`); removeSpreadsheet.mutate({ id: sheet.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>)}
+            {(dataSources.data || []).map((sheet: SystemSpreadsheet) => <div key={sheet.id} className="flex flex-wrap items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" /><span>{sheet.name} · {sheet.client_count} clientes · {sheet.fields.length} campos</span><span className="text-xs text-muted-foreground">{sheet.connectors.map((connector) => `${connector.type === "google_sheets" ? "Google Sheets" : "Excel"} · ${connector.status === "synchronized" ? "Sincronizado" : connector.status === "error" ? "Erro" : connector.status === "pending" ? "Pendente" : connector.status}`).join(" + ") || "CotaSync"}</span><Button size="sm" variant="ghost" onClick={() => setOpenSheetId(sheet.id)}><Table2 className="h-4 w-4" /> Abrir</Button><Button size="sm" variant="ghost" onClick={() => syncSheet.mutate(sheet.id)} disabled={!sheet.connectors.some((connector) => connector.type === "google_sheets")}><RefreshCw className="h-4 w-4" /> Atualizar do Google</Button><Button size="sm" variant="ghost" onClick={() => setMappingSheetId(sheet.id)}><Pencil className="h-4 w-4" /> Configurar</Button><Button size="sm" variant="ghost" onClick={async () => { const blob = await exportSystemSpreadsheet(sheet.id); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = `${sheet.name}.xlsx`; link.click(); URL.revokeObjectURL(url); }}><Download className="h-4 w-4" /> Baixar Excel</Button><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a Planilha do Sistema ${sheet.name}?`)) return; const deleteClientsToo = sheet.client_count > 0 && window.confirm(`Excluir também os ${sheet.client_count} clientes associados?`); removeSpreadsheet.mutate({ id: sheet.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>)}
           </div>
         </CardContent>
       </Card>
@@ -318,7 +324,7 @@ function ClientesPage() {
       <Card className="mb-4">
         <CardContent className="space-y-3 p-4">
           <div><p className="text-sm font-medium">Listas / grupos</p><p className="text-xs text-muted-foreground">Segmentação operacional independente do nome da Planilha do Sistema.</p></div>
-          <div className="flex flex-wrap gap-2">{(clientLists.data ?? []).map((list) => { const count = (clients.data?.items ?? []).filter((client) => client.list_id === list.id).length; return <div key={list.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><span>{list.name} · {count} clientes</span><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a lista ${list.name}?`)) return; const deleteClientsToo = count > 0 && window.confirm(`Excluir também os ${count} clientes associados?`); removeList.mutate({ id: list.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>; })}</div>
+          <div className="flex flex-wrap gap-2">{(clientLists.data ?? []).map((list) => { const count = list.client_count ?? 0; return <div key={list.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><span>{list.name} · {count} clientes</span><Button size="sm" variant="ghost" onClick={() => { const name = window.prompt("Novo nome da lista", list.name)?.trim(); if (name && name !== list.name) renameList.mutate({ id: list.id, name }); }}><Pencil className="h-4 w-4" /> Renomear</Button><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a lista ${list.name}?`)) return; const deleteClientsToo = count > 0 && window.confirm(`Excluir também os ${count} clientes associados?`); removeList.mutate({ id: list.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>; })}</div>
         </CardContent>
       </Card>
 
@@ -336,6 +342,13 @@ function ClientesPage() {
         data={openSheet.data}
         saving={updateSheetRow.isPending}
         onSave={(clientId, values) => updateSheetRow.mutate({ clientId, values })}
+      />
+      <SystemSpreadsheetMappingDialog
+        open={Boolean(mappingSheetId)}
+        onOpenChange={(open) => !open && setMappingSheetId(null)}
+        sheet={dataSources.data?.find((sheet) => sheet.id === mappingSheetId)}
+        saving={saveMapping.isPending}
+        onSave={(id, input) => saveMapping.mutate({ id, input })}
       />
 
       <DataTable
@@ -532,7 +545,26 @@ function SystemSpreadsheetDialog({
 
 function SpreadsheetRow({ row, fields, saving, onSave }: { row: { client_id: string; name: string; values: Record<string, string> }; fields: SystemSpreadsheet["fields"]; saving: boolean; onSave: (clientId: string, values: Record<string, string>) => void }) {
   const [values, setValues] = useState(row.values);
-  return <tr className="border-b border-border last:border-0"><td className="whitespace-nowrap p-2 font-medium">{row.name}</td>{fields.map((field) => { const protectedField = ["grupo", "cota", "versao"].includes(field.internal_key); return <td className="min-w-32 p-2" key={field.field_id}><Input disabled={protectedField} value={values[field.internal_key] || ""} onChange={(event) => setValues({ ...values, [field.internal_key]: event.target.value })} /></td>; })}<td className="p-2"><Button size="sm" disabled={saving} onClick={() => onSave(row.client_id, Object.fromEntries(fields.filter((field) => !["grupo", "cota", "versao"].includes(field.internal_key)).map((field) => [field.internal_key, values[field.internal_key] || ""])))}>Salvar</Button></td></tr>;
+  useEffect(() => setValues(row.values), [row.values]);
+  const dirty = JSON.stringify(values) !== JSON.stringify(row.values);
+  const editableValues = Object.fromEntries(fields.filter((field) => !["grupo", "cota", "versao"].includes(field.internal_key)).map((field) => [field.internal_key, values[field.internal_key] || ""]));
+  return <tr className="border-b border-border last:border-0"><td className="whitespace-nowrap p-2 font-medium">{row.name}</td>{fields.map((field) => { const protectedField = ["grupo", "cota", "versao"].includes(field.internal_key); return <td className="min-w-32 p-2" key={field.field_id}><Input disabled={protectedField} value={values[field.internal_key] || ""} onChange={(event) => setValues({ ...values, [field.internal_key]: event.target.value })} /></td>; })}<td className="p-2"><div className="flex gap-1"><Button size="sm" disabled={saving || !dirty} onClick={() => onSave(row.client_id, editableValues)}>Salvar</Button>{dirty && <Button size="sm" variant="outline" disabled={saving} onClick={() => setValues(row.values)}>Cancelar</Button>}</div></td></tr>;
+}
+
+function SystemSpreadsheetMappingDialog({ open, onOpenChange, sheet, saving, onSave }: { open: boolean; onOpenChange: (open: boolean) => void; sheet?: SystemSpreadsheet; saving: boolean; onSave: (id: string, input: { identity_mapping: Record<string, string | null>; version_default?: string | null; name_field_id?: string | null }) => void }) {
+  const fields = sheet?.fields ?? [];
+  const semantic = (role: string) => sheet?.identity_mapping?.[role as "grupo" | "cota" | "versao"] ?? fields.find((field) => field.internal_key === role)?.field_id ?? "none";
+  const [grupo, setGrupo] = useState("none");
+  const [cota, setCota] = useState("none");
+  const [versao, setVersao] = useState("none");
+  const [nameField, setNameField] = useState("none");
+  const [versionDefault, setVersionDefault] = useState("");
+  useEffect(() => { if (!sheet) return; setGrupo(semantic("grupo")); setCota(semantic("cota")); setVersao(semantic("versao")); setNameField(sheet.name_field_id || fields.find((field) => ["consorciado", "nome", "name"].includes(field.internal_key))?.field_id || "none"); setVersionDefault(sheet.version_default || ""); }, [sheet]);
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>Configurar {sheet?.name || "Planilha do Sistema"}</DialogTitle></DialogHeader><div className="grid gap-3"><MappingSelect label="Campo Grupo" value={grupo} onChange={setGrupo} fields={fields} /><MappingSelect label="Campo Cota" value={cota} onChange={setCota} fields={fields} /><div className="grid gap-2"><Label>Versão</Label><div className="flex gap-2"><Select value={versao} onValueChange={setVersao}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="none">Usar valor padrão</SelectItem>{fields.map((field) => <SelectItem key={field.field_id} value={field.field_id}>{field.display_name}</SelectItem>)}</SelectContent></Select><Input placeholder="Valor padrão, ex. 00" value={versionDefault} onChange={(event) => setVersionDefault(event.target.value)} /></div></div><MappingSelect label="Nome do cliente" value={nameField} onChange={setNameField} fields={fields} allowNone /></div><DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancelar</Button><Button disabled={!sheet || saving} onClick={() => onSave(sheet!.id, { identity_mapping: { grupo: grupo === "none" ? null : grupo, cota: cota === "none" ? null : cota, versao: versao === "none" ? null : versao }, version_default: versionDefault || null, name_field_id: nameField === "none" ? null : nameField })}>Salvar configuração</Button></DialogFooter></DialogContent></Dialog>;
+}
+
+function MappingSelect({ label, value, onChange, fields, allowNone = false }: { label: string; value: string; onChange: (value: string) => void; fields: SystemSpreadsheet["fields"]; allowNone?: boolean }) {
+  return <div className="grid gap-2"><Label>{label}</Label><Select value={value} onValueChange={onChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{allowNone && <SelectItem value="none">Não configurado</SelectItem>}{fields.map((field) => <SelectItem key={field.field_id} value={field.field_id}>{field.display_name}</SelectItem>)}</SelectContent></Select></div>;
 }
 
 function CsvMetric({ label, value }: { label: string; value: number }) {

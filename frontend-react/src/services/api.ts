@@ -185,8 +185,13 @@ export async function getSystemSpreadsheets() {
 }
 
 export async function getClientLists() {
-  const payload = await apiFetch<{ client_lists: Array<{ id: string; name: string; active: boolean }> }>("/api/v1/client-lists");
+  const payload = await apiFetch<{ client_lists: Array<{ id: string; name: string; active: boolean; client_count?: number; active_client_count?: number; spreadsheet_count?: number }> }>("/api/v1/client-lists");
   return payload.client_lists;
+}
+
+export async function renameClientList(id: string, name: string) {
+  const payload = await apiFetch<{ client_list: { id: string; name: string } }>(`/api/v1/client-lists/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+  return payload.client_list;
 }
 
 export async function createClientList(name: string) {
@@ -209,6 +214,11 @@ export async function getSystemSpreadsheetRows(id: string) {
 
 export async function updateSystemSpreadsheetRow(id: string, clientId: string, values: Record<string, string>) {
   return apiFetch<import("@/types/api").SystemSpreadsheetRows>(`/api/v1/system-spreadsheets/${id}/rows/${clientId}`, { method: "PATCH", body: JSON.stringify({ values }) });
+}
+
+export async function updateSystemSpreadsheetMapping(id: string, input: { identity_mapping: Record<string, string | null>; version_default?: string | null; name_field_id?: string | null }) {
+  const payload = await apiFetch<{ system_spreadsheet: import("@/types/api").SystemSpreadsheet }>(`/api/v1/system-spreadsheets/${id}/mapping`, { method: "PATCH", body: JSON.stringify(input) });
+  return payload.system_spreadsheet;
 }
 
 export async function syncSystemSpreadsheetGoogle(id: string, direction: "inbound" | "outbound" = "outbound") {

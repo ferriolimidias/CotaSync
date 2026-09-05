@@ -71,6 +71,7 @@ from backend.services.system_spreadsheets import (
 )
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.services.client_lists import ClientListError, create_client_list, list_client_lists
+from backend.services.client_lists import rename_client_list
 from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
 from backend.services.google_settings import public_settings as public_google_settings, remove_credentials as remove_google_credentials, save_credentials as save_google_credentials
 from backend.worker import latest_worker_status
@@ -165,6 +166,12 @@ class ExcelSpreadsheetPayload(BaseModel):
 
 class SystemSpreadsheetRowPayload(BaseModel):
     values: dict[str, Any] = Field(default_factory=dict)
+
+
+class SystemSpreadsheetMappingPayload(BaseModel):
+    identity_mapping: dict[str, Any] = Field(default_factory=dict)
+    version_default: str | None = None
+    name_field_id: str | None = None
 
 
 class AISettingsPayload(BaseModel):
@@ -673,6 +680,14 @@ async def client_list_create(payload: dict[str, Any], _user: AuthUser = Depends(
         raise _error(422, "CLIENT_LIST_INVALID", str(exc)) from exc
 
 
+@router.patch("/client-lists/{list_id}", summary="Renomeia lista de clientes")
+async def client_list_rename(list_id: str, payload: dict[str, Any], _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"status": "ok", "client_list": rename_client_list(list_id, str(payload.get("name") or ""))}
+    except ClientListError as exc:
+        raise _error(422, "CLIENT_LIST_INVALID", str(exc)) from exc
+
+
 @router.post("/system-spreadsheets", summary="Cria uma planilha no CotaSync")
 async def system_spreadsheet_create(payload: SystemSpreadsheetCreatePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     from backend.services.system_spreadsheets import create_system_spreadsheet
@@ -714,6 +729,16 @@ async def system_spreadsheet_row_update(spreadsheet_id: str, client_id: str, pay
         return {"status": "ok", **update_system_spreadsheet_row(spreadsheet_id, client_id, payload.values)}
     except SystemSpreadsheetError as exc:
         raise _error(422, "SYSTEM_SPREADSHEET_ROW_UPDATE_FAILED", str(exc)) from exc
+
+
+@router.patch("/system-spreadsheets/{spreadsheet_id}/mapping", summary="Configura mapeamento da Planilha do Sistema")
+async def system_spreadsheet_mapping(spreadsheet_id: str, payload: SystemSpreadsheetMappingPayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    from backend.services.system_spreadsheets import update_system_spreadsheet_mapping
+    try:
+        sheet = update_system_spreadsheet_mapping(spreadsheet_id, identity_mapping=payload.identity_mapping, version_default=payload.version_default, name_field_id=payload.name_field_id)
+    except SystemSpreadsheetError as exc:
+        raise _error(422, "SYSTEM_SPREADSHEET_MAPPING_INVALID", str(exc)) from exc
+    return {"status": "ok", "system_spreadsheet": sheet}
 
 
 @router.post("/system-spreadsheets/{spreadsheet_id}/schema", summary="Reconcilia campos da planilha do sistema")

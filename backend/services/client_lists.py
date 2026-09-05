@@ -4,9 +4,9 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from backend.db import ClientList, SessionLocal
+from backend.db import Client, ClientList, SessionLocal
 
 
 class ClientListError(ValueError):
@@ -16,7 +16,16 @@ class ClientListError(ValueError):
 def list_client_lists(*, tenant_id: str = "default") -> list[dict[str, Any]]:
     with SessionLocal() as db:
         rows = list(db.scalars(select(ClientList).where(ClientList.tenant_id == tenant_id, ClientList.active.is_(True)).order_by(ClientList.name)))
-        return [{"id": row.id, "name": row.name, "active": row.active, "tenant_id": row.tenant_id} for row in rows]
+        from backend.db import Client, DataSource
+        return [{
+            "id": row.id,
+            "name": row.name,
+            "active": row.active,
+            "tenant_id": row.tenant_id,
+            "client_count": db.scalar(select(func.count()).select_from(Client).where(Client.list_id == row.id)) or 0,
+            "active_client_count": db.scalar(select(func.count()).select_from(Client).where(Client.list_id == row.id, Client.active.is_(True))) or 0,
+            "spreadsheet_count": sum(1 for sheet in db.scalars(select(DataSource).where(DataSource.source_type == "system_spreadsheet")) if (sheet.configuration or {}).get("default_list_id") == row.id),
+        } for row in rows]
 
 
 def create_client_list(name: str, *, tenant_id: str = "default") -> dict[str, Any]:
@@ -50,4 +59,7 @@ def rename_client_list(list_id: str, name: str, *, tenant_id: str = "default") -
         if row is None:
             raise ClientListError("Lista de clientes não encontrada.")
         row.name = clean
+        # Keep the denormalized display label aligned; list_id remains the identity.
+        for client in db.scalars(select(Client).where(Client.list_id == row.id)):
+            client.client_group = clean
         return {"id": row.id, "name": row.name, "active": row.active, "tenant_id": row.tenant_id}

@@ -16,10 +16,51 @@ from backend.services.system_spreadsheets import (
     import_google,
     reconcile_schema,
     sync_google,
+    update_system_spreadsheet_mapping,
+    update_system_spreadsheet_row,
 )
 
 
 class SystemSpreadsheetTests(unittest.TestCase):
+    @patch("backend.services.system_spreadsheets.sync_google")
+    def test_mapping_reconciles_google_shape_without_version_and_uses_consorciado_name(self, sync) -> None:
+        from backend.db import Client, SessionLocal
+        from sqlalchemy import select
+        sheet = create_system_spreadsheet("Mapeamento Google", ["Grupo", "Cota", "Consorciado", "Crédito"])
+        fields = {field["display_name"]: field["field_id"] for field in sheet["fields"]}
+        from backend.services.system_spreadsheets import _upsert_rows
+        with SessionLocal.begin() as db:
+            from backend.services.system_spreadsheets import _sheet
+            _upsert_rows(db, sheet["id"], ["Grupo", "Cota", "Consorciado", "Crédito"], [["935", "112", "Maria da Silva", "123"]])
+        update_system_spreadsheet_mapping(sheet["id"], identity_mapping={"grupo": fields["Grupo"], "cota": fields["Cota"], "versao": None}, version_default="00", name_field_id=fields["Consorciado"])
+        with SessionLocal() as db:
+            client = db.scalar(select(Client).where(Client.system_spreadsheet_id == sheet["id"]))
+            self.assertEqual(client.name, "Maria da Silva")
+            self.assertEqual(client.versao, "00")
+            self.assertEqual(client.variables["versao"], "00")
+
+    @patch("backend.services.system_spreadsheets.sync_google")
+    def test_manual_row_save_keeps_internal_value_when_google_fails(self, sync) -> None:
+        from backend.db import Client, SessionLocal
+        from sqlalchemy import select
+        from backend.services.system_spreadsheets import SystemSpreadsheetError
+        sheet = create_system_spreadsheet("Edição manual", ["Grupo", "Cota", "Resultado"])
+        from backend.services.system_spreadsheets import _upsert_rows
+        with SessionLocal.begin() as db:
+            _upsert_rows(db, sheet["id"], ["Grupo", "Cota", "Resultado"], [["935", "112", "10"]])
+        from backend.db import SpreadsheetConnector
+        with SessionLocal.begin() as db:
+            db.add(SpreadsheetConnector(id=str(uuid4()), spreadsheet_id=sheet["id"], connector_type="google_sheets", configuration={"spreadsheet_id": "test", "tab": "Clientes"}, status="synchronized"))
+        sync.side_effect = SystemSpreadsheetError("Google indisponível")
+        with SessionLocal() as db:
+            client = db.scalar(select(Client).where(Client.system_spreadsheet_id == sheet["id"]))
+        result = update_system_spreadsheet_row(sheet["id"], client.id, {"resultado": "20"})
+        self.assertEqual(result["sync_status"], "pending")
+        with SessionLocal() as db:
+            client = db.scalar(select(Client).where(Client.id == client.id))
+            self.assertEqual(client.variables["resultado"], "20")
+        sync.side_effect = None
+
     def test_system_spreadsheet_import_assigns_stable_client_list(self) -> None:
         from backend.db import Client, ClientList, SessionLocal
         from backend.services.client_lists import create_client_list

@@ -32,6 +32,9 @@ export type SystemSpreadsheet = {
   system_spreadsheet_id: string;
   name: string;
   default_list_id?: string | null;
+  identity_mapping?: { grupo?: string | null; cota?: string | null; versao?: string | null };
+  name_field_id?: string | null;
+  version_default?: string | null;
   active: boolean;
   client_count: number;
   last_sync?: string | null;
@@ -42,6 +45,7 @@ export type SystemSpreadsheet = {
 export type SystemSpreadsheetRows = {
   system_spreadsheet: SystemSpreadsheet;
   rows: Array<{ client_id: string; name: string; active: boolean; values: Record<string, string> }>;
+  sync_status?: string;
 };
 
 export type ClientsCsvPreviewRow = {

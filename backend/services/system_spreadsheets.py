@@ -60,6 +60,8 @@ def _dump_sheet(sheet: DataSource, fields: list[DataSourceField], connectors: li
         "name": sheet.name,
         "active": sheet.status == "active",
         "identity_mapping": (sheet.configuration or {}).get("identity_mapping", {"grupo": None, "cota": None, "versao": None}),
+        "name_field_id": configuration.get("name_field_id"),
+        "version_default": configuration.get("version_default"),
         "default_list_id": configuration.get("default_list_id"),
         "fields": [_dump_field(field) for field in fields if field.active],
         "client_count": client_count,
@@ -147,6 +149,47 @@ def get_system_spreadsheet_rows(sheet_id: str, *, tenant_id: str = "default") ->
     return {"system_spreadsheet": sheet, "rows": rows}
 
 
+def _mapping_key(fields: list[DataSourceField], value: Any, fallback: str) -> str:
+    wanted = str(value or "").strip()
+    if not wanted:
+        return fallback
+    for field in fields:
+        if wanted in {field.id, field.semantic_role or "", _key(field.display_name), field.display_name}:
+            return field.semantic_role or _key(field.display_name)
+    return fallback
+
+
+def update_system_spreadsheet_mapping(
+    sheet_id: str,
+    *,
+    identity_mapping: dict[str, Any],
+    version_default: str | None,
+    name_field_id: str | None,
+    tenant_id: str = "default",
+) -> dict[str, Any]:
+    get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+    with SessionLocal.begin() as db:
+        sheet = _sheet(db, sheet_id)
+        fields = _fields(db, sheet_id)
+        field_ids = {field.id for field in fields if field.active}
+        if name_field_id and name_field_id not in field_ids:
+            raise SystemSpreadsheetError("O campo de nome não pertence à Planilha do Sistema.")
+        normalized_mapping = {
+            role: str(identity_mapping.get(role) or "").strip() or None
+            for role in ("grupo", "cota", "versao")
+        }
+        for role, value in normalized_mapping.items():
+            if value and value not in field_ids:
+                raise SystemSpreadsheetError(f"O campo de {role} não pertence à Planilha do Sistema.")
+        config = dict(sheet.configuration or {})
+        config["identity_mapping"] = normalized_mapping
+        config["version_default"] = str(version_default) if version_default is not None and str(version_default) != "" else None
+        config["name_field_id"] = name_field_id or None
+        sheet.configuration = config
+        _reconcile_clients(db, sheet)
+    return get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+
+
 def update_system_spreadsheet_row(sheet_id: str, client_id: str, values: dict[str, Any], *, tenant_id: str = "default") -> dict[str, Any]:
     sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
     identity_keys = {"grupo", "cota", "versao"}
@@ -163,9 +206,26 @@ def update_system_spreadsheet_row(sheet_id: str, client_id: str, values: dict[st
         merged = dict(client.variables or {})
         merged.update({key: "" if value is None else str(value) for key, value in values.items()})
         client.variables = merged
+        persisted_sheet = _sheet(db, sheet_id)
+        name_field_id = (persisted_sheet.configuration or {}).get("name_field_id")
+        fields = _fields(db, sheet_id)
+        if name_field_id and name_field_id in {field.id for field in fields}:
+            name_field = next(field for field in fields if field.id == name_field_id)
+            client.name = str(merged.get(name_field.semantic_role or _key(name_field.display_name)) or client.name)
         for connector in db.scalars(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id)):
             connector.status = "pending"
-    return get_system_spreadsheet_rows(sheet_id, tenant_id=tenant_id)
+    google_status = "not_configured"
+    with SessionLocal() as db:
+        has_google = db.scalar(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id, SpreadsheetConnector.connector_type == "google_sheets")) is not None
+    if has_google:
+        try:
+            sync_google(sheet_id, direction="outbound", tenant_id=tenant_id)
+            google_status = "synchronized"
+        except SystemSpreadsheetError:
+            google_status = "pending"
+    result = get_system_spreadsheet_rows(sheet_id, tenant_id=tenant_id)
+    result["sync_status"] = google_status
+    return result
 
 
 def reconcile_schema(sheet_id: str, headers: list[str], *, tenant_id: str = "default") -> dict[str, Any]:
@@ -237,26 +297,34 @@ def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], i
     client_list = _ensure_list(db, configured_list_id, (sheet.configuration or {}).get("tenant_id", "default"))
     suppressed = {str(item) for item in (sheet.configuration or {}).get("suppressed_client_identities", [])}
     keys = [field.semantic_role or _key(field.display_name) for field in fields]
-    identity = identity_mapping or {}
-    role_to_key = {role: str(identity.get(role) or role) for role in ("grupo", "cota", "versao")}
-    existing = {f"{str(client.grupo or '')}|{str(client.cota or '')}|{str(client.versao or '')}": client for client in db.scalars(select(Client).where(Client.system_spreadsheet_id == sheet_id))}
+    config = sheet.configuration or {}
+    identity = identity_mapping or config.get("identity_mapping") or {}
+    role_to_key = {role: _mapping_key(fields, identity.get(role), role) for role in ("grupo", "cota", "versao")}
+    name_key = _mapping_key(fields, config.get("name_field_id"), "name")
+    version_default = str(config.get("version_default") or "")
+    existing_clients = list(db.scalars(select(Client).where(Client.system_spreadsheet_id == sheet_id)))
+    existing = {f"{str(client.grupo or '')}|{str(client.cota or '')}|{str(client.versao or '')}": client for client in existing_clients}
+    existing.update({f"{str(client.grupo or '')}|{str(client.cota or '')}|": client for client in existing_clients if not str(client.versao or "")})
     count = 0
     for row in rows:
         values = {keys[index]: "" if value is None else str(value) for index, value in enumerate(row[:len(keys)])}
-        grupo, cota, versao = (values.get(role_to_key[role], "") for role in ("grupo", "cota", "versao"))
+        grupo = values.get(role_to_key["grupo"], "")
+        cota = values.get(role_to_key["cota"], "")
+        versao = values.get(role_to_key["versao"], "") or version_default
         if not (grupo or cota or versao):
             continue
         if not grupo or not cota:
             continue
         row_key = f"{grupo}|{cota}|{versao}"
-        if row_key in suppressed:
+        # Older suppressions may have been recorded before a version default existed.
+        if row_key in suppressed or f"{grupo}|{cota}|" in suppressed:
             continue
         client = existing.get(row_key)
         if client is None:
-            client = Client(id=str(uuid4()), name=values.get("name") or values.get("nome") or row_key, client_group=client_list.name, list_id=client_list.id, system_spreadsheet_id=sheet_id, active=True)
+            client = Client(id=str(uuid4()), name=values.get(name_key) or values.get("name") or values.get("nome") or row_key, client_group=client_list.name, list_id=client_list.id, system_spreadsheet_id=sheet_id, active=True)
             db.add(client)
             existing[row_key] = client
-        client.name = values.get("name") or values.get("nome") or client.name
+        client.name = values.get(name_key) or values.get("name") or values.get("nome") or client.name
         client.client_group = client_list.name
         client.list_id = client_list.id
         client.system_spreadsheet_id = sheet_id
@@ -264,6 +332,27 @@ def _upsert_rows(db, sheet_id: str, headers: list[str], rows: list[list[Any]], i
         client.variables = values
         count += 1
     return count
+
+
+def _reconcile_clients(db, sheet: DataSource) -> int:
+    fields = _fields(db, sheet.id)
+    config = sheet.configuration or {}
+    mapping = config.get("identity_mapping") or {}
+    role_to_key = {role: _mapping_key(fields, mapping.get(role), role) for role in ("grupo", "cota", "versao")}
+    name_key = _mapping_key(fields, config.get("name_field_id"), "name")
+    version_default = str(config.get("version_default") or "")
+    changed = 0
+    for client in db.scalars(select(Client).where(Client.system_spreadsheet_id == sheet.id)):
+        values = dict(client.variables or {})
+        if not values.get(role_to_key["versao"]) and version_default:
+            values[role_to_key["versao"]] = version_default
+        client.grupo = str(values.get(role_to_key["grupo"]) or client.grupo or "")
+        client.cota = str(values.get(role_to_key["cota"]) or client.cota or "")
+        client.versao = str(values.get(role_to_key["versao"]) or client.versao or version_default)
+        client.name = str(values.get(name_key) or client.name or f"{client.grupo}|{client.cota}|{client.versao}")
+        client.variables = values
+        changed += 1
+    return changed
 
 
 def import_excel(*, name: str, content: bytes, filename: str, sheet_name: str | None = None, header_row: int = 1, identity_mapping: dict[str, Any] | None = None, list_id: str | None = None, tenant_id: str = "default") -> dict[str, Any]:
