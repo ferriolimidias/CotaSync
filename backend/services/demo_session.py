@@ -60,6 +60,7 @@ from backend.services.result_selection import (
     host_from_url,
 )
 from backend.services.learning_trace import build_raw_learning_trace
+from backend.services.learning_session_store import load_learning_session, persist_learning_session, sanitize_learning_value
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -941,11 +942,13 @@ class DemoBrowserSession:
     tracking_id: str
     browser_mode: BrowserMode = "desktop_browser"
     external_system_name: str = ""
+    external_system_id: str = ""
     external_login_url: str = ""
     auth_validation_mode: str = ""
     auth_success_text: str = ""
     auth_success_selector: str = ""
     access_profile_name: str = ""
+    access_profile_id: str = ""
     access_profile_email_or_identifier: str = ""
     microsoft_saved_account_identifier: str = ""
     microsoft_saved_account_selector: str = ""
@@ -986,6 +989,8 @@ class DemoBrowserSession:
     outputs: list[dict[str, Any]] = field(default_factory=list)
     page_refs: dict[int, str] = field(default_factory=dict)
     next_page_ref_number: int = 2
+    publication_status: str = "not_attempted"
+    tenant_id: str = "default"
 
 
 class DemoSessionManager:
@@ -997,6 +1002,66 @@ class DemoSessionManager:
         if session is None:
             raise DemoSessionError("Sessao de demonstracao nao encontrada ou encerrada.")
         return session
+
+    async def ensure_session(self, session_id: str) -> DemoBrowserSession:
+        """Return the active session, rehydrating durable learning evidence when needed."""
+        existing = self._sessions.get(str(session_id))
+        if existing is not None:
+            return existing
+        row = load_learning_session(str(session_id))
+        if row is None:
+            raise DemoSessionError("Sessao de demonstracao nao encontrada ou encerrada.")
+        from backend.services.browser_providers import browser_provider, configured_browser_mode
+
+        playwright = await async_playwright().start()
+        try:
+            browser_mode = configured_browser_mode()
+            connection = await browser_provider(browser_mode).connect(playwright, str(session_id))
+            context = connection.context
+            page = connection.page
+            await self._prepare_reconnected_context(str(session_id), context)
+            target_id = ""
+            cdp = await context.new_cdp_session(page)
+            try:
+                target_info = await cdp.send("Target.getTargetInfo")
+                target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
+            finally:
+                await cdp.detach()
+            metadata = row.bootstrap_metadata if isinstance(row.bootstrap_metadata, dict) else {}
+            session = DemoBrowserSession(
+                id=row.id,
+                playwright=playwright,
+                browser=connection.browser,
+                context=context,
+                page=page,
+                target_id=target_id,
+                live_url=browser_provider(browser_mode).live_url(target_id),
+                created_at=row.created_at.isoformat() if row.created_at else _utc_now(),
+                tracking_id=_tracking_id(row.id),
+                browser_mode=browser_mode,
+                external_system_name=str(metadata.get("external_system_name") or ""),
+                external_system_id=str(row.external_system_id or ""),
+                external_login_url=str(metadata.get("external_login_url") or ""),
+                access_profile_id=str(row.access_profile_id or ""),
+                access_profile_name=str(metadata.get("access_profile_name") or ""),
+                access_profile_email_or_identifier=str(metadata.get("access_profile_email_or_identifier") or ""),
+                expected_system_host=str(metadata.get("expected_system_host") or ""),
+                storage_state_path=_external_storage_state_path(str(metadata.get("external_system_name") or ""), row.id),
+                tenant_id=row.tenant_id,
+                status="interrupted" if row.recording_status == "recording" else str(row.status or "autenticada"),
+                recording=False,
+                steps=[dict(item) for item in (row.recorded_steps or []) if isinstance(item, dict)],
+                learning_events=[dict(item) for item in (row.raw_events or []) if isinstance(item, dict)],
+                guided_learning=sanitize_learning_value(metadata.get("guided_learning") or {}),
+                outputs=[dict(item) for item in (row.outputs or []) if isinstance(item, dict)],
+                publication_status=str(row.publication_status or "not_attempted"),
+            )
+            self._sessions[row.id] = session
+            logger.info("Sessao de aprendizado reidratada: session=%s revision=%s", row.id, row.revision)
+            return session
+        except Exception:
+            await playwright.stop()
+            raise DemoSessionError("Nao foi possivel reidratar a sessao de aprendizado.")
 
     async def start_result_selection(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
@@ -1153,6 +1218,7 @@ class DemoSessionManager:
             "contract": contract,
             "confirmed_at": _utc_now(),
         }
+        persist_learning_session(session)
         return {"status": "confirmed", "extraction_review": contract, "output": output, "outputs": list(session.outputs), "result_selection": session.result_selection}
 
     async def cancel_result_selection(self, session_id: str) -> dict[str, Any]:
@@ -1189,6 +1255,7 @@ class DemoSessionManager:
                 output["label"] = clean_label
                 if isinstance(output.get("contract"), dict):
                     output["contract"]["target_name"] = clean_label
+                persist_learning_session(session)
                 return dict(output)
         raise DemoSessionError("Resultado não encontrado.")
 
@@ -1199,6 +1266,7 @@ class DemoSessionManager:
             for item in getattr(session, "outputs", [])
             if isinstance(item, dict) and str(item.get("output_id")) != output_id
         ]
+        persist_learning_session(session)
         return [dict(item) for item in session.outputs]
 
     async def detect_result_candidates(
@@ -1549,6 +1617,7 @@ class DemoSessionManager:
         session.last_screenshot_path = screenshot_after_path or session.last_screenshot_path
         session.last_page_count = len(live_pages)
         session.download_detected = False
+        persist_learning_session(session)
         return event
 
     async def _page_is_authenticated(self, session: DemoBrowserSession, page: Page) -> bool:
@@ -1939,11 +2008,13 @@ class DemoSessionManager:
                 tracking_id=_tracking_id(session_id),
                 browser_mode=selected_mode,
                 external_system_name=external_system_name,
+                external_system_id=str(external_config.get("id") or external_config.get("external_system_id") or ""),
                 external_login_url=external_login_url,
                 auth_validation_mode=str(external_config.get("validation") or "").strip(),
                 auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
                 auth_success_selector=str(external_config.get("auth_success_selector") or "").strip(),
                 access_profile_name=str(external_config.get("access_profile_name") or "").strip(),
+                access_profile_id=str(external_config.get("access_profile_id") or "").strip(),
                 access_profile_email_or_identifier=str(
                     external_config.get("access_profile_email_or_identifier") or ""
                 ).strip(),
@@ -1966,6 +2037,7 @@ class DemoSessionManager:
                 profile_reference=desktop_profile_dir() if selected_mode == "desktop_browser" else "",
             )
             self._sessions[session_id] = session
+            persist_learning_session(session)
             session.last_page_count = len(context.pages)
 
             def watch_download(item: Page) -> None:
@@ -1998,7 +2070,7 @@ class DemoSessionManager:
             raise DemoSessionError("Nao foi possivel abrir a sessao do navegador.") from exc
 
     async def status(self, session_id: str) -> dict[str, Any]:
-        session = self._get(session_id)
+        session = await self.ensure_session(session_id)
         if session.page.is_closed() or not session.browser.is_connected():
             session.status = "expirada"
         title = ""
@@ -2022,6 +2094,8 @@ class DemoSessionManager:
             "page_url": page_url,
             "page_title": title,
             "recording": session.recording,
+            "recording_status": "recording" if session.recording else "stopped",
+            "publication_status": str(getattr(session, "publication_status", "not_attempted") or "not_attempted"),
             "steps_count": len(session.steps),
             "learning_events_count": len(session.learning_events),
             "external_system_name": session.external_system_name,
@@ -2069,7 +2143,7 @@ class DemoSessionManager:
         }
 
     async def recording_diagnostics(self, session_id: str) -> dict[str, Any]:
-        session = self._get(session_id)
+        session = await self.ensure_session(session_id)
         live_pages = [page for page in session.context.pages if not page.is_closed()]
         active_title = ""
         try:
@@ -2125,6 +2199,10 @@ class DemoSessionManager:
                 getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
             ),
             "reviewed_session_id": session.id,
+            "status": session.status,
+            "recording": bool(session.recording),
+            "recording_status": "recording" if session.recording else "stopped",
+            "publication_status": str(getattr(session, "publication_status", "not_attempted") or "not_attempted"),
             "operator_request_session_id": str(
                 last_operator_result.get("operator_request_session_id")
                 or last_operator_result.get("session_id")
@@ -2142,6 +2220,13 @@ class DemoSessionManager:
             "recorded_steps_count": len(session.steps),
             "variables": variables,
             "variables_count": len(variables),
+            "bootstrap_steps_count": sum(
+                1 for step in session.steps if isinstance(step, dict) and str(step.get("phase") or "").casefold() == "bootstrap"
+            ),
+            "main_steps_count": sum(
+                1 for step in session.steps if not isinstance(step, dict) or str(step.get("phase") or "").casefold() != "bootstrap"
+            ),
+            "output_count": len(getattr(session, "outputs", []) or []),
             "click_event_count": event_types.count("click"),
             "fill_event_count": fill_count,
             "select_event_count": select_count,
@@ -2676,7 +2761,7 @@ class DemoSessionManager:
         session_id: str,
         guided_learning: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        session = self._get(session_id)
+        session = await self.ensure_session(session_id)
         if session.status == "expirada" or session.page.is_closed() or not session.browser.is_connected():
             raise DemoSessionError("A sessão do navegador não está disponível.")
         session.steps = []
@@ -2741,12 +2826,25 @@ class DemoSessionManager:
             session.last_screenshot_path = ""
         session.last_page_count = len([page for page in session.context.pages if not page.is_closed()])
         session.download_detected = False
+        persist_learning_session(session)
         logger.info("Gravacao iniciada na sessao %s", session_id)
         return await self.status(session_id)
 
     async def stop_recording(self, session_id: str) -> dict[str, Any]:
-        session = self._get(session_id)
+        session = await self.ensure_session(session_id)
         if not session.recording:
+            if session.status in {"autenticada", "interrupted", "stopped"} and session.steps:
+                return {
+                    "session": await self.status(session_id),
+                    "steps": [dict(step, index=index) for index, step in enumerate(session.steps)],
+                    "learning_events": [dict(event) for event in session.learning_events],
+                    "guided_learning": dict(session.guided_learning),
+                    "review_summary": {"total_steps": len(session.steps), "idempotent": True},
+                    "output_candidates": list(session.output_candidates),
+                    "final_page": dict(session.final_page_snapshot),
+                    "download_detected": bool(session.download_detected),
+                    "ai_synthesis": dict(session.learning_synthesis),
+                }
             raise DemoSessionError("Nao existe gravacao ativa nesta sessao.")
         await asyncio.sleep(0.7)
         output_results = await self._evaluate_all_frames(
@@ -2940,6 +3038,7 @@ class DemoSessionManager:
                 "diagnostics": latest_diagnostics,
             }
         )
+        persist_learning_session(session)
         logger.info("Gravacao finalizada na sessao %s com %s passos", session_id, len(session.steps))
         return {
             "session": await self.status(session_id),
@@ -2981,7 +3080,7 @@ class DemoSessionManager:
         required_access_profile_id: str | None = None,
         run_start_strategy: str = "persistent_graph_reentry",
     ) -> dict[str, Any]:
-        session = self._get(session_id)
+        session = await self.ensure_session(session_id)
         action_name = str(name or "").strip()
         if not action_name:
             raise DemoSessionError("Informe um nome para a acao aprendida.")
@@ -3545,7 +3644,30 @@ class DemoSessionManager:
 
         screenshot_path = _DATA_DIR / f"mapeamento_{_safe_file_name(action_name)}.png"
         await session.page.screenshot(path=str(screenshot_path), full_page=False)
-        save_learned_action(action_name, learned_action)
+        session.publication_status = "publishing"
+        persist_learning_session(session, publication={"status": "publishing", "stage": "validation"})
+        try:
+            saved_action = save_learned_action(action_name, learned_action)
+        except Exception as exc:
+            session.publication_status = "failed"
+            persist_learning_session(
+                session,
+                publication={
+                    "status": "failed",
+                    "error_code": "LEARNED_GRAPH_INVALID" if "Grafo aprendido invalido" in str(exc) else "publication_failed",
+                    "stage": "validation_or_persistence",
+                    "message": str(exc)[:500],
+                },
+            )
+            raise
+        session.publication_status = "published"
+        persist_learning_session(
+            session,
+            publication={
+                "status": "published",
+                "action_id": str(getattr(saved_action, "id", "") or ""),
+            },
+        )
 
         from backend.services.actions_repository import slugify_action_id
 

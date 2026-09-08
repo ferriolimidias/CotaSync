@@ -338,6 +338,40 @@ class ExternalAccessProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class LearningSession(Base):
+    __tablename__ = "learning_sessions"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True, default="default")
+    action_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    objective: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    expected_result: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
+    recording_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_started", index=True)
+    publication_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_attempted", index=True)
+    external_system_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_systems.id", ondelete="SET NULL"), index=True)
+    access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
+    allowed_list_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    run_start_strategy: Mapped[str] = mapped_column(String(64), nullable=False, default="persistent_graph_reentry")
+    raw_events: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    recorded_steps: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    bootstrap_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    state_evidence: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    variable_bindings: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    outputs: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    diagnostics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    publication_error_code: Mapped[str | None] = mapped_column(String(128))
+    publication_error_stage: Mapped[str | None] = mapped_column(String(128))
+    publication_error_message: Mapped[str | None] = mapped_column(Text)
+    published_action_id: Mapped[str | None] = mapped_column(String(255))
+    published_action_version_id: Mapped[str | None] = mapped_column(String(128))
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    recording_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recording_stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class DesktopViewToken(Base):
     __tablename__ = "desktop_view_tokens"
     digest: Mapped[str] = mapped_column(String(128), primary_key=True)

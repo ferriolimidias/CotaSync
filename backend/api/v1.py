@@ -1132,6 +1132,7 @@ async def learning_create_session(_user: AuthUser = Depends(require_user)) -> di
 @router.get("/learning/sessions/{session_id}", summary="Estado da sessão de aprendizado")
 async def learning_get_session(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         session = await demo_session_manager.recording_diagnostics(session_id)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
@@ -1141,6 +1142,7 @@ async def learning_get_session(session_id: str, _user: AuthUser = Depends(requir
 @router.post("/learning/sessions/{session_id}/recording/start", summary="Inicia gravação")
 async def learning_start_recording(session_id: str, payload: GuidedLearningRequest | None = None, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         session = await demo_session_manager.start_recording(session_id, payload.model_dump() if payload is not None else {})
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_RECORDING_ERROR", str(exc)) from exc
@@ -1150,6 +1152,7 @@ async def learning_start_recording(session_id: str, payload: GuidedLearningReque
 @router.post("/learning/sessions/{session_id}/recording/stop", summary="Finaliza gravação")
 async def learning_stop_recording(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.stop_recording(session_id)
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_RECORDING_ERROR", str(exc)) from exc
@@ -1180,6 +1183,7 @@ async def learning_start_result_selection(
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.start_result_selection(session_id)
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
@@ -1194,6 +1198,7 @@ async def learning_capture_result_selection(
 ) -> dict[str, Any]:
     request = payload or LearningResultSelectionRequest()
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.capture_result_selection(
             session_id,
             target_name=request.target_name,
@@ -1211,6 +1216,7 @@ async def learning_confirm_result_selection(
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.confirm_result_selection(
             session_id,
             target_name=payload.target_name,
@@ -1231,6 +1237,7 @@ async def learning_cancel_result_selection(
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.cancel_result_selection(session_id)
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_RESULT_SELECTION_ERROR", str(exc)) from exc
@@ -1240,6 +1247,7 @@ async def learning_cancel_result_selection(
 @router.get("/learning/sessions/{session_id}/outputs", summary="Lista resultados do aprendizado")
 async def learning_outputs(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         outputs = await demo_session_manager.learning_outputs(session_id)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
@@ -1249,6 +1257,7 @@ async def learning_outputs(session_id: str, _user: AuthUser = Depends(require_us
 @router.post("/learning/sessions/{session_id}/ai-analysis", summary="Analisa aprendizado sem publicar automaticamente")
 async def learning_ai_analysis(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         session = await demo_session_manager.recording_diagnostics(session_id)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
@@ -1260,6 +1269,7 @@ async def learning_ai_analysis(session_id: str, _user: AuthUser = Depends(requir
 @router.patch("/learning/sessions/{session_id}/outputs/{output_id}", summary="Renomeia resultado do aprendizado")
 async def learning_output_rename(session_id: str, output_id: str, payload: LearningOutputRenameRequest, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         output = await demo_session_manager.rename_learning_output(session_id, output_id, payload.label)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_OUTPUT_NOT_FOUND", str(exc)) from exc
@@ -1269,6 +1279,7 @@ async def learning_output_rename(session_id: str, output_id: str, payload: Learn
 @router.delete("/learning/sessions/{session_id}/outputs/{output_id}", summary="Remove resultado do aprendizado")
 async def learning_output_remove(session_id: str, output_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         outputs = await demo_session_manager.remove_learning_output(session_id, output_id)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_OUTPUT_NOT_FOUND", str(exc)) from exc
@@ -1278,6 +1289,7 @@ async def learning_output_remove(session_id: str, output_id: str, _user: AuthUse
 @router.post("/learning/sessions/{session_id}/actions", summary="Publica ação aprendida")
 async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         action = await demo_session_manager.save_action(
             session_id,
             payload.name,
@@ -1329,6 +1341,7 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
 @router.post("/learning/sessions/{session_id}/operator/insert-active", summary="Insere texto no campo ativo")
 async def learning_insert_active(session_id: str, payload: OperatorInsertActiveRequest, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_insert_active(session_id, payload.value, sensitive=payload.sensitive)
     except DemoSessionError as exc:
         raise _error(409, "OPERATOR_ACTION_ERROR", str(exc)) from exc
@@ -1346,6 +1359,7 @@ async def learning_press(session_id: str, payload: OperatorPressRequest, _user: 
     if payload.key not in allowed:
         raise _error(422, "OPERATOR_KEY_NOT_ALLOWED", "Tecla nao permitida.")
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_press(session_id, payload.key)
     except DemoSessionError as exc:
         raise _error(409, "OPERATOR_ACTION_ERROR", str(exc)) from exc
@@ -1355,6 +1369,7 @@ async def learning_press(session_id: str, payload: OperatorPressRequest, _user: 
 @router.post("/learning/sessions/{session_id}/operator/clear-active", summary="Limpa campo ativo")
 async def learning_clear_active(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_clear_active(session_id)
     except DemoSessionError as exc:
         raise _error(409, "OPERATOR_ACTION_ERROR", str(exc)) from exc

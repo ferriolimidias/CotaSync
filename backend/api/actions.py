@@ -124,6 +124,7 @@ async def start_result_selection(action_id: str, payload: ResultSelectionRequest
     if not payload.session_id:
         raise HTTPException(status_code=422, detail="session_id obrigatorio para selecao visual.")
     try:
+        await demo_session_manager.ensure_session(payload.session_id)
         result = await demo_session_manager.start_result_selection(payload.session_id)
     except DemoSessionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -138,6 +139,7 @@ async def capture_result_selection(action_id: str, payload: ResultSelectionReque
     if not payload.session_id:
         raise HTTPException(status_code=422, detail="session_id obrigatorio para captura visual.")
     try:
+        await demo_session_manager.ensure_session(payload.session_id)
         result = await demo_session_manager.capture_result_selection(
             payload.session_id,
             target_name=payload.target_name,
@@ -283,6 +285,7 @@ async def extraction_candidates(action_id: str, payload: ResultSelectionRequest)
     if not payload.session_id:
         raise HTTPException(status_code=422, detail="session_id obrigatorio para detectar candidatos.")
     try:
+        await demo_session_manager.ensure_session(payload.session_id)
         result = await demo_session_manager.detect_result_candidates(
             payload.session_id,
             target_name=payload.target_name,

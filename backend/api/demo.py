@@ -94,6 +94,7 @@ async def create_demo_session() -> dict[str, Any]:
 @router.get("/api/demo/sessions/{session_id}")
 async def get_demo_session(session_id: str) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         session = await demo_session_manager.status(session_id)
     except DemoSessionError as exc:
         _raise_safe(exc, 404)
@@ -103,6 +104,7 @@ async def get_demo_session(session_id: str) -> dict[str, Any]:
 @router.get("/api/demo/sessions/{session_id}/operator-diagnostics")
 async def get_operator_diagnostics(session_id: str) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         diagnostics = await demo_session_manager.operator_diagnostics(session_id)
     except DemoSessionError as exc:
         _raise_safe(exc, 404)
@@ -112,6 +114,7 @@ async def get_operator_diagnostics(session_id: str) -> dict[str, Any]:
 @router.get("/api/demo/sessions/{session_id}/recording/diagnostics")
 async def get_recording_diagnostics(session_id: str) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         diagnostics = await demo_session_manager.recording_diagnostics(session_id)
     except DemoSessionError as exc:
         _raise_safe(exc, 404)
@@ -122,6 +125,7 @@ async def get_recording_diagnostics(session_id: str) -> dict[str, Any]:
 async def operator_fill(session_id: str, payload: OperatorFillRequest) -> dict[str, Any]:
     expected_session = payload.active_recording_session_id or payload.operator_request_session_id
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_fill(
             session_id,
             payload.selector,
@@ -140,6 +144,7 @@ async def operator_insert_active(
     payload: OperatorInsertActiveRequest,
 ) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_insert_active(
             session_id,
             payload.value,
@@ -153,6 +158,7 @@ async def operator_insert_active(
 @router.post("/api/demo/sessions/{session_id}/operator/press")
 async def operator_press(session_id: str, payload: OperatorPressRequest) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_press(session_id, payload.key)
     except DemoSessionError as exc:
         _raise_safe(exc)
@@ -162,6 +168,7 @@ async def operator_press(session_id: str, payload: OperatorPressRequest) -> dict
 @router.post("/api/demo/sessions/{session_id}/operator/clear-active")
 async def operator_clear_active(session_id: str) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_clear_active(session_id)
     except DemoSessionError as exc:
         _raise_safe(exc)
@@ -172,6 +179,7 @@ async def operator_clear_active(session_id: str) -> dict[str, Any]:
 async def operator_click(session_id: str, payload: OperatorClickRequest) -> dict[str, Any]:
     expected_session = payload.active_recording_session_id or payload.operator_request_session_id
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.operator_click(
             session_id,
             payload.selector,
@@ -217,6 +225,7 @@ async def start_demo_recording(
     payload: GuidedLearningRequest | None = None,
 ) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         session = await demo_session_manager.start_recording(
             session_id,
             payload.model_dump() if payload is not None else {},
@@ -229,6 +238,7 @@ async def start_demo_recording(
 @router.post("/api/demo/sessions/{session_id}/recording/stop")
 async def stop_demo_recording(session_id: str) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         result = await demo_session_manager.stop_recording(session_id)
     except DemoSessionError as exc:
         _raise_safe(exc)
@@ -238,6 +248,7 @@ async def stop_demo_recording(session_id: str) -> dict[str, Any]:
 @router.post("/api/demo/sessions/{session_id}/actions")
 async def save_demo_action(session_id: str, payload: SaveDemoActionRequest) -> dict[str, Any]:
     try:
+        await demo_session_manager.ensure_session(session_id)
         action = await demo_session_manager.save_action(
             session_id,
             payload.name,

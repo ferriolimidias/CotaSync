@@ -37,7 +37,9 @@ export const Route = createFileRoute("/ensinar-acao")({
 });
 
 function EnsinarPage() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(() => (
+    typeof window === "undefined" ? null : window.sessionStorage.getItem("cotasync-learning-session-id")
+  ));
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
   const [expected, setExpected] = useState("");
@@ -54,6 +56,11 @@ function EnsinarPage() {
   const [outputLabels, setOutputLabels] = useState<Record<string, string>>({});
   const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (sessionId) window.sessionStorage.setItem("cotasync-learning-session-id", sessionId);
+    else window.sessionStorage.removeItem("cotasync-learning-session-id");
+  }, [sessionId]);
   const session = useQuery({
     queryKey: ["learning-session", sessionId],
     queryFn: () => getLearningSession(sessionId as string),
@@ -226,6 +233,7 @@ function EnsinarPage() {
     session.data?.variables_count
       ?? (Array.isArray(session.data?.variables) ? session.data.variables.length : 0),
   );
+  const sessionStopped = stopped || (session.data?.recording === false && eventCount > 0);
   const outputs = Array.isArray(session.data?.outputs) ? session.data.outputs : [];
 
   return (
@@ -307,8 +315,8 @@ function EnsinarPage() {
               </Button>
             ) : (
               <div className="space-y-2">
-                <BadgeStatus tone={stopped ? "success" : "error"}>
-                  <CircleDot className="h-3 w-3" /> {stopped ? "Gravação finalizada" : "Gravando"}
+                <BadgeStatus tone={sessionStopped ? "success" : "error"}>
+                  <CircleDot className="h-3 w-3" /> {sessionStopped ? "Gravação finalizada" : "Gravando"}
                 </BadgeStatus>
                 <p className="text-xs text-muted-foreground">
                   {eventCount} passos · {variableCount} variáveis
@@ -316,14 +324,14 @@ function EnsinarPage() {
                 <Button
                   className="w-full"
                   variant="outline"
-                  disabled={stopped || stop.isPending}
+                  disabled={sessionStopped || stop.isPending}
                   onClick={() => stop.mutate()}
                 >
                   <Square className="h-4 w-4" /> Finalizar ensino
                 </Button>
                 <Button
                   className="w-full"
-                  disabled={!stopped || publish.isPending}
+                  disabled={!sessionStopped || publish.isPending}
                   onClick={() => {
                     if (expected.trim() && !resultConfirmed && !hasConfirmedContract) {
                       toast.warning("Selecione no navegador qual informação esta ação deve retornar.");
