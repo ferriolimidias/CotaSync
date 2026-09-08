@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 from datetime import UTC, datetime, time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -51,6 +52,8 @@ from backend.services.clients_repository import (
     parse_clients_csv,
     update_client,
 )
+
+logger = logging.getLogger("cotasync.api")
 from backend.services.demo_session import DemoSessionError, demo_session_manager
 from backend.services.desktop_view_tokens import create_token, validate_token
 from backend.services.external_systems import ExternalSystemConfigError, load_current_external_system, save_current_external_system
@@ -1300,6 +1303,13 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
         )
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_SAVE_ERROR", str(exc)) from exc
+    except ActionsRepositoryError as exc:
+        logger.exception("Falha de validacao ao publicar aprendizado: session=%s", session_id)
+        raise _error(
+            422,
+            "LEARNED_GRAPH_INVALID",
+            "Não foi possível validar o fluxo aprendido. O ensino foi preservado; tente publicar novamente.",
+        ) from exc
     if payload.allowed_list_ids:
         from backend.db import ClientList
         with SessionLocal.begin() as session:

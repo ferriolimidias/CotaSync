@@ -286,6 +286,9 @@ export type LearningSession = {
   status?: string;
   recording?: boolean;
   learning_events_count?: number;
+  steps_count?: number;
+  recorded_steps_count?: number;
+  variables_count?: number;
   variables?: string[];
   result_selection?: Record<string, unknown>;
   extraction_review?: Record<string, unknown>;

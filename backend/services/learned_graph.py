@@ -38,6 +38,49 @@ def ensure_stable_step_ids(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def normalize_compiled_graph_sources(action: dict[str, Any]) -> dict[str, Any]:
+    """Make each transition start where its referenced step starts.
+
+    The recorder owns the before/after evidence for a step. A previous
+    compiler pass rebuilt a linear cursor from the previous step's target,
+    which could silently replace the current step's real source state and
+    produce an invalid graph at publication time.
+    """
+    result = dict(action)
+    raw_steps = result.get("robust_steps") or result.get("passos_playwright") or []
+    if not isinstance(raw_steps, list):
+        return result
+    steps = ensure_stable_step_ids(raw_steps)
+    result["robust_steps"] = steps
+
+    transitions = result.get("learned_transitions")
+    if not isinstance(transitions, list):
+        return result
+    normalized: list[dict[str, Any]] = []
+    for transition in transitions:
+        if not isinstance(transition, dict):
+            continue
+        item = dict(transition)
+        resolved = resolve_transition_step(item, steps)
+        if resolved is None:
+            normalized.append(item)
+            continue
+        step = steps[resolved["index"]]
+        source = str(step.get("before_state_id") or step.get("graph_from_state_id") or "")
+        target = str(step.get("after_state_id") or source)
+        if source:
+            step["graph_from_state_id"] = source
+            item["from_state"] = source
+            item["from_state_id"] = source
+        if target:
+            item["to_state"] = target
+            item["to_state_id"] = target
+        item["step_id"] = str(step.get("step_id") or item.get("step_id") or "")
+        normalized.append(item)
+    result["learned_transitions"] = normalized
+    return result
+
+
 def _transition_selector(transition: dict[str, Any]) -> str:
     if transition.get("selector"):
         return str(transition["selector"]).strip()

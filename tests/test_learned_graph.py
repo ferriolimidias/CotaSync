@@ -9,6 +9,7 @@ from backend.services.learned_graph import (
     find_graph_path,
     graph_metadata_available,
     match_observation_to_learned_state,
+    normalize_compiled_graph_sources,
     observe_browser_pages,
     ordered_graph_path,
     ordered_graph_suffix,
@@ -57,6 +58,40 @@ class FakePage:
 
 
 class LearnedGraphTests(unittest.TestCase):
+    def test_compiler_keeps_each_transition_at_its_step_source(self) -> None:
+        action = {
+            "execution_model": "learned_graph",
+            "robust_steps": [
+                {"step_id": "first", "tipo": "clicar", "before_state_id": "home", "after_state_id": "form"},
+                {"step_id": "group", "tipo": "preencher", "before_state_id": "form-screen", "after_state_id": "form-screen"},
+            ],
+            "learned_transitions": [
+                {"transition_id": "t1", "step_id": "first", "from_state_id": "home", "to_state_id": "form"},
+                # This is the old linear-cursor output: it incorrectly used
+                # the previous target instead of the current step source.
+                {"transition_id": "t2", "step_id": "group", "from_state_id": "form", "to_state_id": "form-screen"},
+            ],
+        }
+        normalized = normalize_compiled_graph_sources(action)
+        self.assertEqual(normalized["learned_transitions"][1]["from_state_id"], "form-screen")
+        self.assertEqual(normalized["robust_steps"][1]["graph_from_state_id"], "form-screen")
+        self.assertNotIn(
+            "step_source_state_mismatch",
+            {
+                item["code"]
+                for item in validate_compiled_action_graph(
+                    {
+                        **normalized,
+                        "learned_states": [
+                            {"state_id": "home"},
+                            {"state_id": "form"},
+                            {"state_id": "form-screen"},
+                        ],
+                    }
+                )["errors"]
+            },
+        )
+
     def test_new_run_starts_before_first_client_input_not_at_residual_result(self) -> None:
         steps = [
             {"step_id": "login", "tipo": "clicar", "seletor": "#login"},

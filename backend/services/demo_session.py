@@ -2107,6 +2107,19 @@ class DemoSessionManager:
             direct_typing_status = "recording_inactive"
         else:
             direct_typing_status = "no_input_events_observed"
+        variables = sorted(
+            {
+                str(event.get("variable_key") or "").strip()
+                for event in session.learning_events
+                if event.get("event_type") in {"fill", "select"}
+                and str(event.get("variable_key") or "").strip()
+            }
+            | {
+                str(step.get("variavel") or "").strip()
+                for step in session.steps
+                if isinstance(step, dict) and str(step.get("variavel") or "").strip()
+            }
+        )
         return {
             "active_recording_session_id": str(
                 getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
@@ -2124,6 +2137,11 @@ class DemoSessionManager:
             "frame_count": frame_count,
             "instrumented_frame_count": instrumented_frames,
             "raw_event_count": len(session.learning_events),
+            "learning_events_count": len(session.learning_events),
+            "steps_count": len(session.steps),
+            "recorded_steps_count": len(session.steps),
+            "variables": variables,
+            "variables_count": len(variables),
             "click_event_count": event_types.count("click"),
             "fill_event_count": fill_count,
             "select_event_count": select_count,
@@ -3196,10 +3214,12 @@ class DemoSessionManager:
                 "normalization": output.get("normalization") or "exact_text",
             })
 
-        previous_state_id = ""
         for step in robust_steps:
-            step["graph_from_state_id"] = previous_state_id or str(step.get("before_state_id") or "")
-            previous_state_id = str(step.get("after_state_id") or step.get("before_state_id") or "")
+            # The recorder owns the source evidence for each step. Do not
+            # replace it with the previous step's target at a state boundary.
+            step["graph_from_state_id"] = str(
+                step.get("before_state_id") or step.get("graph_from_state_id") or ""
+            )
 
         learned_transitions = [
             {
@@ -3511,6 +3531,17 @@ class DemoSessionManager:
             for event in learning_events
             if event.get("opened_new_page") or event.get("event_type") in {"popup", "new_tab"}
         ] or ["Nenhuma nova aba ou popup foi detectado durante esta demonstração."]
+
+        # Canonicalize structural states and align every transition with the
+        # source state captured for its own step before repository validation.
+        # AI review enriches metadata only and cannot rewrite this graph.
+        from backend.services.learned_graph import (
+            canonicalize_graph_metadata,
+            normalize_compiled_graph_sources,
+        )
+
+        learned_action = canonicalize_graph_metadata(learned_action)
+        learned_action = normalize_compiled_graph_sources(learned_action)
 
         screenshot_path = _DATA_DIR / f"mapeamento_{_safe_file_name(action_name)}.png"
         await session.page.screenshot(path=str(screenshot_path), full_page=False)

@@ -100,7 +100,11 @@ function EnsinarPage() {
     onSuccess: () => toast.success("Ação publicada."),
     onError: (error) => {
       if (error instanceof ApiError && error.status === 422) {
-        toast.error("Não foi possível publicar a versão: resultado da ação incompleto.");
+        if (error.code === "LEARNED_GRAPH_INVALID") {
+          toast.error("Não foi possível validar o fluxo aprendido. O ensino foi preservado; tente publicar novamente.");
+        } else {
+          toast.error("Não foi possível publicar a versão: resultado da ação incompleto.");
+        }
         return;
       }
       if (error instanceof ApiError && error.status >= 500) {
@@ -212,8 +216,16 @@ function EnsinarPage() {
     return () => window.clearInterval(timer);
   }, [captureSelection, selectionMode, sessionId]);
 
-  const eventCount = Number(session.data?.learning_events_count || 0);
-  const variableCount = Array.isArray(session.data?.variables) ? session.data.variables.length : 3;
+  const eventCount = Number(
+    session.data?.steps_count
+      ?? session.data?.recorded_steps_count
+      ?? session.data?.learning_events_count
+      ?? 0,
+  );
+  const variableCount = Number(
+    session.data?.variables_count
+      ?? (Array.isArray(session.data?.variables) ? session.data.variables.length : 0),
+  );
   const outputs = Array.isArray(session.data?.outputs) ? session.data.outputs : [];
 
   return (
