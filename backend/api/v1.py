@@ -38,7 +38,7 @@ from backend.services.batch_runner import (
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
-from backend.services.session_guardian import detect_microsoft_account_picker
+from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -132,7 +132,6 @@ class ActionRunPayload(BaseModel):
 class ExternalSystemConfigPayload(BaseModel):
     external_system_name: str = ""
     external_login_url: str = ""
-    access_profile_email_or_identifier: str = ""
     expected_system_host: str = ""
     run_start_strategy: str = "persistent_graph_reentry"
 
@@ -484,6 +483,10 @@ def _external_session_payload(config: dict[str, Any]) -> dict[str, Any]:
         "validation_mode": validation_mode,
         "session_status": "unknown" if configured else "not_configured",
         "microsoft_session_available": False,
+        "browser_status": "unknown",
+        "microsoft_status": "not_verified",
+        "external_system_status": "outside",
+        "access_profile_count": 0,
         "expected_system_host_configured": bool(str(config.get("expected_system_host") or "").strip()),
         "updated_at": config.get("updated_at"),
     }
@@ -498,13 +501,6 @@ def _external_system_config_payload(config: dict[str, Any]) -> dict[str, Any]:
         "external_login_url": login_url,
         "entry_url": str(config.get("entry_url") or login_url),
         "run_start_strategy": str(config.get("run_start_strategy") or "persistent_graph_reentry"),
-        "access_profile_email_or_identifier": str(
-            config.get("access_profile_email_or_identifier")
-            or config.get("microsoft_saved_account_identifier")
-            or "",
-        ).strip()
-        if configured
-        else "",
         "expected_system_host": str(config.get("expected_system_host") or "").strip() if configured else "",
         "updated_at": config.get("updated_at"),
     }
@@ -573,10 +569,13 @@ async def _external_session_status_from_browser(config: dict[str, Any]) -> str:
                 text_content = (await connection.page.locator("body").inner_text(timeout=3000)).casefold()
             finally:
                 await playwright.stop()
-            identifier = str(config.get("access_profile_email_or_identifier") or config.get("microsoft_saved_account_identifier") or "").casefold()
-            picker = detect_microsoft_account_picker(text_content, [identifier] if identifier else [])
+            profiles = list_access_profiles()
+            identifiers = [str(profile.get("login_identifier") or "") for profile in profiles if profile.get("active")]
+            picker = detect_microsoft_account_picker(text_content, identifiers)
             if picker["profile_available"]:
                 return "microsoft_session_available"
+            if picker["state"] == "account_picker":
+                return "microsoft_pick_account"
             if any(marker in text_content for marker in ("enter password", "digite sua senha", "password")):
                 return "reauth_required"
             if any(marker in text_content for marker in ("approve sign in", "verify your identity", "mfa", "autenticador")):
@@ -1443,7 +1442,40 @@ async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(req
         return {"status": "ok", "profile": {**profile, "session_status": "unknown"}, "available": False}
     picker = detect_microsoft_account_picker(text_content, [profile["login_identifier"]])
     available = bool(picker["profile_available"])
-    return {"status": "ok", "profile": {**profile, "session_status": "session_available" if available else "unknown"}, "available": available, "diagnostic": {"account_picker": picker["state"], "matched_identifiers": picker["available_identifiers"]}}
+    auth_state = classify_microsoft_auth_state(text_content)
+    if auth_state in {"password_required", "mfa_required"}:
+        profile_status = "reauth_required"
+    elif picker["state"] == "account_picker" and not available:
+        profile_status = "account_not_found"
+    else:
+        profile_status = "session_available" if available else "unknown"
+    return {"status": "ok", "profile": {**profile, "session_status": profile_status}, "available": available, "diagnostic": {"account_picker": picker["state"], "matched_identifiers": picker["available_identifiers"], "auth_state": auth_state}}
+
+
+@router.post("/access-profiles/{profile_id}/authenticate", summary="Abre a entrada para autenticação manual do perfil")
+async def access_profile_authenticate(profile_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        profile = access_profile_public(profile_id)
+    except AccessProfileError as exc:
+        raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
+    config = load_current_external_system()
+    entry_url = str(config.get("entry_url") or config.get("external_login_url") or "").strip()
+    if not entry_url:
+        raise _error(422, "EXTERNAL_ENTRY_URL_MISSING", "Configure a entrada do sistema externo antes de autenticar um perfil.")
+    health = await desktop_browser_health()
+    if not health.get("cdp_reachable"):
+        raise _error(503, "BROWSER_UNAVAILABLE", "Desktop browser indisponível.")
+    try:
+        await _navigate_desktop_browser(entry_url)
+    except Exception as exc:
+        raise _error(503, "BROWSER_NAVIGATION_FAILED", "Não foi possível abrir a entrada do sistema no navegador.") from exc
+    return {
+        "status": "authentication_started",
+        "profile": profile,
+        "entry_url": entry_url,
+        "manual_login_required": True,
+        "browser_opened": True,
+    }
 
 
 @router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")
@@ -1505,8 +1537,6 @@ async def external_system_config_save(
                 "external_login_url": raw_login_url,
                 "entry_url": raw_login_url,
                 "run_start_strategy": payload.run_start_strategy,
-                "access_profile_email_or_identifier": payload.access_profile_email_or_identifier,
-                "microsoft_saved_account_identifier": payload.access_profile_email_or_identifier,
                 "expected_system_host": expected_host,
             }
         )
@@ -1524,6 +1554,16 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
     external_session = _external_session_payload(config)
     external_session["session_status"] = await _external_session_status_from_browser(config)
     external_session["microsoft_session_available"] = external_session["session_status"] == "microsoft_session_available"
+    profiles = list_access_profiles()
+    external_session["access_profile_count"] = len(profiles)
+    external_session["browser_status"] = "offline" if external_session["session_status"] == "browser_offline" else "ready"
+    external_session["microsoft_status"] = (
+        "available" if external_session["microsoft_session_available"] else
+        "reauth_required" if external_session["session_status"] == "reauth_required" else
+        "account_picker" if external_session["session_status"] == "microsoft_pick_account" else
+        "not_verified"
+    )
+    external_session["external_system_status"] = "inside" if external_session["session_status"] == "authenticated" else "outside"
     return {"status": "ok", "external_session": external_session}
 
 

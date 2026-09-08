@@ -262,6 +262,20 @@ def detect_microsoft_account_picker(text: str, known_identifiers: list[str] | No
     }
 
 
+def classify_microsoft_auth_state(text: str) -> str:
+    """Classify manual Microsoft intervention without reading or storing secrets."""
+    normalized = str(text or "").casefold()
+    if any(marker in normalized for marker in _MFA_WORDS):
+        return "mfa_required"
+    if any(marker in normalized for marker in _PASSWORD_WORDS):
+        return "password_required"
+    if any(marker in normalized for marker in _CONSENT_WORDS):
+        return "consent_required"
+    if any(marker in normalized for marker in _SIGNED_OUT_WORDS):
+        return "signed_out"
+    return "unknown"
+
+
 @dataclass
 class SessionGuardianConfig:
     check_timeout_seconds: int = field(

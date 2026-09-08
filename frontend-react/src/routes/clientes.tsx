@@ -52,7 +52,9 @@ import {
   deleteClientList,
   deleteSystemSpreadsheet,
   renameClientList,
+  updateClientListAccessProfile,
   updateSystemSpreadsheetMapping,
+  listAccessProfiles,
 } from "@/services/api";
 import type { ApiClient, ClientsCsvPreview, ClientsCsvPreviewRow, SystemSpreadsheet } from "@/types/api";
 
@@ -91,6 +93,7 @@ function ClientesPage() {
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => getClients({ pageSize: 200 }) });
   const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
+  const accessProfiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles });
   const [query, setQuery] = useState("");
   const [group, setGroup] = useState("all");
   const [status, setStatus] = useState("all");
@@ -129,6 +132,7 @@ function ClientesPage() {
   const removeList = useMutation({ mutationFn: ({ id, deleteClientsToo }: { id: string; deleteClientsToo: boolean }) => deleteClientList(id, deleteClientsToo), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Lista excluída."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir a lista. Verifique as dependências.") });
   const removeSpreadsheet = useMutation({ mutationFn: ({ id, deleteClientsToo }: { id: string; deleteClientsToo: boolean }) => deleteSystemSpreadsheet(id, deleteClientsToo), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Planilha do Sistema excluída."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível excluir a planilha. Verifique as dependências.") });
   const renameList = useMutation({ mutationFn: ({ id, name }: { id: string; name: string }) => renameClientList(id, name), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); toast.success("Lista renomeada."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível renomear a lista.") });
+  const updateListProfile = useMutation({ mutationFn: ({ id, profileId }: { id: string; profileId: string | null }) => updateClientListAccessProfile(id, profileId), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["client-lists"] }); toast.success("Perfil da lista atualizado."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível alterar o perfil da lista.") });
   const saveMapping = useMutation({ mutationFn: ({ id, input }: { id: string; input: { identity_mapping: Record<string, string | null>; version_default?: string | null; name_field_id?: string | null } }) => updateSystemSpreadsheetMapping(id, input), onSuccess: () => { setMappingSheetId(null); void queryClient.invalidateQueries({ queryKey: ["system-spreadsheets"] }); void queryClient.invalidateQueries({ queryKey: ["clients"] }); if (openSheetId) void openSheet.refetch(); toast.success("Mapeamento da planilha atualizado."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível salvar o mapeamento.") });
 
   const filtered = useMemo(() => {
@@ -324,7 +328,7 @@ function ClientesPage() {
       <Card className="mb-4">
         <CardContent className="space-y-3 p-4">
           <div><p className="text-sm font-medium">Listas / grupos</p><p className="text-xs text-muted-foreground">Segmentação operacional independente do nome da Planilha do Sistema.</p></div>
-          <div className="flex flex-wrap gap-2">{(clientLists.data ?? []).map((list) => { const count = list.client_count ?? 0; return <div key={list.id} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"><span>{list.name} · {count} clientes</span><Button size="sm" variant="ghost" onClick={() => { const name = window.prompt("Novo nome da lista", list.name)?.trim(); if (name && name !== list.name) renameList.mutate({ id: list.id, name }); }}><Pencil className="h-4 w-4" /> Renomear</Button><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a lista ${list.name}?`)) return; const deleteClientsToo = count > 0 && window.confirm(`Excluir também os ${count} clientes associados?`); removeList.mutate({ id: list.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div>; })}</div>
+          <div className="flex flex-wrap gap-2">{(clientLists.data ?? []).map((list) => { const count = list.client_count ?? 0; const profile = accessProfiles.data?.find((item) => item.id === list.access_profile_id); return <div key={list.id} className="flex min-w-[280px] flex-col gap-2 rounded-md border border-border px-3 py-2 text-sm"><div className="flex items-center justify-between gap-2"><span>{list.name} · {count} clientes</span><span className="text-xs text-muted-foreground">{profile ? profile.display_name : "Perfil não definido"}</span></div><div className="flex flex-wrap items-center gap-2"><Select value={list.access_profile_id || "none"} onValueChange={(value) => updateListProfile.mutate({ id: list.id, profileId: value === "none" ? null : value })}><SelectTrigger className="h-8 w-[190px] text-xs"><SelectValue placeholder="Perfil de acesso" /></SelectTrigger><SelectContent><SelectItem value="none">Perfil não definido</SelectItem>{(accessProfiles.data ?? []).map((item) => <SelectItem key={item.id} value={item.id}>{item.display_name}</SelectItem>)}</SelectContent></Select><Button size="sm" variant="ghost" onClick={() => { const name = window.prompt("Novo nome da lista", list.name)?.trim(); if (name && name !== list.name) renameList.mutate({ id: list.id, name }); }}><Pencil className="h-4 w-4" /> Renomear</Button><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { if (!window.confirm(`Excluir a lista ${list.name}?`)) return; const deleteClientsToo = count > 0 && window.confirm(`Excluir também os ${count} clientes associados?`); removeList.mutate({ id: list.id, deleteClientsToo }); }}><Trash2 className="h-4 w-4" /> Excluir</Button></div></div>; })}</div>
         </CardContent>
       </Card>
 

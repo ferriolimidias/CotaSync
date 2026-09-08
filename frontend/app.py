@@ -2741,29 +2741,14 @@ elif menu_selecionado == "Configurações":
             format_func=lambda value: "Entrada do sistema a cada Run" if value == "external_entry_each_run" else "Reentrada pelo grafo aprendido",
             index=1 if external_config.get("run_start_strategy") == "external_entry_each_run" else 0,
         )
-        st.markdown("**Conta Microsoft salva**")
-        microsoft_saved_account_text = st.text_input(
-            "Nome da conta",
-            value=str(external_config.get("microsoft_saved_account_text") or "Priscila Susin"),
-        )
-        microsoft_saved_account_identifier = st.text_input(
-            "Identificador/e-mail da conta",
-            value=str(
-                external_config.get("microsoft_saved_account_identifier")
-                or external_config.get("access_profile_email_or_identifier")
-                or "D0004267@rdmz.com.br"
-            ),
-        )
         with st.expander("Avançado / Diagnóstico", expanded=False):
             st.write(
                 {
                     "validation": external_config.get("validation", ""),
                     "auth_success_text": external_config.get("auth_success_text", ""),
                     "auth_success_selector": external_config.get("auth_success_selector", ""),
-                    "access_profile_name": external_config.get("access_profile_name", ""),
                     "expected_system_host": external_config.get("expected_system_host", ""),
                     "microsoft_hosts": external_config.get("microsoft_hosts", []),
-                    "microsoft_saved_account_selector": external_config.get("microsoft_saved_account_selector", ""),
                 }
             )
         if st.form_submit_button("Salvar sistema externo", type="primary", use_container_width=True):
@@ -2779,13 +2764,6 @@ elif menu_selecionado == "Configurações":
                         "validation": str(external_config.get("validation") or ""),
                         "auth_success_text": str(external_config.get("auth_success_text") or ""),
                         "auth_success_selector": str(external_config.get("auth_success_selector") or ""),
-                        "access_profile_name": str(external_config.get("access_profile_name") or ""),
-                        "access_profile_email_or_identifier": microsoft_saved_account_identifier,
-                        "microsoft_saved_account_identifier": microsoft_saved_account_identifier,
-                        "microsoft_saved_account_selector": str(
-                            external_config.get("microsoft_saved_account_selector") or ""
-                        ),
-                        "microsoft_saved_account_text": microsoft_saved_account_text,
                         "expected_system_host": str(external_config.get("expected_system_host") or ""),
                         "microsoft_hosts": external_config.get("microsoft_hosts", []),
                     },

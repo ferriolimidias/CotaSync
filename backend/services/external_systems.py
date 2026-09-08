@@ -62,6 +62,17 @@ def _string_keys() -> tuple[str, ...]:
     )
 
 
+# Deprecated compatibility metadata. New identity flows resolve profiles by ID
+# and must never write these fields as the source of an external identity.
+_LEGACY_IDENTITY_KEYS = (
+    "access_profile_name",
+    "access_profile_email_or_identifier",
+    "microsoft_saved_account_identifier",
+    "microsoft_saved_account_selector",
+    "microsoft_saved_account_text",
+)
+
+
 def _normalize_microsoft_hosts(raw: Any) -> list[str]:
     if isinstance(raw, list):
         hosts = []
@@ -127,8 +138,17 @@ def load_current_external_system() -> dict[str, Any]:
 
 def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
     result = empty_external_system()
+    legacy_values: dict[str, Any] = {}
+    try:
+        with SessionLocal() as existing_session:
+            existing_row = existing_session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
+            legacy_values = dict(existing_row.config or {}) if existing_row is not None else {}
+    except Exception:
+        legacy_values = {}
     for key in _string_keys():
-        if key == "external_login_url":
+        if key in _LEGACY_IDENTITY_KEYS:
+            result[key] = str(legacy_values.get(key) or "").strip()
+        elif key == "external_login_url":
             result[key] = str(payload.get(key) or "")
         else:
             result[key] = str(payload.get(key) or "").strip()

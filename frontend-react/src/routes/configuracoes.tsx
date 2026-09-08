@@ -14,7 +14,6 @@ import { Switch } from "@/components/ui/switch";
 import {
   getExternalSessionStatus,
   getExternalSystemConfig,
-  openExternalLogin,
   saveExternalSystemConfig,
   validateExternalSession,
   getLearningAISettings,
@@ -28,9 +27,9 @@ import {
   listAccessProfiles,
   createAccessProfile,
   validateAccessProfile,
+  authenticateAccessProfile,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
-import { externalSessionStatusLabel, loginModeLabel } from "@/lib/status-labels";
 import type { ExternalSystemConfig } from "@/types/api";
 
 export const Route = createFileRoute("/configuracoes")({
@@ -46,7 +45,6 @@ function ConfigPage() {
   const [form, setForm] = useState<ExternalSystemConfig>({
     external_system_name: "",
     external_login_url: "",
-    access_profile_email_or_identifier: "",
     expected_system_host: "",
     entry_url: "",
     run_start_strategy: "persistent_graph_reentry",
@@ -54,6 +52,7 @@ function ConfigPage() {
   const [profileForm, setProfileForm] = useState({ display_name: "", login_identifier: "", external_code: "" });
   const [aiForm, setAiForm] = useState({ enabled: false, provider: "openai_compatible", model: "gpt-4o-mini", base_url: "", api_key: "" });
   const [googleCredential, setGoogleCredential] = useState<File | null>(null);
+  const [profileStatuses, setProfileStatuses] = useState<Record<string, string>>({});
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
@@ -105,25 +104,6 @@ function ConfigPage() {
         error instanceof Error ? error.message : "Não foi possível salvar a configuração.",
       ),
   });
-  const openLogin = useMutation({
-    mutationFn: (force: boolean) => openExternalLogin(force),
-    onSuccess: (result) => {
-      toast.message(
-        result.status === "already_connected"
-          ? "A sessão externa já está conectada."
-          : "Navegador aberto na URL de login configurada.",
-      );
-      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
-      void queryClient.invalidateQueries({ queryKey: ["browser"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      void navigate({ to: "/configuracoes/navegador" });
-      void result;
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Não foi possível abrir a sessão externa.",
-      ),
-  });
   const validate = useMutation({
     mutationFn: validateExternalSession,
     onSuccess: (result) => {
@@ -140,8 +120,6 @@ function ConfigPage() {
       setForm({
         external_system_name: externalConfig.data.external_system_name || "",
         external_login_url: externalConfig.data.external_login_url || "",
-        access_profile_email_or_identifier:
-          externalConfig.data.access_profile_email_or_identifier || "",
         expected_system_host: externalConfig.data.expected_system_host || "",
         entry_url: externalConfig.data.entry_url || externalConfig.data.external_login_url || "",
         run_start_strategy: externalConfig.data.run_start_strategy || "persistent_graph_reentry",
@@ -158,7 +136,7 @@ function ConfigPage() {
   }
 
   const loginConfigured = Boolean(form.external_login_url.trim());
-  const sessionStatus = external.data?.session_status;
+  const microsoftStatus = external.data?.microsoft_status || "not_verified";
 
   if (location.pathname === "/configuracoes/navegador") {
     return <Outlet />;
@@ -245,7 +223,7 @@ function ConfigPage() {
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="external-login-url">URL de login</Label>
+                <Label htmlFor="external-login-url">URL de entrada/login</Label>
                 <Input
                   id="external-login-url"
                   value={form.external_login_url}
@@ -260,17 +238,6 @@ function ConfigPage() {
                   <option value="persistent_graph_reentry">Reentrada pelo grafo aprendido</option>
                 </select>
                 <p className="text-xs text-muted-foreground">O navegador continua persistente; somente a nova Run volta ao entry point configurado.</p>
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="external-identifier">Usuário / identificador</Label>
-                <Input
-                  id="external-identifier"
-                  value={form.access_profile_email_or_identifier}
-                  onChange={(event) =>
-                    updateForm("access_profile_email_or_identifier", event.target.value)
-                  }
-                  placeholder="email, login, matrícula ou identificador"
-                />
               </div>
               <details className="rounded-md border border-border bg-muted/20 px-3 py-2">
                 <summary className="cursor-pointer text-sm font-medium text-foreground">
@@ -304,23 +271,22 @@ function ConfigPage() {
                   {external.data?.external_system_configured ? "Configurado" : "Não configurado"}
                 </BadgeStatus>
               </StatusRow>
-              <StatusRow label="Sessão">
+              <StatusRow label="Browser">
                 <BadgeStatus
-                  tone={
-                    external.data?.session_status === "authenticated"
-                      ? "success"
-                      : external.data?.external_system_configured
-                        ? "warning"
-                        : "neutral"
-                  }
+                  tone={external.data?.browser_status === "ready" ? "success" : "warning"}
                 >
-                  {externalSessionStatusLabel(external.data?.session_status)}
+                  {external.data?.browser_status === "ready" ? "Pronto" : "Indisponível"}
                 </BadgeStatus>
               </StatusRow>
-              <StatusRow label="Login">
-                <span className="whitespace-nowrap text-sm text-foreground">
-                  {loginModeLabel(external.data?.login_mode || external.data?.automation)}
-                </span>
+              <StatusRow label="Microsoft">
+                <BadgeStatus tone={microsoftStatus === "available" ? "success" : microsoftStatus === "reauth_required" ? "warning" : "neutral"}>
+                  {microsoftStatus === "available" ? `${external.data?.access_profile_count || 0} perfil(is) disponível(is)` : microsoftStatus === "account_picker" ? "Aguardando seleção de perfil" : microsoftStatus === "reauth_required" ? "Reautenticação necessária" : `${external.data?.access_profile_count || 0} perfil(is) não verificado(s)`}
+                </BadgeStatus>
+              </StatusRow>
+              <StatusRow label="Sistema externo">
+                <BadgeStatus tone={external.data?.external_system_status === "inside" ? "success" : "neutral"}>
+                  {external.data?.external_system_status === "inside" ? "Dentro do sistema" : "Fora do sistema"}
+                </BadgeStatus>
               </StatusRow>
             </div>
 
@@ -330,8 +296,11 @@ function ConfigPage() {
                 <div className="space-y-2">
                   {(profiles.data || []).map((profile) => (
                     <div key={profile.id} className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
-                      <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div></div>
-                      <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => result.available ? toast.success("Conta disponível no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual.")).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
+                      <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div><div className="mt-1 text-xs text-muted-foreground">Microsoft: {profileStatuses[profile.id] || "Não verificado"}</div></div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => { const status = result.profile.session_status === "reauth_required" ? "Reautenticação necessária" : result.profile.session_status === "account_not_found" ? "Conta não encontrada nesta sessão" : result.available ? "Disponível" : "Não verificado"; setProfileStatuses((current) => ({ ...current, [profile.id]: status })); result.available ? toast.success("Conta disponível no navegador.") : result.profile.session_status === "reauth_required" ? toast.warning("Faça a autenticação manual no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual."); }).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
+                        <Button type="button" size="sm" onClick={() => authenticateAccessProfile(profile.id).then(() => { toast.success(`Entrada aberta para ${profile.display_name}. Conclua a autenticação manual no navegador.`); void navigate({ to: "/configuracoes/navegador" }); }).catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível abrir a autenticação do perfil."))} disabled={!loginConfigured}><ExternalLink className="h-4 w-4" /> Autenticar</Button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -352,20 +321,10 @@ function ConfigPage() {
               <Button
                 className="w-full sm:w-auto"
                 variant="outline"
-                onClick={() => openLogin.mutate(true)}
-                disabled={openLogin.isPending || !loginConfigured}
-                title={!loginConfigured ? "Salve uma URL de login primeiro." : undefined}
-              >
-                <ShieldCheck className="h-4 w-4" />
-                {sessionStatus === "authenticated" ? "Reiniciar login" : "Iniciar login"}
-              </Button>
-              <Button
-                className="w-full sm:w-auto"
-                variant="outline"
                 onClick={() => validate.mutate()}
                 disabled={validate.isPending}
               >
-                <ShieldCheck className="h-4 w-4" /> Validar sessão
+                <ShieldCheck className="h-4 w-4" /> Verificar acessos
               </Button>
             </div>
           </CardContent>

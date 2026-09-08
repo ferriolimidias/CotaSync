@@ -186,12 +186,17 @@ export async function getSystemSpreadsheets() {
 }
 
 export async function getClientLists() {
-  const payload = await apiFetch<{ client_lists: Array<{ id: string; name: string; active: boolean; client_count?: number; active_client_count?: number; spreadsheet_count?: number }> }>("/api/v1/client-lists");
+  const payload = await apiFetch<{ client_lists: Array<{ id: string; name: string; active: boolean; access_profile_id?: string | null; client_count?: number; active_client_count?: number; spreadsheet_count?: number }> }>("/api/v1/client-lists");
   return payload.client_lists;
 }
 
 export async function renameClientList(id: string, name: string) {
   const payload = await apiFetch<{ client_list: { id: string; name: string } }>(`/api/v1/client-lists/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+  return payload.client_list;
+}
+
+export async function updateClientListAccessProfile(id: string, access_profile_id: string | null) {
+  const payload = await apiFetch<{ client_list: { id: string; name: string; access_profile_id?: string | null } }>(`/api/v1/client-lists/${id}`, { method: "PATCH", body: JSON.stringify({ access_profile_id }) });
   return payload.client_list;
 }
 
@@ -622,6 +627,10 @@ export async function createAccessProfile(input: { display_name: string; login_i
 
 export async function validateAccessProfile(id: string) {
   return apiFetch<{ available: boolean; profile: AccessProfile; diagnostic?: Record<string, unknown> }>(`/api/v1/access-profiles/${id}/validate`, { method: "POST" });
+}
+
+export async function authenticateAccessProfile(id: string) {
+  return apiFetch<{ browser_opened: boolean; entry_url: string; profile: AccessProfile }>(`/api/v1/access-profiles/${id}/authenticate`, { method: "POST" });
 }
 
 export async function createLearningSession() {

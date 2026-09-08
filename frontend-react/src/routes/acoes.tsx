@@ -120,11 +120,18 @@ function ActionCard({ action }: { action: ApiAction }) {
             label="Variáveis"
             value={action.variables.map((item) => item.key).join(", ") || "Nenhuma"}
           />
+          <Info label="Perfil de acesso" value={action.required_access_profile_id ? "Configurado" : "Não definido"} />
+          <Info label="Início" value={action.run_start_strategy === "external_entry_each_run" ? "Entrada do sistema" : "Reentrada pelo grafo"} />
         </div>
         {action.legacy_unconfigured && (
           <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
             Ação legada sem URL inicial segura. Ela permanece visível, mas deve ser normalizada por
             novo aprendizado.
+          </div>
+        )}
+        {!action.required_access_profile_id && !action.legacy_unconfigured && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
+            Perfil de acesso não definido. A ação não pode ser usada em lote até ser ensinada ou configurada com um perfil.
           </div>
         )}
         <div className="flex flex-wrap gap-2">

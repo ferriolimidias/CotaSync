@@ -26,6 +26,7 @@ class ExternalSystemRequest(BaseModel):
     validation: str = ""
     auth_success_text: str = ""
     auth_success_selector: str = ""
+    # Deprecated compatibility fields. New UI/runtime resolve identities by profile ID.
     access_profile_name: str = ""
     access_profile_email_or_identifier: str = ""
     microsoft_saved_account_identifier: str = ""

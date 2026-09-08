@@ -5,8 +5,10 @@ from uuid import uuid4
 
 import tests  # noqa: F401
 from backend.db import Action, ActionVersion, ClientList, ExternalSystem, SessionLocal
+from backend.api.v1 import _external_system_config_payload
 from backend.services.access_profiles import AccessProfileError, create_access_profile, list_access_profiles, update_access_profile, validate_access_bootstrap
-from backend.services.session_guardian import detect_microsoft_account_picker
+from backend.services.external_systems import load_current_external_system
+from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 
 
 class AccessProfileTests(unittest.TestCase):
@@ -36,6 +38,15 @@ class AccessProfileTests(unittest.TestCase):
         result = detect_microsoft_account_picker("Pick an account João Signed in Maria Signed in", ["D0004267@rdmz.com.br"])
         self.assertFalse(result["profile_available"])
 
+    def test_multiple_profiles_match_by_identifier_after_reordering(self) -> None:
+        text = "Pick an account Maria Signed in João Signed in Priscila Susin D0004267@rdmz.com.br Signed in"
+        result = detect_microsoft_account_picker(text, ["D0004267@rdmz.com.br", "joao@example.test", "maria@example.test"])
+        self.assertEqual(result["available_identifiers"], ["D0004267@rdmz.com.br"])
+
+    def test_manual_reauthentication_is_not_session_disconnect(self) -> None:
+        self.assertEqual(classify_microsoft_auth_state("Enter password"), "password_required")
+        self.assertEqual(classify_microsoft_auth_state("Approve sign in request"), "mfa_required")
+
     def test_bootstrap_rejects_ordinal_account_selector(self) -> None:
         result = validate_access_bootstrap({"access_bootstrap": [{"selector": ".account:nth-child(1)"}]}, profile_id="profile")
         self.assertFalse(result["valid"])
@@ -52,6 +63,11 @@ class AccessProfileTests(unittest.TestCase):
             db.add(ClientList(id=f"list-{uuid4()}", tenant_id="default", name=f"Lista {uuid4()}", access_profile_id=profile["id"], active=True))
         with self.assertRaises(AccessProfileError):
             update_access_profile(profile["id"], active=False)
+
+    def test_legacy_global_identifier_is_not_returned_by_new_system_payload(self) -> None:
+        config = load_current_external_system()
+        payload = _external_system_config_payload(config)
+        self.assertNotIn("access_profile_email_or_identifier", payload)
 
 
 if __name__ == "__main__":

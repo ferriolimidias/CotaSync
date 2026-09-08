@@ -110,6 +110,8 @@ export type ApiAction = {
   learning_mode?: string | null;
   needs_attention?: boolean;
   legacy_unconfigured?: boolean;
+  required_access_profile_id?: string | null;
+  run_start_strategy?: string;
   published_version?: { id: string | null; status: string };
   last_run?: ApiRun | null;
   learning_warnings?: string[];
@@ -232,6 +234,10 @@ export type ExternalSessionStatus = {
   validation_mode?: string;
   session_status: string;
   microsoft_session_available?: boolean;
+  browser_status?: "ready" | "offline" | "unknown" | string;
+  microsoft_status?: "available" | "account_picker" | "reauth_required" | "not_verified" | string;
+  external_system_status?: "inside" | "outside" | "unknown" | string;
+  access_profile_count?: number;
   expected_system_host_configured?: boolean;
   updated_at?: string | null;
 };
@@ -239,7 +245,6 @@ export type ExternalSessionStatus = {
 export type ExternalSystemConfig = {
   external_system_name: string;
   external_login_url: string;
-  access_profile_email_or_identifier: string;
   expected_system_host: string;
   entry_url?: string;
   run_start_strategy?: "persistent_graph_reentry" | "external_entry_each_run" | string;

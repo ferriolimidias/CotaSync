@@ -7,7 +7,6 @@ import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
 import { Button } from "@/components/ui/button";
 import { getExternalSessionStatus, validateExternalSession } from "@/services/api";
-import { externalSessionStatusLabel } from "@/lib/status-labels";
 
 export const Route = createFileRoute("/configuracoes/navegador")({
   head: () => ({ meta: [{ title: "Navegador — CotaSync" }] }),
@@ -50,17 +49,14 @@ function BrowserWorkspacePage() {
           </Button>
         }
         sessionStatus={
-          <BadgeStatus
-            tone={
-              external.data?.session_status === "authenticated"
-                ? "success"
-                : external.data?.external_system_configured
-                  ? "warning"
-                  : "neutral"
-            }
-          >
-            Sessão: {externalSessionStatusLabel(external.data?.session_status)}
-          </BadgeStatus>
+          <div className="flex flex-wrap items-center gap-2">
+            <BadgeStatus tone={external.data?.browser_status === "ready" ? "success" : "warning"}>
+              Browser: {external.data?.browser_status === "ready" ? "Pronto" : "Indisponível"}
+            </BadgeStatus>
+            <BadgeStatus tone={external.data?.external_system_status === "inside" ? "success" : "neutral"}>
+              Sistema: {external.data?.external_system_status === "inside" ? "Dentro" : "Fora do sistema"}
+            </BadgeStatus>
+          </div>
         }
         actions={
           <Button
@@ -69,7 +65,7 @@ function BrowserWorkspacePage() {
             onClick={() => validate.mutate()}
             disabled={validate.isPending}
           >
-            <ShieldCheck className="h-4 w-4" /> Validar sessão
+            <ShieldCheck className="h-4 w-4" /> Verificar acessos
           </Button>
         }
       />
