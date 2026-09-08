@@ -83,6 +83,38 @@ def resolve_transition_step(transition: dict[str, Any], steps: list[dict[str, An
     return None
 
 
+def fresh_run_query_start_sequence(
+    transitions: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+) -> int | None:
+    """Find the first transition needed to establish a new client context.
+
+    A persistent browser may still show the previous run's result page.  For
+    a new run, the first client-input transition (and the transition that
+    opens its form, when present) is the deterministic restart boundary.  It
+    is derived from learned step metadata, never from a business selector or
+    array position.
+    """
+    ordered = sorted(
+        (item for item in transitions if isinstance(item, dict)),
+        key=lambda item: int(item.get("sequence_index", item.get("step_index", 0)) or 0),
+    )
+    resolved_steps: list[tuple[int, dict[str, Any]]] = []
+    for transition in ordered:
+        resolved = resolve_transition_step(transition, steps)
+        if resolved is not None and isinstance(resolved.get("step"), dict):
+            resolved_steps.append((int(transition.get("sequence_index", transition.get("step_index", 0)) or 0), resolved["step"]))
+    for position, (sequence_index, step) in enumerate(resolved_steps):
+        action_type = str(step.get("tipo") or step.get("type") or "").strip().lower()
+        variable = str(step.get("variavel") or step.get("variable_key") or "").strip()
+        if action_type != "preencher" or not variable:
+            continue
+        if position > 0:
+            return resolved_steps[position - 1][0]
+        return sequence_index
+    return None
+
+
 def validate_compiled_action_graph(action: dict[str, Any]) -> dict[str, Any]:
     steps = action.get("robust_steps") or action.get("passos_playwright") or []
     states = action.get("learned_states") or []
@@ -426,7 +458,7 @@ def ordered_graph_suffix(
     )
     selected = [
         item for item in ordered
-        if int(item.get("sequence_index", item.get("step_index", -1)) or -1) >= start_sequence_index
+        if int(item.get("sequence_index", item.get("step_index", -1))) >= start_sequence_index
     ]
     if not selected:
         return [] if str(target_state_id) else None

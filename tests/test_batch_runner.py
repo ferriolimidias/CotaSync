@@ -90,8 +90,22 @@ class BatchRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         with SessionLocal.begin() as session:
             session.query(WorkerInstance).delete()
-            session.query(BatchItem).delete()
-            session.query(DbBatch).delete()
+            # Test cleanup must never remove operational batches created by
+            # the running application.  The previous blanket delete erased
+            # real batch evidence from the shared test database.
+            test_batch_ids = [
+                row[0]
+                for row in session.query(DbBatch.id)
+                .filter(DbBatch.created_by.in_(["api", "test"]))
+                .all()
+            ]
+            if test_batch_ids:
+                session.query(BatchItem).filter(BatchItem.batch_id.in_(test_batch_ids)).delete(
+                    synchronize_session=False
+                )
+                session.query(DbBatch).filter(DbBatch.id.in_(test_batch_ids)).delete(
+                    synchronize_session=False
+                )
             session.query(DbRun).filter(DbRun.run_origin == "automated_test").delete()
 
     def test_parse_csv_preserves_leading_zeroes_and_ignores_blank_rows(self) -> None:
@@ -373,8 +387,12 @@ class BatchRunnerTests(unittest.TestCase):
 
         self.assertEqual(first["batch_id"], second["batch_id"])
         with SessionLocal() as session:
-            self.assertEqual(session.query(DbBatch).count(), 1)
-            self.assertEqual(session.query(BatchItem).count(), 1)
+            test_batches = session.query(DbBatch).filter(DbBatch.created_by.in_(["api", "test"]))
+            self.assertEqual(test_batches.count(), 1)
+            self.assertEqual(
+                session.query(BatchItem).filter(BatchItem.batch_id.in_(item.id for item in test_batches.all())).count(),
+                1,
+            )
 
     def test_idempotency_same_key_different_payload_conflicts(self) -> None:
         with patch("backend.services.batch_runner.find_action", return_value=fake_action()):
@@ -413,7 +431,7 @@ class BatchRunnerTests(unittest.TestCase):
 
         self.assertNotEqual(first["batch_id"], second["batch_id"])
         with SessionLocal() as session:
-            self.assertEqual(session.query(DbBatch).count(), 2)
+            self.assertEqual(session.query(DbBatch).filter(DbBatch.created_by.in_(["api", "test"])).count(), 2)
 
     def test_idempotency_race_same_user_same_payload_creates_one_batch(self) -> None:
         def submit() -> str:
@@ -432,8 +450,12 @@ class BatchRunnerTests(unittest.TestCase):
 
         self.assertEqual(results[0], results[1])
         with SessionLocal() as session:
-            self.assertEqual(session.query(DbBatch).count(), 1)
-            self.assertEqual(session.query(BatchItem).count(), 1)
+            test_batches = session.query(DbBatch).filter(DbBatch.created_by.in_(["api", "test"]))
+            self.assertEqual(test_batches.count(), 1)
+            self.assertEqual(
+                session.query(BatchItem).filter(BatchItem.batch_id.in_(item.id for item in test_batches.all())).count(),
+                1,
+            )
 
     def test_two_workers_do_not_claim_same_batch(self) -> None:
         with patch("backend.services.batch_runner.find_action", return_value=fake_action()):

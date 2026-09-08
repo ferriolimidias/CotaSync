@@ -29,6 +29,8 @@ class RunRecord(BaseModel):
     run_origin: RunOrigin = "operational"
     requested_by: str = "api"
     session_id: str | None = None
+    client_id: str | None = None
+    batch_id: str | None = None
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None

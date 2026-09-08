@@ -41,6 +41,7 @@ from backend.services.learned_graph import (
     ordered_graph_path,
     ordered_graph_suffix,
     evaluate_transition_satisfaction,
+    fresh_run_query_start_sequence,
     transition_satisfied,
 )
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
@@ -967,6 +968,7 @@ async def executar_acao_rapida(
     run_id: str = "",
     *,
     _replan_attempts: int = 0,
+    _same_run_reentry: bool = False,
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Desktop replay), repetindo os passos técnicos.
@@ -1272,6 +1274,16 @@ async def executar_acao_rapida(
                         or (step_to_execute or {}).get("before_state_id")
                         or ""
                     )
+                    # A fresh run intentionally starts from the previous
+                    # result page's structural state and executes the learned
+                    # query boundary again.  Do not turn that planned fresh
+                    # boundary into a same-run replan before its first step.
+                    if (
+                        fresh_run_requires_query
+                        and current_match.get("status") == "matched"
+                        and str(current_match.get("state_id") or "") == graph_target_state(action_config)
+                    ):
+                        return current_match
                     if current_match.get("status") == "matched" and (
                         not expected_state or str(current_match.get("state_id") or "") == expected_state
                     ):
@@ -1542,6 +1554,7 @@ async def executar_acao_rapida(
             _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
             graph_plan: dict[str, Any] = {"execution_model": "legacy_linear"}
+            fresh_run_requires_query = False
             if graph_mode:
                 graph_states = action_config.get("learned_states") or []
                 graph_transitions = action_config.get("learned_transitions") or []
@@ -1562,6 +1575,31 @@ async def executar_acao_rapida(
                         },
                     )
                 graph_path = ordered_graph_path(graph_transitions, str(current_match["state_id"]), target_state_id)
+                # The browser context is intentionally persistent, but this
+                # invocation is a new logical run unless it is an internal
+                # replan of the same run.  A result page from the previous
+                # client must therefore not satisfy the new run.
+                if not _same_run_reentry:
+                    fresh_run_requires_query = True
+                    canonical_steps_for_boundary = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
+                    if isinstance(canonical_steps_for_boundary, list) and (
+                        str(current_match["state_id"]) == str(target_state_id) or graph_path == []
+                    ):
+                        restart_sequence = fresh_run_query_start_sequence(graph_transitions, canonical_steps_for_boundary)
+                        if restart_sequence is not None:
+                            fresh_path = ordered_graph_suffix(graph_transitions, restart_sequence, target_state_id)
+                            if fresh_path is None:
+                                raise SessionGuardianError(
+                                    "O grafo aprendido não possui caminho completo para uma nova consulta.",
+                                    {
+                                        "reason": "learned_graph_new_run_path_not_found",
+                                        "execution_model": "learned_graph",
+                                        "current_state_id": current_match["state_id"],
+                                        "target_state_id": target_state_id,
+                                        "restart_sequence_index": restart_sequence,
+                                    },
+                                )
+                            graph_path = fresh_path
                 reentry_sequence_index: int | None = None
                 ordered_transitions = sorted(
                     (item for item in graph_transitions if isinstance(item, dict)),
@@ -1571,6 +1609,8 @@ async def executar_acao_rapida(
                 # In that case the state match alone cannot prove the click;
                 # use its learned postcondition to recover the cursor.
                 for transition in ordered_transitions:
+                    if fresh_run_requires_query:
+                        break
                     source = str(transition.get("from_state_id") or transition.get("from_state") or "")
                     target = str(transition.get("to_state_id") or transition.get("to_state") or "")
                     if target != str(current_match["state_id"]) or source == target:
@@ -1678,6 +1718,9 @@ async def executar_acao_rapida(
                     "path_step_indices": [int(resolve_transition_step(item, canonical_passos_playwright)["index"]) for item in graph_path],
                     "path_step_ids": selected_step_ids,
                     "path_length": len(graph_path),
+                    "new_run_isolation": "fresh_client_context" if fresh_run_requires_query else "same_run_reentry",
+                    "fresh_query_required": fresh_run_requires_query,
+                    "same_run_reentry": _same_run_reentry,
                 }
                 resume_index = 0
                 skipped_steps = []
@@ -1855,7 +1898,7 @@ async def executar_acao_rapida(
                                 except Exception:
                                     valor_atual = None
                                 if valor_atual is not None:
-                                    if graph_mode and transition_satisfied(
+                                    if graph_mode and not fresh_run_requires_query and transition_satisfied(
                                         {"action_type": tipo_acao}, passo,
                                         current_value=valor_atual,
                                         expected_value=valor_final,
@@ -1936,6 +1979,9 @@ async def executar_acao_rapida(
                             before_html=query_before_html,
                             navigation_observed=navigation_observed,
                         )
+                        if client_field_keys and client_field_keys.issubset(filled_client_field_keys):
+                            query_transition_confirmed = True
+                            query_transition_step_index = step_index
                     elif expected_selector and tipo_acao != "extrair_texto":
                         await verify_postcondition(page, expected_selector, step_index)
                     if is_client_query_transition:
@@ -2071,6 +2117,10 @@ async def executar_acao_rapida(
                 query_result_confirmed = True
             if not query_result_confirmed:
                 raise RuntimeError("query_result_not_confirmed: a pagina final nao corresponde aos dados do cliente")
+            if fresh_run_requires_query and client_field_keys and not query_transition_confirmed:
+                raise RuntimeError(
+                    "output_provenance_not_confirmed: a nova execução não confirmou a consulta do cliente atual"
+                )
             extraction_attention: dict[str, Any] = {}
             contract = extraction_contract_from_action(action_config if isinstance(action_config, dict) else {})
             if contract:
@@ -2121,6 +2171,19 @@ async def executar_acao_rapida(
                 "query_result_confirmed": query_result_confirmed,
                 "query_transition_confirmed": query_transition_confirmed,
                 "query_transition_step_index": query_transition_step_index,
+                "output_provenance": {
+                    "run_id": run_id,
+                    "client_id": str(dados_variaveis.get("client_id") or "") or None,
+                    "extracted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "query_transition_confirmed": query_transition_confirmed,
+                    "query_transition_step_index": query_transition_step_index,
+                    "executed_step_indices": [
+                        item.get("step_index")
+                        for item in step_trace
+                        if item.get("status") == "success"
+                    ],
+                    "execution_context": "fresh_client_context" if fresh_run_requires_query else "same_run_reentry",
+                },
                 "graph_plan": graph_plan,
                 "checkpoint_diagnostics": checkpoint_diagnostics,
                 "step_trace": step_trace,
@@ -2142,6 +2205,7 @@ async def executar_acao_rapida(
             action_config,
             run_id,
             _replan_attempts=_replan_attempts + 1,
+            _same_run_reentry=True,
         )
     except SessionGuardianError as exc:
         _LOGGER.info(f"[ERRO] Sessao invalida na execução rápida '{nome_acao}': {exc}")

@@ -14,6 +14,7 @@ from backend.services.learned_graph import (
     ordered_graph_suffix,
     transition_kind,
     evaluate_transition_satisfaction,
+    fresh_run_query_start_sequence,
 )
 from backend.services.demo_session import _attach_learned_output_state
 
@@ -54,6 +55,31 @@ class FakePage:
 
 
 class LearnedGraphTests(unittest.TestCase):
+    def test_new_run_starts_before_first_client_input_not_at_residual_result(self) -> None:
+        steps = [
+            {"step_id": "login", "tipo": "clicar", "seletor": "#login"},
+            {"step_id": "open-form", "tipo": "clicar", "seletor": "#open"},
+            {"step_id": "grupo", "tipo": "preencher", "seletor": "#grupo", "variavel": "grupo"},
+            {"step_id": "cota", "tipo": "preencher", "seletor": "#cota", "variavel": "cota"},
+            {"step_id": "lookup", "tipo": "clicar", "seletor": "#lookup"},
+        ]
+        transitions = [
+            {"sequence_index": 0, "from_state_id": "login", "to_state_id": "login", "step_id": "login"},
+            {"sequence_index": 1, "from_state_id": "login", "to_state_id": "form", "step_id": "open-form"},
+            {"sequence_index": 2, "from_state_id": "form", "to_state_id": "form", "step_id": "grupo"},
+            {"sequence_index": 3, "from_state_id": "form", "to_state_id": "form", "step_id": "cota"},
+            {"sequence_index": 4, "from_state_id": "form", "to_state_id": "result", "step_id": "lookup"},
+        ]
+        self.assertEqual(fresh_run_query_start_sequence(transitions, steps), 1)
+        self.assertEqual([item["sequence_index"] for item in ordered_graph_suffix(transitions, 1, "result") or []], [1, 2, 3, 4])
+
+    def test_new_run_boundary_is_independent_of_client_result_value(self) -> None:
+        steps = [{"step_id": "lookup", "tipo": "clicar", "seletor": "#lookup"}]
+        transitions = [{"sequence_index": 0, "from_state_id": "form", "to_state_id": "result", "step_id": "lookup"}]
+        self.assertEqual(fresh_run_query_start_sequence(transitions, steps), None)
+        # A value such as 040 is not part of graph identity or restart planning.
+        self.assertIsNone(fresh_run_query_start_sequence(transitions, steps))
+
     def test_visual_contract_creates_output_state_without_extraction_step(self) -> None:
         steps = [
             {
