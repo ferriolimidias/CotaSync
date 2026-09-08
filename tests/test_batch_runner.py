@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from backend.db import Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, WorkerInstance
+from backend.db import Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal, WorkerInstance
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
 from backend.services.batch_runner import (
@@ -196,6 +196,39 @@ class BatchRunnerTests(unittest.TestCase):
         self.assertEqual(events, ["start-110", "finish-110", "start-111", "finish-111"])
         self.assertEqual(loaded["status"], "completed")
         self.assertEqual([row["status"] for row in loaded["rows"]], ["success", "success"])
+
+    def test_worker_passes_internal_client_id_to_output_persistence_path(self) -> None:
+        captured: list[dict[str, str]] = []
+
+        async def run_action(_action: ActionDetail, request: ActionRunRequest) -> RunRecord:
+            captured.append({key: str(value) for key, value in request.variables.items()})
+            return persist_fake_run(fake_run(1))
+
+        async def scenario() -> dict:
+            with tempfile.TemporaryDirectory() as tmp, patch(
+                "backend.services.batch_runner.find_action", return_value=fake_action()
+            ), patch("backend.worker.find_action", return_value=fake_action()), patch(
+                "backend.worker.run_action_sync", side_effect=run_action
+            ):
+                batch = create_batch(
+                    action_id="numero-de-parcelas-pagas",
+                    rows=[{"client_id": "client-batch-1", "grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
+                    auto_start=False,
+                    batches_dir=Path(tmp),
+                )
+                with SessionLocal.begin() as session:
+                    item = session.get(BatchItem, f"{batch['batch_id']}-item-0")
+                    session.add(DbClient(id="client-batch-1", name="Cliente", client_group="Lista", grupo="935", cota="110", versao="00", active=True))
+                    session.flush()
+                    item.client_id = "client-batch-1"
+                claim_next_batch("worker-test")
+                await PersistentBatchWorker("worker-test").execute_batch(batch["batch_id"])
+                return load_batch(batch["batch_id"], Path(tmp)) or {}
+
+        loaded = asyncio.run(scenario())
+
+        self.assertEqual(loaded["rows"][0]["status"], "success")
+        self.assertEqual(captured[0]["client_id"], "client-batch-1")
 
     def test_row_error_does_not_stop_batch_and_sets_partial_success(self) -> None:
         async def run_action(_action: ActionDetail, request: ActionRunRequest) -> RunRecord:

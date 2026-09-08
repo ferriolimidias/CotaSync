@@ -16,7 +16,6 @@ from backend.db import Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, 
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import missing_required_variables, run_action_sync
 from backend.services.actions_repository import find_action
-from backend.services.system_spreadsheets import apply_action_outputs_to_system_spreadsheet
 from backend.services.batch_runner import (
     BATCH_STATUS_CANCEL_REQUESTED,
     BATCH_STATUS_CANCELLED,
@@ -279,9 +278,13 @@ class PersistentBatchWorker:
             missing = missing_required_variables(action, variables)
             if missing:
                 raise ValueError("Variaveis obrigatorias ausentes: " + ", ".join(missing))
+            execution_variables = dict(variables)
+            # O executor recebe os valores da action; a persistência também precisa
+            # da identidade interna exata do cliente processado.
+            execution_variables.setdefault("client_id", client_id or "")
             run = await run_action_sync(
                 action,
-                ActionRunRequest(variables=variables, mode="sync", requested_by="worker", run_origin="operational"),
+                ActionRunRequest(variables=execution_variables, mode="sync", requested_by="worker", run_origin="operational"),
             )
             with SessionLocal.begin() as session:
                 db_run = session.get(DbRun, run.id)
@@ -290,14 +293,6 @@ class PersistentBatchWorker:
                     db_run.client_id = client_id
             payload = run.result_payload if isinstance(run.result_payload, dict) else {}
             if run.status == "success":
-                apply_action_outputs_to_system_spreadsheet(
-                    run_id=run.id,
-                    action_id=action.id,
-                    client_id=client_id,
-                    variables=variables,
-                    result_payload=payload,
-                    outputs=[dict(item) for item in (action.outputs or []) if isinstance(item, dict)],
-                )
                 complete_item_success(item_id, run.id, payload)
                 return None
             systemic_reason = self._systemic_reason(payload)

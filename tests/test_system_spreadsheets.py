@@ -94,6 +94,39 @@ class SystemSpreadsheetTests(unittest.TestCase):
             client = db.scalar(select(Client).where(Client.id == client_id))
             self.assertEqual(client.variables["resultado_a"], "123")
             self.assertEqual(client.variables["resultado_b"], "456")
+
+    def test_action_output_uses_explicit_client_when_version_is_not_in_action_variables(self) -> None:
+        from backend.db import Client, Run, SessionLocal
+        from sqlalchemy import select
+        sheet = create_system_spreadsheet("Resultado sem versão na action", ["Grupo", "Cota", "Versão", "Quantidade"])
+        fields = {field["display_name"]: field["field_id"] for field in sheet["fields"]}
+        with SessionLocal.begin() as db:
+            client_id = f"batch-output-client-{uuid4()}"
+            run_id = f"batch-output-run-{uuid4()}"
+            db.add(Client(
+                id=client_id,
+                name="Cliente",
+                client_group=sheet["id"],
+                system_spreadsheet_id=sheet["id"],
+                grupo="945",
+                cota="335",
+                versao="00",
+                variables={"grupo": "945", "cota": "335", "versao": "00"},
+                active=True,
+            ))
+            db.add(Run(id=run_id, action_id=None, client_id=client_id, status="success", extracted_data={"Quantidade": "040"}, input_variables={"grupo": "945", "cota": "335"}))
+        result = apply_action_outputs_to_system_spreadsheet(
+            run_id=run_id,
+            action_id="action",
+            client_id=client_id,
+            variables={"grupo": "945", "cota": "335"},
+            result_payload={"dados_extraidos": {"Quantidade": "040"}},
+            outputs=[{"output_id": "q", "label": "Quantidade", "destination": {"type": "system_sheet_field", "system_spreadsheet_id": sheet["id"], "field_id": fields["Quantidade"]}}],
+        )
+        self.assertEqual(result["applied"][0]["value"], "040")
+        with SessionLocal() as db:
+            client = db.scalar(select(Client).where(Client.id == client_id))
+            self.assertEqual(client.variables["quantidade"], "040")
     def test_manual_sheet_has_stable_system_field_ids(self) -> None:
         sheet = create_system_spreadsheet("Teste interno", ["Nome", "Grupo", "Cota", "Versão"])
         self.assertEqual(len(sheet["fields"]), 4)
