@@ -35,7 +35,8 @@ export function BrowserWorkspace({
   const status = useQuery({
     queryKey: ["browser"],
     queryFn: getBrowserStatus,
-    refetchInterval: 5000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 10000 : false),
+    refetchOnWindowFocus: true,
     retry: 1,
   });
   const token = useMutation({

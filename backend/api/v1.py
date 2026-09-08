@@ -38,6 +38,7 @@ from backend.services.batch_runner import (
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
+from backend.services.browser_observation import browser_observation_service
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 from backend.services.clients_repository import (
     ClientsRepositoryError,
@@ -516,12 +517,8 @@ async def _navigate_desktop_browser(url: str) -> None:
 
 
 async def _current_desktop_url() -> str:
-    playwright = await async_playwright().start()
-    try:
-        connection = await browser_provider("desktop_browser").connect(playwright, "external-status")
-        return str(connection.page.url or "")
-    finally:
-        await playwright.stop()
+    observation = await browser_observation_service.observe(source="current_url")
+    return observation.current_url
 
 
 def _redirect_uri_host(login_url: str) -> str:
@@ -543,17 +540,20 @@ def _expected_external_hosts(config: dict[str, Any]) -> set[str]:
     return {host for host in hosts if host}
 
 
-async def _external_session_status_from_browser(config: dict[str, Any]) -> str:
+async def _external_session_status_from_browser(config: dict[str, Any], *, deep: bool = False) -> str:
     external_session = _external_session_payload(config)
     if not external_session["external_system_configured"]:
         return "not_configured"
-    health = await desktop_browser_health()
-    if not health.get("cdp_reachable"):
+    observation = await (
+        browser_observation_service.observe_deep(source="external_session_validate")
+        if deep
+        else browser_observation_service.observe(source="external_session_status")
+    )
+    if not observation.browser_available:
         return "browser_offline"
-    try:
-        current_url = await _current_desktop_url()
-    except Exception:
+    if not observation.page_available:
         return "unknown"
+    current_url = observation.current_url
     current_host = url_host(current_url)
     expected_hosts = _expected_external_hosts(config)
     if current_host and current_host in expected_hosts:
@@ -562,13 +562,8 @@ async def _external_session_status_from_browser(config: dict[str, Any]) -> str:
         return "unauthenticated"
     microsoft_hosts = {str(item).strip().lower() for item in config.get("microsoft_hosts", []) if str(item).strip()}
     if any(current_host == host or current_host.endswith(f".{host}") for host in microsoft_hosts):
-        try:
-            playwright = await async_playwright().start()
-            try:
-                connection = await browser_provider("desktop_browser").connect(playwright, "external-account-status")
-                text_content = (await connection.page.locator("body").inner_text(timeout=3000)).casefold()
-            finally:
-                await playwright.stop()
+        if observation.deep and observation.body_text:
+            text_content = observation.body_text.casefold()
             profiles = list_access_profiles()
             identifiers = [str(profile.get("login_identifier") or "") for profile in profiles if profile.get("active")]
             picker = detect_microsoft_account_picker(text_content, identifiers)
@@ -580,8 +575,8 @@ async def _external_session_status_from_browser(config: dict[str, Any]) -> str:
                 return "reauth_required"
             if any(marker in text_content for marker in ("approve sign in", "verify your identity", "mfa", "autenticador")):
                 return "reauth_required"
-        except Exception:
-            pass
+        # A passive status knows the Microsoft host, but does not guess the account state.
+        return "unknown"
     return "unknown"
 
 
@@ -1428,18 +1423,12 @@ async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(req
         profile = access_profile_public(profile_id)
     except AccessProfileError as exc:
         raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
-    health = await desktop_browser_health()
-    if not health.get("cdp_reachable"):
+    observation = await browser_observation_service.observe_deep(source="access_profile_validate")
+    if not observation.browser_available:
         return {"status": "ok", "profile": {**profile, "session_status": "browser_offline"}, "available": False}
-    try:
-        playwright = await async_playwright().start()
-        try:
-            connection = await browser_provider("desktop_browser").connect(playwright, "access-profile-validate")
-            text_content = await connection.page.locator("body").inner_text(timeout=3000)
-        finally:
-            await playwright.stop()
-    except Exception:
+    if not observation.page_available:
         return {"status": "ok", "profile": {**profile, "session_status": "unknown"}, "available": False}
+    text_content = observation.body_text
     picker = detect_microsoft_account_picker(text_content, [profile["login_identifier"]])
     available = bool(picker["profile_available"])
     auth_state = classify_microsoft_auth_state(text_content)
@@ -1604,7 +1593,7 @@ async def external_session_open_login(
 async def external_session_validate(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     config = load_current_external_system()
     external_session = _external_session_payload(config)
-    external_session["session_status"] = await _external_session_status_from_browser(config)
+    external_session["session_status"] = await _external_session_status_from_browser(config, deep=True)
     return {
         "status": "ok",
         "valid": external_session["session_status"] in {"authenticated", "microsoft_session_available"},

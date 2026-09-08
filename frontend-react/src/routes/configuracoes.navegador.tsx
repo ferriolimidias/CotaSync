@@ -18,7 +18,8 @@ function BrowserWorkspacePage() {
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
-    refetchInterval: 5000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 10000 : false),
+    refetchOnWindowFocus: true,
     retry: 1,
   });
   const validate = useMutation({

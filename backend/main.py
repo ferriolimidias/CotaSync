@@ -29,6 +29,7 @@ from backend.api.runs import actions_run_router, runs_router
 from backend.api.v1 import router as api_v1_router
 from backend.services.auth import SESSION_COOKIE, parse_session_token, validate_csrf, validate_session_user
 from backend.services.demo_session import demo_session_manager
+from backend.services.browser_observation import browser_observation_service
 from backend.services.runs_repository import recover_stale_individual_runs
 from backend import whatsapp
 from backend.seguranca import validar_numero_autorizado
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
     if recovered:
         logger.warning("Recovery de runs individuais stale: %s", recovered)
     yield
+    await browser_observation_service.close()
     await demo_session_manager.close_all()
 
 

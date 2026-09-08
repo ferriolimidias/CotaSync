@@ -42,6 +42,7 @@ function ConfigPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const isBrowserRoute = location.pathname === "/configuracoes/navegador";
   const [form, setForm] = useState<ExternalSystemConfig>({
     external_system_name: "",
     external_login_url: "",
@@ -56,17 +57,20 @@ function ConfigPage() {
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
-    refetchInterval: 5000,
+    enabled: !isBrowserRoute,
+    refetchInterval: () => (document.visibilityState === "visible" ? 10000 : false),
+    refetchOnWindowFocus: true,
     retry: 1,
   });
   const externalConfig = useQuery({
     queryKey: ["external-system-config"],
     queryFn: getExternalSystemConfig,
     retry: 1,
+    enabled: !isBrowserRoute,
   });
-  const aiSettings = useQuery({ queryKey: ["learning-ai-settings"], queryFn: getLearningAISettings, retry: 1, enabled: user?.role === "admin" });
-  const googleSettings = useQuery({ queryKey: ["google-sheets-settings"], queryFn: getGoogleSheetsSettings, retry: 1, enabled: user?.role === "admin" });
-  const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, retry: 1 });
+  const aiSettings = useQuery({ queryKey: ["learning-ai-settings"], queryFn: getLearningAISettings, retry: 1, enabled: user?.role === "admin" && !isBrowserRoute });
+  const googleSettings = useQuery({ queryKey: ["google-sheets-settings"], queryFn: getGoogleSheetsSettings, retry: 1, enabled: user?.role === "admin" && !isBrowserRoute });
+  const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, retry: 1, enabled: !isBrowserRoute });
   const createProfile = useMutation({ mutationFn: createAccessProfile, onSuccess: () => { setProfileForm({ display_name: "", login_identifier: "", external_code: "" }); toast.success("Perfil de acesso cadastrado."); void queryClient.invalidateQueries({ queryKey: ["access-profiles"] }); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível cadastrar o perfil.") });
   const saveAI = useMutation({
     mutationFn: saveLearningAISettings,
