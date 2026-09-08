@@ -46,6 +46,20 @@ class LearningAIReviewTests(unittest.TestCase):
         trace = build_raw_learning_trace([{"event_type": "fill", "selector": "#grupo", "value": "real-client-value"}])
         self.assertNotIn("real-client-value", str(trace))
 
+    def test_bootstrap_main_multi_output_and_leading_zero_metadata(self):
+        action = _action()
+        action["learning_events"].insert(0, {"event_type": "click", "selector": "#account-card", "page_ref": "bootstrap"})
+        action["output_candidates"] = [
+            {"selector": "#result-a", "label": "A", "preview": "040"},
+            {"selector": "#result-b", "label": "B", "preview": "00"},
+            {"selector": "#result-c", "label": "C", "preview": "012"},
+        ]
+        payload = _safe_action(action)
+        self.assertEqual(len(payload["steps"]), 3)
+        self.assertEqual(len(payload["output_candidates"]), 3)
+        self.assertEqual(payload["output_candidates"][0]["preview_is_numeric_with_leading_zero"], True)
+        self.assertEqual(payload["learning_events"][0]["selector"], "#account-card")
+
     def test_suggestions_cannot_change_captured_target(self):
         result = validate_ai_review_suggestions(
             _action(),
