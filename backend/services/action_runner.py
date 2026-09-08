@@ -660,8 +660,16 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             logger.exception("Run %s falhou no fechamento/persistencia", run.id)
             run.status = "error"
             run.error_message = "Falha interna ao finalizar a execução."
+            if not isinstance(run.result_payload, dict):
+                run.result_payload = {}
+            run.result_payload["finalization_error"] = {
+                "stage": "run_finalization",
+                "exception_type": type(persistence_error).__name__,
+                "exception_message": str(persistence_error)[:500],
+            }
             run.finished_at = utc_now_iso()
             try:
+                update_run(run)
                 persist_terminal_run_fallback(
                     run.id,
                     code="UNHANDLED_RUN_EXCEPTION",

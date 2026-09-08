@@ -9,6 +9,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
 from backend.db import Batch as DbBatch, BatchItem, Client as DbClient, Run as DbRun, SessionLocal, WorkerInstance
 from backend.schemas.actions import ActionDetail
@@ -199,6 +200,7 @@ class BatchRunnerTests(unittest.TestCase):
 
     def test_worker_passes_internal_client_id_to_output_persistence_path(self) -> None:
         captured: list[dict[str, str]] = []
+        client_id = f"client-batch-{uuid4()}"
 
         async def run_action(_action: ActionDetail, request: ActionRunRequest) -> RunRecord:
             captured.append({key: str(value) for key, value in request.variables.items()})
@@ -212,15 +214,15 @@ class BatchRunnerTests(unittest.TestCase):
             ):
                 batch = create_batch(
                     action_id="numero-de-parcelas-pagas",
-                    rows=[{"client_id": "client-batch-1", "grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
+                    rows=[{"client_id": client_id, "grupo": "935", "grupo_2": "110", "grupo_3": "00"}],
                     auto_start=False,
                     batches_dir=Path(tmp),
                 )
                 with SessionLocal.begin() as session:
                     item = session.get(BatchItem, f"{batch['batch_id']}-item-0")
-                    session.add(DbClient(id="client-batch-1", name="Cliente", client_group="Lista", grupo="935", cota="110", versao="00", active=True))
+                    session.add(DbClient(id=client_id, name="Cliente", client_group="Lista", grupo="935", cota="110", versao="00", active=True))
                     session.flush()
-                    item.client_id = "client-batch-1"
+                    item.client_id = client_id
                 claim_next_batch("worker-test")
                 await PersistentBatchWorker("worker-test").execute_batch(batch["batch_id"])
                 return load_batch(batch["batch_id"], Path(tmp)) or {}
@@ -228,7 +230,7 @@ class BatchRunnerTests(unittest.TestCase):
         loaded = asyncio.run(scenario())
 
         self.assertEqual(loaded["rows"][0]["status"], "success")
-        self.assertEqual(captured[0]["client_id"], "client-batch-1")
+        self.assertEqual(captured[0]["client_id"], client_id)
 
     def test_row_error_does_not_stop_batch_and_sets_partial_success(self) -> None:
         async def run_action(_action: ActionDetail, request: ActionRunRequest) -> RunRecord:

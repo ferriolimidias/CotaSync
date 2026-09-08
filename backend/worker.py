@@ -303,7 +303,16 @@ class PersistentBatchWorker:
             return systemic_reason
         except Exception as exc:
             message = str(exc)[:1000] or type(exc).__name__
-            complete_item_error(item_id, None, message, {"message": message, "exception_type": type(exc).__name__})
+            complete_item_error(
+                item_id,
+                None,
+                message,
+                {
+                    "message": message,
+                    "exception_type": type(exc).__name__,
+                    "stage": "batch_item_finalization",
+                },
+            )
             return None
 
     @staticmethod
