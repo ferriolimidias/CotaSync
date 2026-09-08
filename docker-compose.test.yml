@@ -99,6 +99,7 @@ services:
       DESKTOP_BROWSER_PROFILE_DIR: ${DESKTOP_BROWSER_PROFILE_DIR:-/data/profile}
       COTASYNC_DEMO_TARGET_URL: http://cotasync_test_backend:8000/demo/alvo
       DATABASE_URL: postgresql://cotasync_test:cotasync_test_password@cotasync_test_postgres:5432/cotasync_test
+      COTASYNC_SESSION_SECRET: ${COTASYNC_SESSION_SECRET:-cotasync-test-session-secret-change-me}
       COTASYNC_WORKER_HEARTBEAT_SECONDS: ${COTASYNC_WORKER_HEARTBEAT_SECONDS:-10}
       COTASYNC_WORKER_STALE_SECONDS: ${COTASYNC_WORKER_STALE_SECONDS:-60}
       COTASYNC_ENABLE_SLOW_FIXTURE: ${COTASYNC_ENABLE_SLOW_FIXTURE:-false}
