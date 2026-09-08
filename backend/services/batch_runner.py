@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, DataSource, DataSourceField, Run as DbRun, SessionLocal
+from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, DataSource, DataSourceField, Run as DbRun, SessionLocal
 from backend.services.google_sync_queue import pending_count
 from backend.services.actions_repository import find_action
 from backend.services.clients_repository import (
@@ -23,6 +23,7 @@ from backend.services.clients_repository import (
     resolve_variables_for_action,
     validate_clients_for_action,
 )
+from backend.services.learned_graph import validate_graph_reentrancy
 
 logger = logging.getLogger("cotasync.batch_runner")
 
@@ -490,6 +491,20 @@ def create_batch(
     action = find_action(action_id)
     if action is None:
         raise BatchRunnerError("Acao nao encontrada.")
+    with SessionLocal() as session:
+        db_action = session.get(DbAction, action.id)
+        published_version_id = db_action.published_version_id if db_action is not None else None
+    if published_version_id:
+        with SessionLocal() as session:
+            version = session.get(ActionVersion, published_version_id)
+            definition = dict(version.definition or {}) if version is not None else {}
+        reentrancy = validate_graph_reentrancy(definition)
+        if not reentrancy["valid"]:
+            error = reentrancy["errors"][0] if reentrancy["errors"] else {"code": "action_not_reentrant"}
+            raise BatchRunnerError(
+                "Ação não está pronta para execução em massa: "
+                + str(error.get("code") or "action_not_reentrant")
+            )
     destinations = [
         output.get("destination")
         for output in (getattr(action, "outputs", []) or [])

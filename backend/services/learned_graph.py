@@ -149,6 +149,24 @@ def validate_compiled_action_graph(action: dict[str, Any]) -> dict[str, Any]:
             errors.append({"code": "dangling_step_reference", "transition_id": transition_id, "step_id": transition.get("step_id"), "step_index": transition.get("step_index")})
         elif not transition.get("step_id"):
             warnings.append(f"legacy_transition_resolved:{transition_id}:{resolved['source']}")
+        else:
+            step = resolved.get("step") if isinstance(resolved, dict) else None
+            required_state = str(
+                (step or {}).get("before_state_id")
+                or (step or {}).get("graph_from_state_id")
+                or ""
+            )
+            transition_source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+            if required_state and transition_source and required_state != transition_source:
+                errors.append(
+                    {
+                        "code": "step_source_state_mismatch",
+                        "transition_id": transition_id,
+                        "step_id": resolved.get("step_id"),
+                        "transition_source_state_id": transition_source,
+                        "step_required_state_id": required_state,
+                    }
+                )
     for output in output_states:
         if isinstance(output, dict) and output.get("state_id") and str(output["state_id"]) not in state_ids:
             errors.append({"code": "invalid_output_state_reference", "state_id": output["state_id"]})
@@ -492,6 +510,52 @@ def graph_target_state(action: dict[str, Any]) -> str:
         if transitions and isinstance(transitions[-1], dict)
         else ""
     )
+
+
+def validate_graph_reentrancy(action: dict[str, Any]) -> dict[str, Any]:
+    """Validate that a graph can start a new client from its terminal state."""
+    if not graph_metadata_available(action):
+        return {"valid": True, "errors": [], "warnings": []}
+    steps = action.get("robust_steps") or action.get("passos_playwright") or []
+    transitions = action.get("learned_transitions") or []
+    start_sequence = fresh_run_query_start_sequence(transitions, steps)
+    if start_sequence is None:
+        return {"valid": True, "errors": [], "warnings": ["no_client_input_boundary"]}
+    ordered = sorted(
+        (item for item in transitions if isinstance(item, dict)),
+        key=lambda item: int(item.get("sequence_index", item.get("step_index", 0)) or 0),
+    )
+    first_transition = next(
+        (item for item in ordered if int(item.get("sequence_index", item.get("step_index", 0)) or 0) >= start_sequence),
+        None,
+    )
+    resolved = resolve_transition_step(first_transition or {}, steps) if first_transition else None
+    step = resolved.get("step") if isinstance(resolved, dict) else None
+    required_state = str((step or {}).get("before_state_id") or (step or {}).get("graph_from_state_id") or "")
+    terminal_state = graph_target_state(action)
+    if not required_state or not terminal_state or required_state == terminal_state:
+        return {"valid": True, "errors": [], "warnings": []}
+    path = find_graph_path(transitions, terminal_state, required_state)
+    path_step_ids = {
+        str((resolve_transition_step(item, steps) or {}).get("step_id") or "")
+        for item in path or []
+    }
+    if not path or str((resolved or {}).get("step_id") or "") in path_step_ids:
+        return {
+            "valid": False,
+            "errors": [
+                {
+                    "code": "action_not_reentrant",
+                    "terminal_state_id": terminal_state,
+                    "required_state_id": required_state,
+                    "next_step_id": (resolved or {}).get("step_id"),
+                    "path_exists": bool(path),
+                    "path_reuses_first_step": str((resolved or {}).get("step_id") or "") in path_step_ids,
+                }
+            ],
+            "warnings": [],
+        }
+    return {"valid": True, "errors": [], "warnings": []}
 
 
 def transition_kind(transition: dict[str, Any]) -> str:

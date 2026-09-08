@@ -1600,6 +1600,61 @@ async def executar_acao_rapida(
                                     },
                                 )
                             graph_path = fresh_path
+                configured_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
+                canonical_passos_playwright = configured_steps if isinstance(configured_steps, list) else passos_playwright
+                if graph_path:
+                    first_transition = graph_path[0]
+                    first_resolved = resolve_transition_step(first_transition, canonical_passos_playwright)
+                    first_step = first_resolved.get("step") if isinstance(first_resolved, dict) else None
+                    required_state_id = str(
+                        (first_step or {}).get("before_state_id")
+                        or (first_step or {}).get("graph_from_state_id")
+                        or first_transition.get("from_state_id")
+                        or first_transition.get("from_state")
+                        or ""
+                    )
+                    current_state_id = str(current_match["state_id"])
+                    if required_state_id and required_state_id != current_state_id:
+                        path_to_required = find_graph_path(
+                            graph_transitions,
+                            current_state_id,
+                            required_state_id,
+                        )
+                        first_step_id = str((first_resolved or {}).get("step_id") or "")
+                        path_step_ids = {
+                            str((resolve_transition_step(item, canonical_passos_playwright) or {}).get("step_id") or "")
+                            for item in path_to_required or []
+                        }
+                        if not path_to_required or first_step_id in path_step_ids:
+                            raise SessionGuardianError(
+                                "Não existe caminho aprendido até o estado de origem do próximo step.",
+                                {
+                                    "reason": "no_path_to_required_state",
+                                    "execution_model": "learned_graph",
+                                    "current_state_id": current_state_id,
+                                    "required_state_id": required_state_id,
+                                    "next_step_id": first_step_id,
+                                    "next_step_selector": str((first_step or {}).get("seletor") or ""),
+                                    "path_exists": bool(path_to_required),
+                                    "path_reuses_next_step": first_step_id in path_step_ids,
+                                },
+                            )
+                        tail = ordered_graph_path(graph_transitions, required_state_id, target_state_id)
+                        if tail is None:
+                            tail = find_graph_path(graph_transitions, required_state_id, target_state_id)
+                        if tail is None:
+                            raise SessionGuardianError(
+                                "Não existe caminho aprendido do estado de origem até o resultado.",
+                                {
+                                    "reason": "no_path_to_target_state",
+                                    "execution_model": "learned_graph",
+                                    "current_state_id": current_state_id,
+                                    "required_state_id": required_state_id,
+                                    "target_state_id": target_state_id,
+                                    "next_step_id": first_step_id,
+                                },
+                            )
+                        graph_path = path_to_required + tail
                 reentry_sequence_index: int | None = None
                 ordered_transitions = sorted(
                     (item for item in graph_transitions if isinstance(item, dict)),
@@ -1659,8 +1714,6 @@ async def executar_acao_rapida(
                             "target_state_id": target_state_id,
                         },
                     )
-                configured_steps = action_config.get("robust_steps") or action_config.get("passos_playwright") or []
-                canonical_passos_playwright = configured_steps if isinstance(configured_steps, list) else passos_playwright
                 steps_by_id = {
                     str(step.get("step_id")): step
                     for step in canonical_passos_playwright

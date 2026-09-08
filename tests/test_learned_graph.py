@@ -15,6 +15,8 @@ from backend.services.learned_graph import (
     transition_kind,
     evaluate_transition_satisfaction,
     fresh_run_query_start_sequence,
+    validate_compiled_action_graph,
+    validate_graph_reentrancy,
 )
 from backend.services.demo_session import _attach_learned_output_state
 
@@ -79,6 +81,39 @@ class LearnedGraphTests(unittest.TestCase):
         self.assertEqual(fresh_run_query_start_sequence(transitions, steps), None)
         # A value such as 040 is not part of graph identity or restart planning.
         self.assertIsNone(fresh_run_query_start_sequence(transitions, steps))
+
+    def test_publication_rejects_transition_whose_step_requires_another_state(self) -> None:
+        result = validate_compiled_action_graph(
+            {
+                "execution_model": "learned_graph",
+                "robust_steps": [{"step_id": "fill", "tipo": "preencher", "before_state_id": "form"}],
+                "learned_states": [{"state_id": "home"}, {"state_id": "form"}],
+                "learned_transitions": [
+                    {"transition_id": "t1", "sequence_index": 0, "from_state_id": "home", "to_state_id": "form", "step_id": "fill"}
+                ],
+            }
+        )
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["errors"][0]["code"], "step_source_state_mismatch")
+
+    def test_reentrancy_validator_rejects_terminal_graph_without_return_path(self) -> None:
+        result = validate_graph_reentrancy(
+            {
+                "execution_model": "learned_graph",
+                "robust_steps": [
+                    {"step_id": "fill", "tipo": "preencher", "variavel": "grupo", "before_state_id": "form"},
+                    {"step_id": "submit", "tipo": "clicar", "before_state_id": "form"},
+                ],
+                "learned_states": [{"state_id": "form"}, {"state_id": "result"}],
+                "learned_transitions": [
+                    {"transition_id": "fill", "sequence_index": 0, "from_state_id": "form", "to_state_id": "form", "step_id": "fill"},
+                    {"transition_id": "submit", "sequence_index": 1, "from_state_id": "form", "to_state_id": "result", "step_id": "submit"},
+                ],
+                "output_states": [{"state_id": "result"}],
+            }
+        )
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["errors"][0]["code"], "action_not_reentrant")
 
     def test_visual_contract_creates_output_state_without_extraction_step(self) -> None:
         steps = [
