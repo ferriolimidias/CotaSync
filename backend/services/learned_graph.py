@@ -281,8 +281,7 @@ def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> 
         return 0
     expected_path = str(signature.get("path") or "").strip()
     observed_path = str(observation.get("path") or "").strip()
-    if expected_path and observed_path != expected_path:
-        return 0
+    path_matches = not expected_path or observed_path == expected_path
     if observed_host and observed_host == expected_host:
         score += 4
     if observed_path and observed_path == expected_path:
@@ -297,6 +296,11 @@ def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> 
     if isinstance(legacy_markers, list):
         expected_selectors.update(str(item).strip() for item in legacy_markers if str(item).strip())
     observed_selectors = set(observation.get("visible_selectors") or [])
+    output_selector = str(signature.get("output_selector") or "").strip()
+    if output_selector and output_selector in observed_selectors:
+        # A captured output is stronger evidence than shared navigation
+        # landmarks that remain visible across several workflow screens.
+        score += 5
     if expected_selectors:
         overlap = expected_selectors & observed_selectors
         if not overlap:
@@ -308,6 +312,11 @@ def _signature_score(observation: dict[str, Any], signature: dict[str, Any]) -> 
         expected_selector = str(signature.get("selector") or "")
         if expected_selector and expected_selector in observed_selectors:
             score += 5
+    # A server-rendered workflow can expose the same structural screen under
+    # more than one historical URL. Path is supporting evidence; host and the
+    # required structural selector evidence remain the hard boundary.
+    if not path_matches and expected_selectors:
+        score = max(1, score - 2)
     return score
 
 

@@ -22,6 +22,35 @@ class StateReentryTests(unittest.TestCase):
         other_page = match_observation_to_learned_state([{"host": "login.microsoftonline.com", "path": "/", "title": "Login", "visible_selectors": ["#submit"]}], [self.state])
         self.assertEqual(missing["status"], "unknown")
         self.assertEqual(other_page["status"], "unknown")
+
+    def test_same_host_path_drift_uses_structural_evidence(self):
+        state = {
+            "state_id": "result",
+            "signature": {
+                "host": "app.test",
+                "path": "/historical/result",
+                "stable_selectors": ["#menu", "#output"],
+                "output_selector": "#output",
+            },
+        }
+        result = match_observation_to_learned_state(
+            [{"host": "app.test", "path": "/current/result", "title": "App", "visible_selectors": ["#menu", "#output"]}],
+            [state],
+        )
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["state_id"], "result")
+
+    def test_path_drift_does_not_override_a_stronger_structural_candidate(self):
+        states = [
+            {"state_id": "screen", "signature": {"host": "app.test", "path": "/home", "stable_selectors": ["#menu", "#action"]}},
+            {"state_id": "result", "signature": {"host": "app.test", "path": "/result", "stable_selectors": ["#menu", "#action", "#output"], "output_selector": "#output"}},
+        ]
+        result = match_observation_to_learned_state(
+            [{"host": "app.test", "path": "/legacy/result", "title": "App", "visible_selectors": ["#menu", "#action", "#output"]}],
+            states,
+        )
+        self.assertEqual(result["status"], "matched")
+        self.assertEqual(result["state_id"], "result")
     def test_current_state_continuation_prevents_replaying_prior_edge(self):
         transitions = [
             {"transition_id": "before", "sequence_index": 2, "from_state_id": "login", "to_state_id": "home", "step_id": "step-attendance", "postconditions": [{"kind": "selector_present", "selector": "#form"}]},
