@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-SENSITIVE = re.compile(r"password|senha|token|cookie|authorization|secret|credential|mfa", re.I)
+SENSITIVE = re.compile(
+    r"password|senha|token|cookie|authorization|secret|credential|mfa|otp|oauth|"
+    r"(^|_)(value|valor|example_value|selected_text|input_value|field_value)($|_)",
+    re.I,
+)
 
 
 def sanitize_trace(value: Any, *, key: str = "") -> Any:

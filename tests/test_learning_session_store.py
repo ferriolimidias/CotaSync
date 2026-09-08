@@ -49,11 +49,13 @@ class LearningSessionStoreTests(unittest.TestCase):
             result_selection={},
             extraction_review={},
             final_page_snapshot={},
+            ai_review={"status": "completed", "evidence_hash": "hash", "result": {"ai_reviewed": True}},
         )
         snapshot = session_snapshot(session)
         self.assertEqual(snapshot["recorded_steps"][0]["variavel"], "grupo")
         self.assertEqual(snapshot["variable_bindings"], ["grupo"])
         self.assertEqual(snapshot["outputs"][0]["output_id"], "output-1")
+        self.assertEqual(snapshot["diagnostics"]["ai_review"]["status"], "completed")
         self.assertNotIn("playwright", snapshot)
 
     def test_write_through_increments_revision_and_keeps_failed_publication_retryable(self) -> None:

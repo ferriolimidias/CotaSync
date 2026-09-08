@@ -104,9 +104,13 @@ function EnsinarPage() {
         },
         allowed_list_ids: scopeAllLists ? [] : scopeListIds,
       }),
-    onSuccess: () => toast.success("Ação publicada."),
+    onSuccess: () => {
+      void session.refetch();
+      toast.success("Ação publicada.");
+    },
     onError: (error) => {
       if (error instanceof ApiError && error.status === 422) {
+        void session.refetch();
         if (error.code === "LEARNED_GRAPH_INVALID") {
           toast.error("Não foi possível validar o fluxo aprendido. O ensino foi preservado; tente publicar novamente.");
         } else {
@@ -115,9 +119,11 @@ function EnsinarPage() {
         return;
       }
       if (error instanceof ApiError && error.status >= 500) {
+        void session.refetch();
         toast.error("Não foi possível publicar a versão. O ensino foi preservado; tente novamente.");
         return;
       }
+      void session.refetch();
       toast.error(error instanceof Error ? error.message : "Não foi possível publicar a ação.");
     },
   });
@@ -321,6 +327,12 @@ function EnsinarPage() {
                 <p className="text-xs text-muted-foreground">
                   {eventCount} passos · {variableCount} variáveis
                 </p>
+                {(() => {
+                  const reviewStatus = String((session.data?.ai_review as Record<string, unknown> | undefined)?.status || "");
+                  if (reviewStatus === "completed") return <p className="text-xs text-emerald-700">Revisão por IA concluída; validação local preservada.</p>;
+                  if (reviewStatus === "fallback" || reviewStatus === "failed") return <p className="text-xs text-amber-700">Revisão por IA indisponível; validação local utilizada.</p>;
+                  return null;
+                })()}
                 <Button
                   className="w-full"
                   variant="outline"

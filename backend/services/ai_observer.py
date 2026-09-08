@@ -6,8 +6,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
@@ -17,6 +19,7 @@ logger = logging.getLogger("cotasync.ai_observer")
 _FALLBACK_SUMMARY = "IA não configurada; ação salva com análise local básica."
 _DEFAULT_MODEL = "gpt-4o-mini"
 _AI_TIMEOUT_SECONDS = 8
+LEARNING_AI_PROMPT_VERSION = "learning-review-v2"
 
 
 class ObserverReview(BaseModel):
@@ -127,14 +130,35 @@ def _parse_review_json(response: Any) -> ObserverReview | None:
 
 def openai_configuration_status() -> dict[str, Any]:
     """Status seguro para UI; nunca devolve a chave."""
+    try:
+        from backend.services.ai_settings import effective_settings
 
-    return {
-        "configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
-        "model": os.getenv("OPENAI_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL,
-    }
+        settings = effective_settings()
+        return {
+            "enabled": bool(settings.enabled),
+            "configured": bool(settings.api_key.strip()),
+            "provider": settings.provider,
+            "model": settings.model or _DEFAULT_MODEL,
+            "base_url": settings.base_url,
+        }
+    except Exception:
+        return {
+            "enabled": os.getenv("AI_ENABLED", "false").strip().lower() in {"1", "true", "yes"},
+            "configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            "provider": os.getenv("AI_PROVIDER", "openai_compatible"),
+            "model": os.getenv("OPENAI_MODEL", _DEFAULT_MODEL).strip() or _DEFAULT_MODEL,
+            "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        }
 
 
 def _safe_action(action: dict[str, Any]) -> dict[str, Any]:
+    def safe_url(value: Any) -> str:
+        raw = str(value or "")
+        parts = urlsplit(raw)
+        if not parts.scheme or not parts.netloc:
+            return raw[:500]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))[:500]
+
     safe_steps: list[dict[str, Any]] = []
     raw_steps = action.get("passos_playwright", [])
     if isinstance(raw_steps, list):
@@ -170,7 +194,10 @@ def _safe_action(action: dict[str, Any]) -> dict[str, Any]:
         }
         for raw in raw_events[:100]:
             if isinstance(raw, dict):
-                safe_events.append({key: raw.get(key) for key in allowed if key in raw})
+                event = {key: raw.get(key) for key in allowed if key in raw}
+                event["url_before"] = safe_url(event.get("url_before"))
+                event["url_after"] = safe_url(event.get("url_after"))
+                safe_events.append(event)
     return {
         "name": str(action.get("nome_amigavel") or action.get("name") or "")[:200],
         "description": str(action.get("descricao") or action.get("description") or "")[:500],
@@ -179,19 +206,93 @@ def _safe_action(action: dict[str, Any]) -> dict[str, Any]:
         "expected_result": str(action.get("expected_result") or "")[:1000],
         "success_criteria": str(action.get("success_criteria") or "")[:1000],
         "output_type": str(action.get("output_type") or "")[:100],
-        "url": str(action.get("url_inicial") or "")[:500],
+        "url": safe_url(action.get("url_inicial")),
         "steps": safe_steps,
         "learning_events": safe_events,
         "output_candidates": [
             {
                 "label": str(item.get("label") or "")[:100],
                 "selector": str(item.get("selector") or "")[:500],
-                "preview": str(item.get("preview") or "")[:160],
+                "preview_length": len(str(item.get("preview") or "")),
+                "preview_is_numeric_with_leading_zero": bool(
+                    re.fullmatch(r"0\d+", str(item.get("preview") or "").strip())
+                ),
             }
             for item in action.get("output_candidates", [])[:20]
             if isinstance(item, dict)
         ] if isinstance(action.get("output_candidates"), list) else [],
     }
+
+
+def validate_ai_review_suggestions(action: dict[str, Any], review: dict[str, Any]) -> dict[str, Any]:
+    """Accept only review metadata backed by recorder evidence.
+
+    The recorder remains authoritative. This function never changes steps,
+    transitions, states or output targets; it only creates an audit result.
+    """
+    steps = action.get("passos_playwright") if isinstance(action.get("passos_playwright"), list) else []
+    captured_selectors = {
+        str(item.get("seletor") or "").strip()
+        for item in steps
+        if isinstance(item, dict) and str(item.get("seletor") or "").strip()
+    }
+    variable_keys = {
+        str(item.get("variavel") or "").strip()
+        for item in steps
+        if isinstance(item, dict) and str(item.get("variavel") or "").strip()
+    }
+    output_selectors = {
+        str(item.get("selector") or item.get("preferred_selector") or "").strip()
+        for item in action.get("output_candidates", [])
+        if isinstance(item, dict)
+    }
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    targets = review.get("suggested_extraction_targets", [])
+    for index, item in enumerate(targets if isinstance(targets, list) else []):
+        candidate = item if isinstance(item, dict) else {}
+        selector = str(candidate.get("selector") or "").strip()
+        if selector and selector in captured_selectors.union(output_selectors):
+            accepted.append({"kind": "extraction_target", "index": index, "value": {"label": str(candidate.get("label") or "")[:100], "selector": selector}})
+        else:
+            rejected.append({"kind": "extraction_target", "index": index, "reason": "selector_not_captured"})
+    variables = review.get("variable_schema", [])
+    for index, item in enumerate(variables if isinstance(variables, list) else []):
+        candidate = item if isinstance(item, dict) else {}
+        key = str(candidate.get("key") or "").strip()
+        if key and key in variable_keys:
+            accepted.append({"kind": "variable_label", "index": index, "value": {"key": key, "label": str(candidate.get("label") or key)[:100]}})
+        else:
+            rejected.append({"kind": "variable_label", "index": index, "reason": "variable_not_captured"})
+    return {
+        "accepted": accepted,
+        "rejected": rejected,
+        "accepted_count": len(accepted),
+        "rejected_count": len(rejected),
+        "suggestions_total": len(accepted) + len(rejected),
+    }
+
+
+def learning_ai_analysis_contract(review: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the reviewer result to the durable LearningAIAnalysis schema."""
+    from backend.services.learning_ai import LearningAIAnalysis
+
+    return LearningAIAnalysis.model_validate(
+        {
+            "selector_analysis": review.get("suggested_extraction_targets", []) or [],
+            "transition_analysis": review.get("waits", []) or [],
+            "output_analysis": [{"target": review.get("extraction_target", "")}],
+            "state_analysis": [],
+            "warnings": [
+                *(review.get("risk_notes", []) or []),
+                *(review.get("slow_system_notes", []) or []),
+            ],
+            "quality": {
+                "ai_reviewed": bool(review.get("ai_reviewed")),
+                "summary": str(review.get("ai_observer_summary") or "")[:500],
+            },
+        }
+    ).model_dump()
 
 
 def deterministic_observe_learning_step(step_event: dict[str, Any]) -> dict[str, Any]:
@@ -337,10 +438,15 @@ async def analyze_recorded_action_with_ai(
     """Enriquece uma receita humana sem alterar seus passos determinísticos."""
 
     fallback = _local_analysis(action)
-    if os.getenv("AI_ENABLED", "false").strip().lower() not in {"1", "true", "yes"}:
-        return fallback
     config = openai_configuration_status()
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not config.get("enabled") or not config.get("configured"):
+        return fallback
+    try:
+        from backend.services.ai_settings import effective_settings
+
+        api_key = effective_settings().api_key
+    except Exception:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return fallback
 
@@ -362,7 +468,7 @@ async def analyze_recorded_action_with_ai(
         '"suggested_extraction_targets" (array de objetos com label e selector), '
         '"suggested_objective" (string), "suggested_expected_result" (string), '
         '"slow_system_notes" (array de strings) e "risk_notes" (array de strings). '
-        "Contexto sanitizado: "
+        f"Versão do prompt: {LEARNING_AI_PROMPT_VERSION}. Contexto sanitizado: "
         + json.dumps(safe_context, ensure_ascii=False)
     )
     try:
@@ -370,6 +476,7 @@ async def analyze_recorded_action_with_ai(
             model=str(config["model"]),
             temperature=0,
             api_key=api_key,
+            base_url=str(config.get("base_url") or "https://api.openai.com/v1"),
             timeout=_AI_TIMEOUT_SECONDS,
             max_retries=0,
         )

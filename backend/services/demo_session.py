@@ -60,7 +60,12 @@ from backend.services.result_selection import (
     host_from_url,
 )
 from backend.services.learning_trace import build_raw_learning_trace
-from backend.services.learning_session_store import load_learning_session, persist_learning_session, sanitize_learning_value
+from backend.services.learning_session_store import (
+    learning_evidence_fingerprint,
+    load_learning_session,
+    persist_learning_session,
+    sanitize_learning_value,
+)
 
 
 logger = logging.getLogger("cotasync.demo")
@@ -990,18 +995,108 @@ class DemoBrowserSession:
     page_refs: dict[int, str] = field(default_factory=dict)
     next_page_ref_number: int = 2
     publication_status: str = "not_attempted"
+    ai_review: dict[str, Any] = field(default_factory=dict)
     tenant_id: str = "default"
 
 
 class DemoSessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, DemoBrowserSession] = {}
+        self._ai_review_locks: dict[str, asyncio.Lock] = {}
 
     def _get(self, session_id: str) -> DemoBrowserSession:
         session = self._sessions.get(str(session_id))
         if session is None:
             raise DemoSessionError("Sessao de demonstracao nao encontrada ou encerrada.")
         return session
+
+    async def _review_learning_action(
+        self,
+        session: DemoBrowserSession,
+        action: dict[str, Any],
+        *,
+        evidence_extra: Any = None,
+    ) -> dict[str, Any]:
+        """Run at most one review for the current learning evidence revision."""
+        from backend.services.ai_observer import (
+            LEARNING_AI_PROMPT_VERSION,
+            analyze_recorded_action_with_ai,
+            learning_ai_analysis_contract,
+            openai_configuration_status,
+            validate_ai_review_suggestions,
+        )
+
+        lock = self._ai_review_locks.setdefault(str(session.id), asyncio.Lock())
+        async with lock:
+            evidence_hash = learning_evidence_fingerprint(session, evidence_extra)
+            previous_value = getattr(session, "ai_review", {})
+            previous = previous_value if isinstance(previous_value, dict) else {}
+            if previous.get("evidence_hash") == evidence_hash and isinstance(previous.get("result"), dict):
+                session.learning_synthesis = dict(previous["result"])
+                return dict(previous["result"])
+
+            config = openai_configuration_status()
+            started = _utc_now()
+            session.ai_review = {
+                "status": "running",
+                "evidence_hash": evidence_hash,
+                "prompt_version": LEARNING_AI_PROMPT_VERSION,
+                "model": str(config.get("model") or ""),
+                "started_at": started,
+            }
+            persist_learning_session(session)
+            try:
+                result = await analyze_recorded_action_with_ai(action)
+                review = sanitize_learning_value(dict(result)) if isinstance(result, dict) else {}
+                review["learning_ai_analysis"] = learning_ai_analysis_contract(review)
+                validation = validate_ai_review_suggestions(action, review)
+                review["ai_suggestion_validation"] = validation
+                ai_used = bool(review.get("ai_reviewed"))
+                status = "completed" if ai_used else "fallback"
+                warning = "" if ai_used else str(review.get("ai_observer_summary") or "AI_REVIEW_FALLBACK")[:500]
+                session.ai_review = {
+                    "status": status,
+                    "evidence_hash": evidence_hash,
+                    "prompt_version": LEARNING_AI_PROMPT_VERSION,
+                    "model": str(config.get("model") or ""),
+                    "started_at": started,
+                    "finished_at": _utc_now(),
+                    "warning": warning,
+                    "result": sanitize_learning_value(review),
+                    "suggestion_validation": sanitize_learning_value(validation),
+                    "suggestions_total": validation["suggestions_total"],
+                    "suggestions_accepted": validation["accepted_count"],
+                    "suggestions_rejected": validation["rejected_count"],
+                    "warnings_count": len(review.get("risk_notes", []) or []) + len(review.get("slow_system_notes", []) or []),
+                }
+                session.learning_synthesis = dict(review)
+                persist_learning_session(session)
+                logger.info(
+                    "Learning AI review completed: session=%s status=%s model=%s accepted=%s rejected=%s",
+                    session.id, status, config.get("model"), validation["accepted_count"], validation["rejected_count"],
+                )
+                return review
+            except Exception as exc:
+                # A reviewer failure is not a learning failure. The deterministic
+                # local analysis remains the only input to publication structure.
+                from backend.services.ai_observer import _local_analysis
+
+                fallback = _local_analysis(action)
+                session.ai_review = {
+                    "status": "failed",
+                    "evidence_hash": evidence_hash,
+                    "prompt_version": LEARNING_AI_PROMPT_VERSION,
+                    "model": str(config.get("model") or ""),
+                    "started_at": started,
+                    "finished_at": _utc_now(),
+                    "error": type(exc).__name__,
+                    "warning": "AI_REVIEW_FALLBACK",
+                    "result": sanitize_learning_value(fallback),
+                }
+                session.learning_synthesis = dict(fallback)
+                persist_learning_session(session)
+                logger.warning("Learning AI review failed; deterministic fallback used: session=%s error=%s", session.id, type(exc).__name__)
+                return fallback
 
     async def ensure_session(self, session_id: str) -> DemoBrowserSession:
         """Return the active session, rehydrating durable learning evidence when needed."""
@@ -1055,6 +1150,7 @@ class DemoSessionManager:
                 guided_learning=sanitize_learning_value(metadata.get("guided_learning") or {}),
                 outputs=[dict(item) for item in (row.outputs or []) if isinstance(item, dict)],
                 publication_status=str(row.publication_status or "not_attempted"),
+                ai_review=dict((row.diagnostics or {}).get("ai_review") or {}) if isinstance(row.diagnostics, dict) else {},
             )
             self._sessions[row.id] = session
             logger.info("Sessao de aprendizado reidratada: session=%s revision=%s", row.id, row.revision)
@@ -1062,6 +1158,18 @@ class DemoSessionManager:
         except Exception:
             await playwright.stop()
             raise DemoSessionError("Nao foi possivel reidratar a sessao de aprendizado.")
+
+    async def review_learning_session(self, session_id: str) -> dict[str, Any]:
+        """Review the current evidence without publishing or executing it."""
+        session = await self.ensure_session(session_id)
+        action = {
+            "nome_amigavel": session.guided_learning.get("name", ""),
+            **session.guided_learning,
+            "passos_playwright": session.steps,
+            "learning_events": session.learning_events,
+            "output_candidates": session.output_candidates,
+        }
+        return await self._review_learning_action(session, action)
 
     async def start_result_selection(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
@@ -2096,6 +2204,7 @@ class DemoSessionManager:
             "recording": session.recording,
             "recording_status": "recording" if session.recording else "stopped",
             "publication_status": str(getattr(session, "publication_status", "not_attempted") or "not_attempted"),
+            "ai_review": dict(getattr(session, "ai_review", {}) or {}),
             "steps_count": len(session.steps),
             "learning_events_count": len(session.learning_events),
             "external_system_name": session.external_system_name,
@@ -2203,6 +2312,7 @@ class DemoSessionManager:
             "recording": bool(session.recording),
             "recording_status": "recording" if session.recording else "stopped",
             "publication_status": str(getattr(session, "publication_status", "not_attempted") or "not_attempted"),
+            "ai_review": dict(getattr(session, "ai_review", {}) or {}),
             "operator_request_session_id": str(
                 last_operator_result.get("operator_request_session_id")
                 or last_operator_result.get("session_id")
@@ -2958,8 +3068,6 @@ class DemoSessionManager:
             raise DemoSessionError("Nenhum passo foi capturado. Repita a rotina com a gravacao ativa.")
         if session.observer_tasks:
             await asyncio.gather(*list(session.observer_tasks), return_exceptions=True)
-        from backend.services.ai_observer import analyze_recorded_action_with_ai
-
         provisional_action = {
             "nome_amigavel": session.guided_learning.get("name", ""),
             **session.guided_learning,
@@ -2967,7 +3075,11 @@ class DemoSessionManager:
             "learning_events": session.learning_events,
             "output_candidates": session.output_candidates,
         }
-        session.learning_synthesis = await analyze_recorded_action_with_ai(provisional_action)
+        # Stop finalizes recorder evidence only. The single AI review happens
+        # when the user requests analysis/publication, never on stop polling.
+        from backend.services.ai_observer import _local_analysis
+
+        session.learning_synthesis = _local_analysis(provisional_action)
         event_types = [str(event.get("event_type") or "") for event in session.learning_events]
         operator_variable_events = [
             event
@@ -3568,10 +3680,8 @@ class DemoSessionManager:
                 for event in learning_events
                 if isinstance(event, dict) and "microsoft" in str(event.get("url_before") or "").casefold()
             ]
-        from backend.services.learning_ai import LearningAIObserver
-        learned_action["learning_ai_analysis"] = LearningAIObserver().analyze(
-            learned_action["raw_learning_trace"]
-        )
+        # One review per evidence fingerprint. The deterministic compiler and
+        # recorder remain authoritative; AI contributes metadata only.
         if selected_extraction_contract:
             learned_action["reviewed_overlay"] = {
                 "review_status": "approved",
@@ -3584,12 +3694,32 @@ class DemoSessionManager:
             )
             learned_action["review_status"] = "approved"
             learned_action["ai_review_summary"] = "Contrato visual de extração salvo durante o ensino."
-        from backend.services.ai_observer import analyze_recorded_action_with_ai
-
         # A síntese final inclui nomes de variáveis e saídas editados após a
         # gravação; a pré-síntese de stop_recording continua disponível na UI.
-        ai_review = await analyze_recorded_action_with_ai(learned_action)
-        learned_action.update(ai_review)
+        ai_review = await self._review_learning_action(
+            session,
+            learned_action,
+            evidence_extra={
+                "variable_schema": variable_schema,
+                "outputs": outputs,
+                "extraction_targets": extraction_targets,
+                "objective": objective_text,
+                "expected_result": expected_result_text,
+            },
+        )
+        for review_key in (
+            "ai_reviewed", "ai_observer_summary", "replay_hints", "waits", "suggested_objective",
+            "suggested_expected_result", "ai_slow_system_notes", "ai_risk_notes", "suggested_extraction_targets",
+        ):
+            if review_key in ai_review:
+                learned_action[review_key] = ai_review[review_key]
+        learned_action["learning_ai_analysis"] = {
+            "status": getattr(session, "ai_review", {}).get("status", "fallback"),
+            "prompt_version": getattr(session, "ai_review", {}).get("prompt_version", ""),
+            "model": getattr(session, "ai_review", {}).get("model", ""),
+            "warnings": ai_review.get("ai_observer_summary", ""),
+            "suggestion_validation": getattr(session, "ai_review", {}).get("suggestion_validation", {}),
+        }
         if selected_extraction_contract:
             learned_action["extraction_review"] = selected_extraction_contract
             learned_action["reviewed_overlay"] = {

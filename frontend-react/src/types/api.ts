@@ -293,6 +293,7 @@ export type LearningSession = {
   result_selection?: Record<string, unknown>;
   extraction_review?: Record<string, unknown>;
   outputs?: Array<Record<string, unknown>>;
+  ai_review?: Record<string, unknown>;
   learning_mode?: "free_action" | "spreadsheet";
   data_source_id?: string | null;
   [key: string]: unknown;

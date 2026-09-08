@@ -1257,12 +1257,9 @@ async def learning_outputs(session_id: str, _user: AuthUser = Depends(require_us
 @router.post("/learning/sessions/{session_id}/ai-analysis", summary="Analisa aprendizado sem publicar automaticamente")
 async def learning_ai_analysis(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        await demo_session_manager.ensure_session(session_id)
-        session = await demo_session_manager.recording_diagnostics(session_id)
+        analysis = await demo_session_manager.review_learning_session(session_id)
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
-    events = session.get("learning_events") if isinstance(session.get("learning_events"), list) else []
-    analysis = LearningAIObserver().analyze(build_raw_learning_trace(events))
     return {"status": "ok", "analysis": analysis, "published": False}
 
 

@@ -8,6 +8,8 @@ learning metadata and never credentials or browser session material.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
+import json
 from typing import Any
 
 from sqlalchemy import select
@@ -53,6 +55,30 @@ def sanitize_learning_value(value: Any, key: str = "") -> Any:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def learning_evidence_fingerprint(session: Any, extra: Any = None) -> str:
+    """Stable identity for the evidence reviewed by Learning AI.
+
+    Publication status and diagnostics are deliberately excluded. A retry of
+    the same stopped learning must reuse its review, while a changed step,
+    binding, bootstrap or output must invalidate it.
+    """
+    payload = {
+        "guided_learning": sanitize_learning_value(getattr(session, "guided_learning", {}) or {}),
+        "raw_events": sanitize_learning_value(getattr(session, "learning_events", []) or []),
+        "recorded_steps": sanitize_learning_value(getattr(session, "steps", []) or []),
+        "outputs": sanitize_learning_value(getattr(session, "outputs", []) or []),
+        "extraction_review": sanitize_learning_value(getattr(session, "extraction_review", {}) or {}),
+        "bootstrap": sanitize_learning_value({
+            "external_system_id": getattr(session, "external_system_id", ""),
+            "access_profile_id": getattr(session, "access_profile_id", ""),
+            "run_start_strategy": (getattr(session, "guided_learning", {}) or {}).get("run_start_strategy", ""),
+        }),
+        "extra": sanitize_learning_value(extra),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def session_snapshot(session: Any) -> dict[str, Any]:
@@ -109,6 +135,7 @@ def session_snapshot(session: Any) -> dict[str, Any]:
             "result_selection": getattr(session, "result_selection", {}) or {},
             "extraction_review": getattr(session, "extraction_review", {}) or {},
             "final_page_snapshot": getattr(session, "final_page_snapshot", {}) or {},
+            "ai_review": getattr(session, "ai_review", {}) or {},
         }),
     }
 
