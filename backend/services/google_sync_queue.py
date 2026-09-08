@@ -16,6 +16,7 @@ from backend.db import GoogleSyncPending, SessionLocal, SpreadsheetConnector
 # ``syncing`` is included so a worker/process interruption cannot strand a
 # change permanently outside the retry queue.
 PENDING_STATUSES = {"pending", "error", "syncing"}
+GOOGLE_BATCH_CHUNK_SIZE = 500
 
 
 def enqueue_pending_change(
@@ -83,39 +84,38 @@ def send_pending_google(*, spreadsheet_id: str | None = None, tenant_id: str = "
     for connector_id in connector_ids:
         connector_rows = [row for row in rows if row.connector_id == connector_id]
         sheet_id = connector_rows[0].spreadsheet_id
-        with SessionLocal.begin() as db:
-            db.query(GoogleSyncPending).filter(GoogleSyncPending.id.in_([row.id for row in connector_rows])).update(
-                {GoogleSyncPending.status: "syncing", GoogleSyncPending.attempts: GoogleSyncPending.attempts + 1},
-                synchronize_session=False,
-            )
-        try:
-            sync_google_pending(
-                sheet_id,
-                [
-                    {
-                        "client_id": row.client_id,
-                        "field_id": row.field_id,
-                        "value": row.value,
-                    }
-                    for row in connector_rows
-                ],
-                tenant_id=tenant_id,
-            )
-        except SystemSpreadsheetError as exc:
-            message = str(exc)[:500]
+        for offset in range(0, len(connector_rows), GOOGLE_BATCH_CHUNK_SIZE):
+            chunk = connector_rows[offset:offset + GOOGLE_BATCH_CHUNK_SIZE]
+            chunk_ids = [row.id for row in chunk]
             with SessionLocal.begin() as db:
-                db.query(GoogleSyncPending).filter(GoogleSyncPending.id.in_([row.id for row in connector_rows])).update(
-                    {GoogleSyncPending.status: "error", GoogleSyncPending.last_error: message},
+                db.query(GoogleSyncPending).filter(GoogleSyncPending.id.in_(chunk_ids)).update(
+                    {GoogleSyncPending.status: "syncing", GoogleSyncPending.attempts: GoogleSyncPending.attempts + 1},
                     synchronize_session=False,
                 )
-            failed += len(connector_rows)
-            errors.append({"spreadsheet_id": sheet_id, "message": message})
-            continue
-        now = datetime.now(UTC)
-        with SessionLocal.begin() as db:
-            db.query(GoogleSyncPending).filter(GoogleSyncPending.id.in_([row.id for row in connector_rows])).update(
-                {GoogleSyncPending.status: "synced", GoogleSyncPending.last_error: None, GoogleSyncPending.synced_at: now},
-                synchronize_session=False,
-            )
-        synced += len(connector_rows)
+            try:
+                sync_google_pending(
+                    sheet_id,
+                    [
+                        {"client_id": row.client_id, "field_id": row.field_id, "value": row.value}
+                        for row in chunk
+                    ],
+                    tenant_id=tenant_id,
+                )
+            except SystemSpreadsheetError as exc:
+                message = str(exc)[:500]
+                with SessionLocal.begin() as db:
+                    db.query(GoogleSyncPending).filter(GoogleSyncPending.id.in_(chunk_ids)).update(
+                        {GoogleSyncPending.status: "error", GoogleSyncPending.last_error: message},
+                        synchronize_session=False,
+                    )
+                failed += len(chunk)
+                errors.append({"spreadsheet_id": sheet_id, "message": message})
+                continue
+            now = datetime.now(UTC)
+            with SessionLocal.begin() as db:
+                db.query(GoogleSyncPending).filter(GoogleSyncPending.id.in_(chunk_ids)).update(
+                    {GoogleSyncPending.status: "synced", GoogleSyncPending.last_error: None, GoogleSyncPending.synced_at: now},
+                    synchronize_session=False,
+                )
+            synced += len(chunk)
     return {"pending_before": len(rows), "synced": synced, "failed": failed, "errors": errors}
