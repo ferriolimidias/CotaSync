@@ -16,6 +16,7 @@ class ActionRunRequest(BaseModel):
     requested_by: str = "api"
     session_id: str | None = None
     run_origin: RunOrigin = "operational"
+    batch_id: str | None = None
 
 
 class RunRecord(BaseModel):

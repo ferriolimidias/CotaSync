@@ -284,7 +284,7 @@ class PersistentBatchWorker:
             execution_variables.setdefault("client_id", client_id or "")
             run = await run_action_sync(
                 action,
-                ActionRunRequest(variables=execution_variables, mode="sync", requested_by="worker", run_origin="operational"),
+                ActionRunRequest(variables=execution_variables, mode="sync", requested_by="worker", run_origin="operational", batch_id=batch_id),
             )
             with SessionLocal.begin() as session:
                 db_run = session.get(DbRun, run.id)

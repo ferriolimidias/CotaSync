@@ -346,6 +346,10 @@ def get_batch(batch_id: str, *, api_base_url: str | None = None, timeout: float 
     return demo_api_request("GET", f"/api/batches/{batch_id}", api_base_url=api_base_url, timeout=timeout)
 
 
+def batch_operation(batch_id: str, operation: str, *, api_base_url: str | None = None, timeout: float = 10.0) -> dict[str, Any]:
+    return demo_api_request("POST", f"/api/batches/{batch_id}/{operation}", api_base_url=api_base_url, timeout=timeout)
+
+
 def list_batches(*, api_base_url: str | None = None, timeout: float = 5.0) -> dict[str, Any]:
     return demo_api_request("GET", "/api/batches", api_base_url=api_base_url, timeout=timeout)
 

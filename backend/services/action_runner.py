@@ -694,5 +694,6 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             variables=request.variables,
             result_payload=run.result_payload,
             outputs=[dict(item) for item in (action.outputs or []) if isinstance(item, dict)],
+            batch_id=request.batch_id,
         )
     return run

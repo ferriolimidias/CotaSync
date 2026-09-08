@@ -33,7 +33,10 @@ from backend.services.batch_runner import (
     list_batches,
     load_batch,
     resume_batch,
+    resume_pending_batch,
+    retry_failed_batch,
 )
+from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
 from backend.services.clients_repository import (
     ClientsRepositoryError,
@@ -1514,6 +1517,31 @@ async def batches_resume(batch_id: str, _user: AuthUser = Depends(require_user))
     if batch is None:
         raise _error(409, "BATCH_NOT_RESUMABLE", "Este lote não possui item aguardando atenção para retomar.")
     return {"status": "ok", "batch": batch}
+
+
+@router.post("/batches/{batch_id}/resume-pending", summary="Retoma somente itens nunca processados")
+async def batches_resume_pending(batch_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    batch = resume_pending_batch(batch_id)
+    if batch is None:
+        raise _error(409, "BATCH_NOT_RESUMABLE", "Este lote não possui clientes não processados para retomar.")
+    return {"status": "ok", "batch": batch}
+
+
+@router.post("/batches/{batch_id}/retry-errors", summary="Reprocessa somente itens com erro")
+async def batches_retry_errors(batch_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    batch = retry_failed_batch(batch_id)
+    if batch is None:
+        raise _error(409, "BATCH_NO_ERRORS", "Este lote não possui erros para reprocessar.")
+    return {"status": "ok", "batch": batch}
+
+
+@router.post("/batches/{batch_id}/send-google", summary="Envia somente pendências ao Google")
+async def batches_send_google(batch_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    batch = load_batch(batch_id)
+    if batch is None:
+        raise _error(404, "BATCH_NOT_FOUND", "Batch nao encontrado.")
+    result = send_pending_google(spreadsheet_id=batch.get("spreadsheet_id") or None)
+    return {"status": "ok", "batch": load_batch(batch_id), "google": result}
 
 
 @router.get("/batches/{batch_id}/results", summary="Resultados CSV do batch")

@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from backend.db import Action as DbAction, Batch as DbBatch, BatchItem, Client as DbClient, DataSource, DataSourceField, Run as DbRun, SessionLocal
+from backend.services.google_sync_queue import pending_count
 from backend.services.actions_repository import find_action
 from backend.services.clients_repository import (
     get_client_display_fields,
@@ -44,6 +45,7 @@ ITEM_STATUS_ERROR = "error"
 ITEM_STATUS_INTERRUPTED = "interrupted"
 ITEM_STATUS_CANCELLED = "cancelled"
 ITEM_STATUS_NEEDS_ATTENTION = "needs_attention"
+ITEM_STATUS_NOT_PROCESSED = "not_processed"
 
 FINAL_BATCH_STATUSES = {
     BATCH_STATUS_CANCELLED,
@@ -57,7 +59,7 @@ FINAL_BATCH_STATUSES = {
     "canceled",
 }
 RUNNING_BATCH_STATUSES = {BATCH_STATUS_QUEUED, BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED, "pending"}
-PROCESSED_ITEM_STATUSES = {ITEM_STATUS_SUCCESS, ITEM_STATUS_ERROR, ITEM_STATUS_INTERRUPTED, ITEM_STATUS_CANCELLED}
+PROCESSED_ITEM_STATUSES = {ITEM_STATUS_SUCCESS, ITEM_STATUS_ERROR, ITEM_STATUS_INTERRUPTED}
 DEFAULT_DELAY_BETWEEN_ROWS_SECONDS = 3
 
 
@@ -384,6 +386,8 @@ def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem], *, action: Any = N
         "error_items": db_batch.error_items,
         "interrupted_items": db_batch.interrupted_items,
         "cancelled_items": db_batch.cancelled_items,
+        "not_processed_items": sum(1 for item in items if item.status in {ITEM_STATUS_NOT_PROCESSED, ITEM_STATUS_CANCELLED, ITEM_STATUS_PENDING}),
+        "google_pending_count": pending_count(spreadsheet_id=metadata.get("spreadsheet_id") or None),
         "current_position": current.position if current else None,
         "current_client_id": current.client_id if current else None,
         "metadata": metadata,
@@ -418,6 +422,7 @@ def _batch_to_dict(db_batch: DbBatch, items: list[BatchItem], *, action: Any = N
                 "started_at": item.started_at.isoformat() if item.started_at else None,
                 "finished_at": item.finished_at.isoformat() if item.finished_at else None,
                 "retry_count": item.retry_count,
+                "attempt_history": item.attempt_history or [],
             })(
                 (clients or {}).get(item.client_id),
                 item.result_data or {},
@@ -656,7 +661,7 @@ def cancel_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, An
                 (
                     session.query(BatchItem)
                     .filter(BatchItem.batch_id == batch.id, BatchItem.status == ITEM_STATUS_PENDING)
-                    .update({BatchItem.status: ITEM_STATUS_CANCELLED, BatchItem.finished_at: now}, synchronize_session=False)
+                    .update({BatchItem.status: ITEM_STATUS_NOT_PROCESSED, BatchItem.finished_at: now}, synchronize_session=False)
                 )
                 batch.status = BATCH_STATUS_CANCELLED
                 batch.finished_at = now
@@ -826,12 +831,69 @@ def resume_batch(batch_id: str) -> dict[str, Any] | None:
     return load_batch(batch_id)
 
 
+def resume_pending_batch(batch_id: str) -> dict[str, Any] | None:
+    """Requeue only items that never started; keep success and error items."""
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, batch_id)
+        if batch is None:
+            return None
+        items = session.query(BatchItem).filter(
+            BatchItem.batch_id == batch_id,
+            BatchItem.status.in_([ITEM_STATUS_NOT_PROCESSED, ITEM_STATUS_CANCELLED]),
+        ).all()
+        if not items:
+            return None
+        for item in items:
+            item.status = ITEM_STATUS_PENDING
+            item.finished_at = None
+        batch.status = BATCH_STATUS_QUEUED
+        batch.cancel_requested = False
+        batch.finished_at = None
+        batch.worker_id = None
+        _recount_batch(session, batch_id)
+    return load_batch(batch_id)
+
+
+def retry_failed_batch(batch_id: str) -> dict[str, Any] | None:
+    """Requeue only errors and preserve the failed attempt audit trail."""
+    with SessionLocal.begin() as session:
+        batch = session.get(DbBatch, batch_id)
+        if batch is None:
+            return None
+        items = session.query(BatchItem).filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_ERROR).all()
+        if not items:
+            return None
+        for item in items:
+            history = list(item.attempt_history or [])
+            history.append({
+                "attempt": int(item.retry_count or 0) + 1,
+                "run_id": item.run_id,
+                "status": item.status,
+                "error_data": item.error_data or {},
+                "result_data": item.result_data or {},
+                "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+            })
+            item.attempt_history = history
+            item.retry_count = int(item.retry_count or 0) + 1
+            item.status = ITEM_STATUS_PENDING
+            item.run_id = None
+            item.result_data = {}
+            item.error_data = {}
+            item.finished_at = None
+        batch.status = BATCH_STATUS_QUEUED
+        batch.cancel_requested = False
+        batch.finished_at = None
+        batch.worker_id = None
+        _recount_batch(session, batch_id)
+    return load_batch(batch_id)
+
+
 def cancel_pending_items(session: Any, batch_id: str) -> None:
     now = utc_now()
     (
         session.query(BatchItem)
         .filter(BatchItem.batch_id == batch_id, BatchItem.status == ITEM_STATUS_PENDING)
-        .update({BatchItem.status: ITEM_STATUS_CANCELLED, BatchItem.finished_at: now}, synchronize_session=False)
+        .update({BatchItem.status: ITEM_STATUS_NOT_PROCESSED, BatchItem.finished_at: now}, synchronize_session=False)
     )
 
 

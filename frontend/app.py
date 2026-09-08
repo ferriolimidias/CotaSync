@@ -46,6 +46,7 @@ from frontend.api_client import (  # noqa: E402
     DemoApiError,
     DemoApiTimeout,
     confirm_last_extraction_result,
+    batch_operation,
     create_batch,
     create_client,
     deactivate_client,
@@ -904,15 +905,40 @@ def _render_batch_execution(actions_by_key: dict[str, dict]) -> None:
         if isinstance(batch, dict) and batch:
             status = str(batch.get("status") or "")
             batch_rows = batch.get("rows") if isinstance(batch.get("rows"), list) else []
-            completed = sum(
-                1
-                for row in batch_rows
-                if isinstance(row, dict) and row.get("status") in {"success", "error", "cancelled", "interrupted"}
-            )
+            completed = int(batch.get("processed_items") or 0)
             total = len(batch_rows)
             st.markdown("### Lote atual")
             st.write(f"**Batch:** `{batch.get('batch_id')}` · **Status:** `{status}`")
             st.progress(0 if total == 0 else completed / total)
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("Processados", f"{completed}/{total}")
+            summary_cols[1].metric("Sucesso", int(batch.get("success_items") or 0))
+            summary_cols[2].metric("Erros", int(batch.get("error_items") or 0))
+            summary_cols[3].metric("Não processados", int(batch.get("not_processed_items") or 0))
+            pending_google = int(batch.get("google_pending_count") or 0)
+            if pending_google:
+                st.info(f"Google Sheets: {pending_google} atualização(ões) pendente(s). A coleta não depende do Google.")
+            action_cols = st.columns(3)
+            if int(batch.get("not_processed_items") or 0) > 0 and action_cols[0].button("Retomar pendentes", key=f"resume-pending-{batch_id}"):
+                try:
+                    batch_operation(batch_id, "resume-pending", api_base_url=API_BASE_URL)
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+            if int(batch.get("error_items") or 0) > 0 and action_cols[1].button("Reprocessar erros", key=f"retry-errors-{batch_id}"):
+                try:
+                    batch_operation(batch_id, "retry-errors", api_base_url=API_BASE_URL)
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
+            if pending_google and action_cols[2].button("Enviar ao Google Sheets", key=f"send-google-{batch_id}"):
+                try:
+                    result = batch_operation(batch_id, "send-google", api_base_url=API_BASE_URL)
+                    google_result = result.get("google", {}) if isinstance(result, dict) else {}
+                    st.success(f"Google processado: {google_result.get('synced', 0)} sincronizado(s).")
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
             table = _batch_rows_table(batch)
             if table:
                 st.dataframe(pd.DataFrame(table), use_container_width=True)

@@ -22,8 +22,7 @@ from backend.services.system_spreadsheets import (
 
 
 class SystemSpreadsheetTests(unittest.TestCase):
-    @patch("backend.services.system_spreadsheets.sync_google")
-    def test_mapping_reconciles_google_shape_without_version_and_uses_consorciado_name(self, sync) -> None:
+    def test_mapping_reconciles_google_shape_without_version_and_uses_consorciado_name(self) -> None:
         from backend.db import Client, SessionLocal
         from sqlalchemy import select
         sheet = create_system_spreadsheet("Mapeamento Google", ["Grupo", "Cota", "Consorciado", "Crédito"])
@@ -206,6 +205,77 @@ class SystemSpreadsheetTests(unittest.TestCase):
         with self.assertRaises(Exception):
             sync_google(sheet["id"], direction="outbound")
         self.assertEqual(sync_google.__name__, "sync_google")
+
+    @patch("backend.services.system_spreadsheets.sync_google_pending")
+    def test_action_output_enqueues_google_without_calling_google_during_collection(self, sync) -> None:
+        from backend.db import Client, GoogleSyncPending, Run, SessionLocal, SpreadsheetConnector
+        from backend.services.google_sync_queue import send_pending_google
+        from sqlalchemy import select
+        sheet = create_system_spreadsheet("Fila Google", ["Grupo", "Cota", "Resultado"])
+        field_id = next(field["field_id"] for field in sheet["fields"] if field["display_name"] == "Resultado")
+        client_id = f"queue-client-{uuid4()}"
+        run_id = f"queue-run-{uuid4()}"
+        with SessionLocal.begin() as db:
+            db.add(SpreadsheetConnector(id=str(uuid4()), spreadsheet_id=sheet["id"], connector_type="google_sheets", configuration={"spreadsheet_id": "google-test", "tab": "Clientes"}))
+            db.add(Client(id=client_id, name="Cliente", client_group="Lista", system_spreadsheet_id=sheet["id"], grupo="935", cota="112", versao="00", variables={"grupo": "935", "cota": "112", "versao": "00"}, active=True))
+            db.add(Run(id=run_id, action_id=None, status="success", extracted_data={"Resultado": "20"}))
+        apply_action_outputs_to_system_spreadsheet(
+            run_id=run_id,
+            action_id="action",
+            client_id=client_id,
+            variables={"grupo": "935", "cota": "112"},
+            result_payload={"dados_extraidos": {"Resultado": "20"}},
+            outputs=[{"output_id": "result", "label": "Resultado", "destination": {"type": "system_sheet_field", "system_spreadsheet_id": sheet["id"], "field_id": field_id}}],
+        )
+        sync.assert_not_called()
+        with SessionLocal() as db:
+            self.assertEqual(db.scalar(select(GoogleSyncPending.status).where(GoogleSyncPending.spreadsheet_id == sheet["id"])), "pending")
+        send_pending_google(spreadsheet_id=sheet["id"])
+        sync.assert_called_once()
+        with SessionLocal() as db:
+            self.assertEqual(db.scalar(select(GoogleSyncPending.status).where(GoogleSyncPending.spreadsheet_id == sheet["id"])), "synced")
+
+    @patch("backend.services.system_spreadsheets.sync_google_pending")
+    def test_google_pending_failure_keeps_internal_result_and_retry_has_no_browser_path(self, sync) -> None:
+        from backend.db import Client, GoogleSyncPending, Run, SessionLocal, SpreadsheetConnector
+        from backend.services.google_sync_queue import send_pending_google
+        from backend.services.system_spreadsheets import SystemSpreadsheetError
+        from sqlalchemy import select
+
+        sheet = create_system_spreadsheet("Fila Google falha", ["Grupo", "Cota", "Resultado"])
+        field_id = next(field["field_id"] for field in sheet["fields"] if field["display_name"] == "Resultado")
+        client_id = f"queue-failure-client-{uuid4()}"
+        run_id = f"queue-failure-run-{uuid4()}"
+        with SessionLocal.begin() as db:
+            db.add(SpreadsheetConnector(id=str(uuid4()), spreadsheet_id=sheet["id"], connector_type="google_sheets", configuration={"spreadsheet_id": "google-failure", "tab": "Clientes"}))
+            db.add(Client(id=client_id, name="Cliente", client_group="Lista", system_spreadsheet_id=sheet["id"], grupo="935", cota="112", versao="00", variables={"grupo": "935", "cota": "112", "versao": "00"}, active=True))
+            db.add(Run(id=run_id, action_id=None, status="success", extracted_data={"Resultado": "040"}))
+
+        apply_action_outputs_to_system_spreadsheet(
+            run_id=run_id,
+            action_id="action",
+            client_id=client_id,
+            variables={"grupo": "935", "cota": "112", "versao": "00"},
+            result_payload={"dados_extraidos": {"Resultado": "040"}},
+            outputs=[{"output_id": "result", "label": "Resultado", "destination": {"type": "system_sheet_field", "system_spreadsheet_id": sheet["id"], "field_id": field_id}}],
+        )
+        sync.side_effect = SystemSpreadsheetError("Google indisponível")
+        failed = send_pending_google(spreadsheet_id=sheet["id"])
+        self.assertEqual(failed["failed"], 1)
+        sync.assert_called_once()
+        with SessionLocal() as db:
+            client = db.scalar(select(Client).where(Client.id == client_id))
+            pending = db.scalar(select(GoogleSyncPending).where(GoogleSyncPending.spreadsheet_id == sheet["id"]))
+            self.assertEqual(client.variables["resultado"], "040")
+            self.assertEqual(pending.status, "error")
+
+        sync.reset_mock()
+        sync.side_effect = None
+        retried = send_pending_google(spreadsheet_id=sheet["id"])
+        self.assertEqual(retried["synced"], 1)
+        self.assertEqual(sync.call_count, 1)
+        with SessionLocal() as db:
+            self.assertEqual(db.scalar(select(GoogleSyncPending.status).where(GoogleSyncPending.spreadsheet_id == sheet["id"])), "synced")
 
 
 if __name__ == "__main__":

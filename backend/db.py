@@ -250,7 +250,27 @@ class BatchItem(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    attempt_history: Mapped[list[Any]] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GoogleSyncPending(Base):
+    __tablename__ = "google_sync_pending"
+    __table_args__ = (UniqueConstraint("connector_id", "client_id", "field_id", name="uq_google_pending_target"),)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    connector_id: Mapped[str] = mapped_column(ForeignKey("spreadsheet_connectors.id", ondelete="CASCADE"), index=True)
+    spreadsheet_id: Mapped[str] = mapped_column(ForeignKey("data_sources.id", ondelete="CASCADE"), index=True)
+    client_id: Mapped[str | None] = mapped_column(ForeignKey("clients.id", ondelete="SET NULL"), index=True)
+    field_id: Mapped[str | None] = mapped_column(ForeignKey("data_source_fields.id", ondelete="SET NULL"), index=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id", ondelete="SET NULL"), index=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class WorkerInstance(Base):

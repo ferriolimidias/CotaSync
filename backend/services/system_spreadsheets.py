@@ -17,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
 from backend.db import Client, ClientList, DataSource, DataSourceField, Run, SessionLocal, SpreadsheetConnector
+from backend.services.google_sync_queue import enqueue_pending_change
 from backend.services.actions_repository import project_root
 from backend.services.client_fields import canonical_client_field_key
 
@@ -574,12 +575,97 @@ def sync_google(sheet_id: str, *, direction: str = "inbound", tenant_id: str = "
     return get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
 
 
-def apply_action_outputs_to_system_spreadsheet(*, run_id: str, action_id: str, client_id: str | None, variables: dict[str, Any], result_payload: dict[str, Any], outputs: list[dict[str, Any]]) -> dict[str, Any]:
+def sync_google_pending(sheet_id: str, changes: list[dict[str, Any]], *, tenant_id: str = "default") -> dict[str, Any]:
+    """Write only queued cells using one Google values batch request."""
+    sheet = get_system_spreadsheet(sheet_id, tenant_id=tenant_id)
+    with SessionLocal() as db:
+        connector = db.scalar(select(SpreadsheetConnector).where(
+            SpreadsheetConnector.spreadsheet_id == sheet_id,
+            SpreadsheetConnector.connector_type == "google_sheets",
+        ))
+        if connector is None:
+            raise SystemSpreadsheetError("A planilha não possui conector Google Sheets.")
+        connector_data = dict(connector.configuration or {})
+        clients = {
+            client.id: client
+            for client in db.scalars(select(Client).where(Client.id.in_({str(item.get("client_id")) for item in changes})))
+        }
+        fields = {field.id: field for field in db.scalars(select(DataSourceField).where(DataSourceField.data_source_id == sheet_id, DataSourceField.active.is_(True)))}
+    spreadsheet_id = str(connector_data.get("spreadsheet_id") or "")
+    tab = str(connector_data.get("tab") or "")
+    if not spreadsheet_id or not tab:
+        raise SystemSpreadsheetError("Conector Google incompleto.")
+    if not changes:
+        return {"updates": 0}
+
+    raw = _google_request(
+        "GET",
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{quote(tab, safe='')}",
+        readonly=True,
+    ).get("values", [])
+    if not raw:
+        raise SystemSpreadsheetError("A aba Google não possui dados.")
+    headers = [str(value or "").strip() for value in raw[0]]
+    header_keys = {_key(header): index + 1 for index, header in enumerate(headers)}
+    field_columns: dict[str, int] = {}
+    for field_id, field in fields.items():
+        field_columns[field_id] = header_keys.get(_key(field.display_name), int(str(field.source_column_reference or "column:0").split(":")[-1]) + 1)
+
+    config = sheet.get("identity_mapping") or {}
+    identity_keys = {
+        role: _mapping_key(list(fields.values()), config.get(role), role)
+        for role in ("grupo", "cota", "versao")
+    }
+    version_default = str(sheet.get("version_default") or "")
+    external_rows: dict[str, int] = {}
+    for row_number, raw_row in enumerate(raw[1:], start=2):
+        values = {(_key(headers[index]) if index < len(headers) else f"column_{index}"): str(value or "") for index, value in enumerate(raw_row)}
+        version = values.get(identity_keys["versao"], "") or version_default
+        key = "|".join((values.get(identity_keys["grupo"], ""), values.get(identity_keys["cota"], ""), version))
+        if key.strip("|"):
+            external_rows[key] = row_number
+
+    def column_name(number: int) -> str:
+        result = ""
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            result = chr(65 + remainder) + result
+        return result
+
+    data: list[dict[str, Any]] = []
+    for change in changes:
+        client = clients.get(str(change.get("client_id") or ""))
+        field = fields.get(str(change.get("field_id") or ""))
+        if client is None or field is None:
+            raise SystemSpreadsheetError("Pendência Google referencia cliente ou campo inexistente.")
+        client_values = dict(client.variables or {})
+        key = "|".join((str(client_values.get(identity_keys["grupo"], client.grupo or "")), str(client_values.get(identity_keys["cota"], client.cota or "")), str(client_values.get(identity_keys["versao"], client.versao or "") or version_default)))
+        row_number = external_rows.get(key)
+        column = field_columns.get(field.id)
+        if row_number is None or column is None:
+            raise SystemSpreadsheetError("Não foi possível localizar a linha/campo da pendência no Google Sheets.")
+        escaped_tab = tab.replace("'", "''")
+        data.append({"range": f"'{escaped_tab}'!{column_name(column)}{row_number}", "majorDimension": "ROWS", "values": [[str(change.get("value") or "")]]})
+    _google_request(
+        "POST",
+        f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values:batchUpdate",
+        readonly=False,
+        payload={"valueInputOption": "RAW", "data": data},
+    )
+    with SessionLocal.begin() as db:
+        connector = db.scalar(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id, SpreadsheetConnector.connector_type == "google_sheets"))
+        if connector:
+            connector.status, connector.last_error, connector.last_synced_at = "synchronized", None, datetime.now(UTC)
+    return {"updates": len(data)}
+
+
+def apply_action_outputs_to_system_spreadsheet(*, run_id: str, action_id: str, client_id: str | None, variables: dict[str, Any], result_payload: dict[str, Any], outputs: list[dict[str, Any]], batch_id: str | None = None) -> dict[str, Any]:
     if result_payload.get("_system_sheet_outputs_applied"):
         return {"applied": list(result_payload.get("system_sheet_outputs") or []), "synchronized_sheets": []}
     extracted = result_payload.get("dados_extraidos") if isinstance(result_payload.get("dados_extraidos"), dict) else {}
     applied: list[dict[str, Any]] = []
     sheet_ids: set[str] = set()
+    pending_count = 0
     with SessionLocal.begin() as db:
         client = db.get(Client, client_id) if client_id else None
         if client is None:
@@ -617,20 +703,22 @@ def apply_action_outputs_to_system_spreadsheet(*, run_id: str, action_id: str, c
             if internal_key == "versao": client.versao = str(value)
             client.system_spreadsheet_id = sheet.id
             sheet_ids.add(sheet.id)
+            enqueue_pending_change(
+                db,
+                spreadsheet_id=sheet.id,
+                client_id=client.id,
+                field_id=field.id,
+                value=str(value),
+                batch_id=batch_id,
+                run_id=run_id,
+            )
+            pending_count += 1
             applied.append({"output_id": output.get("output_id"), "field_id": field.id, "value": str(value), "system_spreadsheet_id": sheet.id})
         run = db.get(Run, run_id)
         if run is not None:
             diagnostics = dict(run.diagnostics or {})
             diagnostics["system_sheet_outputs"] = applied
             run.diagnostics = diagnostics
-        result_payload["system_sheet_outputs"] = applied
-        result_payload["_system_sheet_outputs_applied"] = True
-    for sheet_id in sheet_ids:
-        with SessionLocal() as db:
-            connector = db.scalar(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet_id, SpreadsheetConnector.connector_type == "google_sheets"))
-        if connector is not None:
-            try:
-                sync_google(sheet_id, direction="outbound")
-            except SystemSpreadsheetError:
-                pass
-    return {"applied": applied, "synchronized_sheets": sorted(sheet_ids)}
+    result_payload["system_sheet_outputs"] = applied
+    result_payload["_system_sheet_outputs_applied"] = True
+    return {"applied": applied, "pending": pending_count, "synchronized_sheets": [], "google_status": "pending" if pending_count else "not_required"}

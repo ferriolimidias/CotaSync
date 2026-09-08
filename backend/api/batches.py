@@ -15,7 +15,10 @@ from backend.services.batch_runner import (
     list_batches,
     load_batch,
     resume_batch,
+    resume_pending_batch,
+    retry_failed_batch,
 )
+from backend.services.google_sync_queue import send_pending_google
 from backend.services.auth import require_user
 from backend.worker import latest_worker_status
 
@@ -116,3 +119,28 @@ async def resume_batch_endpoint(batch_id: str) -> dict[str, Any]:
     if batch is None:
         raise HTTPException(status_code=409, detail="Este lote não possui item aguardando atenção para retomar.")
     return {"status": "ok", "batch": batch}
+
+
+@router.post("/{batch_id}/resume-pending")
+async def resume_pending_batch_endpoint(batch_id: str) -> dict[str, Any]:
+    batch = resume_pending_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=409, detail="Este lote não possui clientes não processados para retomar.")
+    return {"status": "ok", "batch": batch}
+
+
+@router.post("/{batch_id}/retry-errors")
+async def retry_failed_batch_endpoint(batch_id: str) -> dict[str, Any]:
+    batch = retry_failed_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=409, detail="Este lote não possui erros para reprocessar.")
+    return {"status": "ok", "batch": batch}
+
+
+@router.post("/{batch_id}/send-google")
+async def send_batch_google_endpoint(batch_id: str) -> dict[str, Any]:
+    batch = load_batch(batch_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Batch nao encontrado.")
+    result = send_pending_google(spreadsheet_id=batch.get("spreadsheet_id") or None)
+    return {"status": "ok", "batch": load_batch(batch_id), "google": result}
