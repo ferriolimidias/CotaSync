@@ -20,6 +20,7 @@ import type {
   DataSource,
   LearningAISettings,
   GoogleSheetsSettings,
+  AccessProfile,
 } from "@/types/api";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
@@ -607,6 +608,20 @@ export async function validateExternalSession() {
     "/api/v1/external-session/validate",
     { method: "POST" },
   );
+}
+
+export async function listAccessProfiles() {
+  const payload = await apiFetch<{ profiles: AccessProfile[] }>("/api/v1/access-profiles");
+  return payload.profiles;
+}
+
+export async function createAccessProfile(input: { display_name: string; login_identifier: string; external_code?: string }) {
+  const payload = await apiFetch<{ profile: AccessProfile }>("/api/v1/access-profiles", { method: "POST", body: JSON.stringify(input) });
+  return payload.profile;
+}
+
+export async function validateAccessProfile(id: string) {
+  return apiFetch<{ available: boolean; profile: AccessProfile; diagnostic?: Record<string, unknown> }>(`/api/v1/access-profiles/${id}/validate`, { method: "POST" });
 }
 
 export async function createLearningSession() {

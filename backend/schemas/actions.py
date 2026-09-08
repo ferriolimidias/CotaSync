@@ -20,6 +20,8 @@ class ActionSummary(BaseModel):
     variables: list[ActionVariable] = Field(default_factory=list)
     allowed_list_ids: list[str] = Field(default_factory=list)
     scope_mode: str = "all"
+    required_access_profile_id: str | None = None
+    run_start_strategy: str = "persistent_graph_reentry"
     steps_count: int
     has_url: bool
     test_mode: bool = False

@@ -31,6 +31,9 @@ class RunRecord(BaseModel):
     session_id: str | None = None
     client_id: str | None = None
     batch_id: str | None = None
+    access_profile_id: str | None = None
+    external_system_id: str | None = None
+    run_start_strategy: str | None = None
     created_at: str
     started_at: str | None = None
     finished_at: str | None = None

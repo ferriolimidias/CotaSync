@@ -2682,7 +2682,20 @@ class DemoSessionManager:
             "ai_recovery_enabled": bool(raw_instruction.get("ai_recovery_enabled", False)),
             "learning_mode": str(raw_instruction.get("learning_mode") or "free_action"),
             "data_source_id": str(raw_instruction.get("data_source_id") or "") or None,
+            "required_access_profile_id": str(raw_instruction.get("required_access_profile_id") or "") or None,
+            "run_start_strategy": str(raw_instruction.get("run_start_strategy") or "persistent_graph_reentry"),
         }
+        if session.guided_learning["run_start_strategy"] == "external_entry_each_run" and session.guided_learning.get("required_access_profile_id"):
+            from backend.db import ExternalAccessProfile, ExternalSystem, SessionLocal
+            with SessionLocal() as db:
+                profile = db.get(ExternalAccessProfile, session.guided_learning["required_access_profile_id"])
+                system = db.get(ExternalSystem, profile.external_system_id) if profile else None
+                entry_url = str((system.config or {}).get("entry_url") or (system.config or {}).get("external_login_url") or "") if system else ""
+            if profile is None or not profile.active:
+                raise DemoSessionError("Perfil de acesso não encontrado ou inativo.")
+            if not entry_url:
+                raise DemoSessionError("O sistema externo não possui entry_url configurado.")
+            await session.page.goto(entry_url, wait_until="domcontentloaded", timeout=30000)
         session.output_candidates = []
         session.learning_synthesis = {}
         session.final_page_snapshot = {}
@@ -2947,6 +2960,8 @@ class DemoSessionManager:
         action_timeout_seconds: int | None = None,
         learning_mode: str = "free_action",
         data_source_id: str | None = None,
+        required_access_profile_id: str | None = None,
+        run_start_strategy: str = "persistent_graph_reentry",
     ) -> dict[str, Any]:
         session = self._get(session_id)
         action_name = str(name or "").strip()
@@ -3411,7 +3426,29 @@ class DemoSessionManager:
             "expected_system_host": expected_system_host,
             "microsoft_hosts": microsoft_hosts,
             "session_guardian_enabled": bool(session.external_login_url or session.browser_mode == "desktop_browser"),
+            "required_access_profile_id": str(required_access_profile_id or session.guided_learning.get("required_access_profile_id") or "").strip() or None,
+            "run_start_strategy": str(run_start_strategy or session.guided_learning.get("run_start_strategy") or "persistent_graph_reentry").strip(),
         }
+        if learned_action["required_access_profile_id"]:
+            from backend.db import ExternalAccessProfile, SessionLocal
+            with SessionLocal() as db:
+                profile_row = db.get(ExternalAccessProfile, learned_action["required_access_profile_id"])
+            if profile_row is None or not profile_row.active:
+                raise DemoSessionError("Perfil de acesso não encontrado ou inativo.")
+            learned_action["access_profile_name"] = profile_row.display_name
+            learned_action["access_profile_email_or_identifier"] = profile_row.login_identifier
+            learned_action["microsoft_saved_account_identifier"] = profile_row.login_identifier
+            learned_action["access_bootstrap"] = [
+                {
+                    "event_type": str(event.get("event_type") or ""),
+                    "selector": str(event.get("selector") or "")[:500],
+                    "target_text": str(event.get("target_text") or event.get("target_label") or "")[:255],
+                    "url_before": str(event.get("url_before") or "")[:1000],
+                    "page_ref": str(event.get("page_ref") or "main"),
+                }
+                for event in learning_events
+                if isinstance(event, dict) and "microsoft" in str(event.get("url_before") or "").casefold()
+            ]
         from backend.services.learning_ai import LearningAIObserver
         learned_action["learning_ai_analysis"] = LearningAIObserver().analyze(
             learned_action["raw_learning_trace"]

@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, DataSource, DataSourceField, Run as DbRun, SessionLocal
+from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, ClientList, DataSource, DataSourceField, ExternalAccessProfile, ExternalSystem, Run as DbRun, SessionLocal
 from backend.services.google_sync_queue import pending_count
 from backend.services.actions_repository import find_action
 from backend.services.clients_repository import (
@@ -24,6 +24,7 @@ from backend.services.clients_repository import (
     validate_clients_for_action,
 )
 from backend.services.learned_graph import validate_graph_reentrancy
+from backend.services.access_profiles import validate_access_bootstrap
 
 logger = logging.getLogger("cotasync.batch_runner")
 
@@ -494,17 +495,38 @@ def create_batch(
     with SessionLocal() as session:
         db_action = session.get(DbAction, action.id)
         published_version_id = db_action.published_version_id if db_action is not None else None
+        version = session.get(ActionVersion, published_version_id) if published_version_id else None
+        list_row = session.get(ClientList, str(list_id)) if list_id else None
+        external_system = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
+        required_profile_id = str((version.required_access_profile_id if version else None) or (db_action.required_access_profile_id if db_action else None) or "").strip() or None
+        run_start_strategy = str((version.run_start_strategy if version else None) or "persistent_graph_reentry").strip()
+        profile = session.get(ExternalAccessProfile, required_profile_id) if required_profile_id else None
+        if list_id and (list_row is None or not list_row.active):
+            raise BatchRunnerError("Lista de clientes não encontrada.")
+        if list_row and list_row.access_profile_id != required_profile_id:
+            raise BatchRunnerError("A Action e a Lista usam perfis de acesso diferentes ou a Action ainda não possui perfil vinculado.")
+        if run_start_strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
+            raise BatchRunnerError("Estratégia de início da Action inválida.")
+        if required_profile_id and external_system is None:
+            raise BatchRunnerError("Sistema externo do perfil não está configurado.")
+        if required_profile_id and (profile is None or not profile.active or profile.external_system_id != external_system.id):
+            raise BatchRunnerError("Perfil de acesso inexistente, inativo ou incompatível com o sistema externo.")
     if published_version_id:
-        with SessionLocal() as session:
-            version = session.get(ActionVersion, published_version_id)
-            definition = dict(version.definition or {}) if version is not None else {}
-        reentrancy = validate_graph_reentrancy(definition)
-        if not reentrancy["valid"]:
-            error = reentrancy["errors"][0] if reentrancy["errors"] else {"code": "action_not_reentrant"}
-            raise BatchRunnerError(
-                "Ação não está pronta para execução em massa: "
-                + str(error.get("code") or "action_not_reentrant")
-            )
+        definition = dict(version.definition or {}) if version is not None else {}
+        if run_start_strategy == "external_entry_each_run":
+            if not required_profile_id:
+                raise BatchRunnerError("Ação com entrada externa precisa de perfil de acesso vinculado.")
+            config = external_system.config if external_system is not None else {}
+            if not str(config.get("entry_url") or config.get("external_login_url") or "").strip():
+                raise BatchRunnerError("Ação com entrada externa precisa de entry_url configurado.")
+            bootstrap = validate_access_bootstrap(definition, profile_id=required_profile_id)
+            if not bootstrap["valid"]:
+                raise BatchRunnerError("Ação não possui bootstrap de acesso validado: " + str(bootstrap["code"]))
+        else:
+            reentrancy = validate_graph_reentrancy(definition)
+            if not reentrancy["valid"]:
+                error = reentrancy["errors"][0] if reentrancy["errors"] else {"code": "action_not_reentrant"}
+                raise BatchRunnerError("Ação não está pronta para execução em massa: " + str(error.get("code") or "action_not_reentrant"))
     destinations = [
         output.get("destination")
         for output in (getattr(action, "outputs", []) or [])
@@ -602,7 +624,10 @@ def create_batch(
             db_batch = DbBatch(
                 id=batch_id,
                 action_id=action.id,
-                action_version_id=getattr(action, "published_version_id", None),
+                action_version_id=published_version_id,
+                access_profile_id=required_profile_id,
+                external_system_id=external_system.id if external_system is not None else None,
+                run_start_strategy=run_start_strategy,
                 client_group=str(client_group or "") or None,
                 status=BATCH_STATUS_QUEUED,
                 delay_seconds=max(0, float(delay_between_rows_seconds)),
@@ -612,7 +637,7 @@ def create_batch(
                 idempotency_user_id=normalized_user_id if normalized_key else None,
                 idempotency_operation=operation if normalized_key else None,
                 idempotency_fingerprint=fingerprint if normalized_key else None,
-                metadata_json={"source": source, "action_key": action.key, "action_name": action.name, "client_ids": batch["client_ids"], "spreadsheet_id": spreadsheet_id or "", "list_id": list_id or ""},
+                metadata_json={"source": source, "action_key": action.key, "action_name": action.name, "client_ids": batch["client_ids"], "spreadsheet_id": spreadsheet_id or "", "list_id": list_id or "", "access_profile_id": required_profile_id or "", "run_start_strategy": run_start_strategy},
             )
             session.add(db_batch)
             session.flush()

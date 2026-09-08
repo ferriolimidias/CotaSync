@@ -246,6 +246,22 @@ def configured_saved_account_texts(action: Any) -> list[str]:
     return result
 
 
+def detect_microsoft_account_picker(text: str, known_identifiers: list[str] | None = None) -> dict[str, Any]:
+    """Classify the account picker without relying on card position or AI."""
+    normalized = str(text or "").casefold()
+    picker = any(marker in normalized for marker in _PICK_ACCOUNT_WORDS)
+    identifiers = [str(item).strip() for item in (known_identifiers or []) if str(item).strip()]
+    available = [item for item in identifiers if item.casefold() in normalized]
+    signed_in = "signed in" in normalized or "conectado" in normalized or bool(available)
+    return {
+        "state": "account_picker" if picker else "not_account_picker",
+        "picker": picker,
+        "signed_in": signed_in,
+        "available_identifiers": available,
+        "profile_available": bool(picker and signed_in and available),
+    }
+
+
 @dataclass
 class SessionGuardianConfig:
     check_timeout_seconds: int = field(

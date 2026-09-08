@@ -2,7 +2,7 @@ import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tansta
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Check, Copy, ExternalLink, FileKey2, KeyRound, Save, ShieldCheck, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, FileKey2, KeyRound, Save, ShieldCheck, Trash2, UserRoundPlus } from "lucide-react";
 
 import { AppShell } from "@/components/cotasync/AppShell";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
@@ -25,6 +25,9 @@ import {
   saveGoogleSheetsCredential,
   removeGoogleSheetsCredential,
   testGoogleSheetsCredential,
+  listAccessProfiles,
+  createAccessProfile,
+  validateAccessProfile,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
 import { externalSessionStatusLabel, loginModeLabel } from "@/lib/status-labels";
@@ -45,7 +48,10 @@ function ConfigPage() {
     external_login_url: "",
     access_profile_email_or_identifier: "",
     expected_system_host: "",
+    entry_url: "",
+    run_start_strategy: "persistent_graph_reentry",
   });
+  const [profileForm, setProfileForm] = useState({ display_name: "", login_identifier: "", external_code: "" });
   const [aiForm, setAiForm] = useState({ enabled: false, provider: "openai_compatible", model: "gpt-4o-mini", base_url: "", api_key: "" });
   const [googleCredential, setGoogleCredential] = useState<File | null>(null);
   const external = useQuery({
@@ -61,6 +67,8 @@ function ConfigPage() {
   });
   const aiSettings = useQuery({ queryKey: ["learning-ai-settings"], queryFn: getLearningAISettings, retry: 1, enabled: user?.role === "admin" });
   const googleSettings = useQuery({ queryKey: ["google-sheets-settings"], queryFn: getGoogleSheetsSettings, retry: 1, enabled: user?.role === "admin" });
+  const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, retry: 1 });
+  const createProfile = useMutation({ mutationFn: createAccessProfile, onSuccess: () => { setProfileForm({ display_name: "", login_identifier: "", external_code: "" }); toast.success("Perfil de acesso cadastrado."); void queryClient.invalidateQueries({ queryKey: ["access-profiles"] }); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível cadastrar o perfil.") });
   const saveAI = useMutation({
     mutationFn: saveLearningAISettings,
     onSuccess: (saved) => { setAiForm((current) => ({ ...current, ...saved, api_key: "" })); toast.success("Configuração da IA salva."); void queryClient.invalidateQueries({ queryKey: ["learning-ai-settings"] }); },
@@ -135,6 +143,8 @@ function ConfigPage() {
         access_profile_email_or_identifier:
           externalConfig.data.access_profile_email_or_identifier || "",
         expected_system_host: externalConfig.data.expected_system_host || "",
+        entry_url: externalConfig.data.entry_url || externalConfig.data.external_login_url || "",
+        run_start_strategy: externalConfig.data.run_start_strategy || "persistent_graph_reentry",
       });
     }
   }, [externalConfig.data]);
@@ -244,6 +254,14 @@ function ConfigPage() {
                 />
               </div>
               <div className="grid gap-2">
+                <Label htmlFor="external-run-strategy">Início de cada execução</Label>
+                <select id="external-run-strategy" className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={form.run_start_strategy || "persistent_graph_reentry"} onChange={(event) => updateForm("run_start_strategy", event.target.value)}>
+                  <option value="external_entry_each_run">Entrada do sistema a cada Run</option>
+                  <option value="persistent_graph_reentry">Reentrada pelo grafo aprendido</option>
+                </select>
+                <p className="text-xs text-muted-foreground">O navegador continua persistente; somente a nova Run volta ao entry point configurado.</p>
+              </div>
+              <div className="grid gap-2">
                 <Label htmlFor="external-identifier">Usuário / identificador</Label>
                 <Input
                   id="external-identifier"
@@ -305,6 +323,25 @@ function ConfigPage() {
                 </span>
               </StatusRow>
             </div>
+
+            {user?.role === "admin" && (
+              <div className="space-y-3 border-t border-border pt-4">
+                <div><h3 className="text-sm font-semibold text-foreground">Perfis de acesso</h3><p className="text-xs text-muted-foreground">Identidades externas estáveis. Senha, MFA, cookies e tokens nunca são cadastrados aqui.</p></div>
+                <div className="space-y-2">
+                  {(profiles.data || []).map((profile) => (
+                    <div key={profile.id} className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                      <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div></div>
+                      <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => result.available ? toast.success("Conta disponível no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual.")).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
+                    </div>
+                  ))}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <Input placeholder="Nome amigável" value={profileForm.display_name} onChange={(event) => setProfileForm((current) => ({ ...current, display_name: event.target.value }))} />
+                  <Input placeholder="Login/e-mail" value={profileForm.login_identifier} onChange={(event) => setProfileForm((current) => ({ ...current, login_identifier: event.target.value }))} />
+                  <Button type="button" onClick={() => createProfile.mutate(profileForm)} disabled={createProfile.isPending || !profileForm.display_name.trim() || !profileForm.login_identifier.trim()}><UserRoundPlus className="h-4 w-4" /> Adicionar perfil</Button>
+                </div>
+              </div>
+            )}
 
             <div className="flex flex-col gap-2 border-t border-border pt-4 sm:flex-row sm:flex-wrap">
               <Button className="w-full sm:w-auto" asChild>

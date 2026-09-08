@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
-from backend.db import Action as DbAction, ActionVersion, SessionLocal
+from backend.db import Action as DbAction, ActionVersion, Client, ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
 from backend.services.action_pages import expected_action_hosts, validate_action_page_url
 from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.learned_graph import canonicalize_graph_metadata
@@ -295,6 +295,21 @@ def _load_action_config(action: ActionDetail) -> dict[str, Any]:
                     raw = dict(version.definition or {})
                     raw.setdefault("nome_amigavel", db_action.name)
                     raw.setdefault("descricao", db_action.description)
+                    raw.setdefault("required_access_profile_id", version.required_access_profile_id or db_action.required_access_profile_id)
+                    raw.setdefault("run_start_strategy", version.run_start_strategy or "persistent_graph_reentry")
+                    if version.run_start_strategy == "external_entry_each_run":
+                        system = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
+                        if system is not None:
+                            raw.setdefault("entry_url", str((system.config or {}).get("entry_url") or (system.config or {}).get("external_login_url") or ""))
+                            raw.setdefault("external_system_id", system.id)
+                    profile_id = str(raw.get("required_access_profile_id") or "").strip()
+                    if profile_id:
+                        profile = session.get(ExternalAccessProfile, profile_id)
+                        if profile is not None:
+                            raw.setdefault("access_profile_name", profile.display_name)
+                            raw.setdefault("access_profile_email_or_identifier", profile.login_identifier)
+                            raw.setdefault("microsoft_saved_account_identifier", profile.login_identifier)
+                            raw.setdefault("external_system_id", profile.external_system_id)
                     enriched = enrich_action_access_profile(raw)
                     if enriched.get("execution_model") == "learned_graph":
                         enriched = canonicalize_graph_metadata(enriched)
@@ -503,9 +518,31 @@ def start_action_run(
         session_id=request.session_id,
         client_id=str(request.variables.get("client_id") or "") or None,
         batch_id=request.batch_id,
+        access_profile_id=None,
+        external_system_id=None,
+        run_start_strategy=None,
         created_at=created_at,
         variables=mask_variables(request.variables),
     )
+    with SessionLocal() as session:
+        db_action = session.get(DbAction, action.id)
+        version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+        client_id = str(request.variables.get("client_id") or "").strip()
+        client = session.get(Client, client_id) if client_id else None
+        profile_id = str((version.required_access_profile_id if version else None) or (db_action.required_access_profile_id if db_action else None) or "").strip() or None
+        if client and client.list_id:
+            client_list = session.get(ClientList, client.list_id)
+            if client_list:
+                if profile_id and profile_id != client_list.access_profile_id:
+                    raise RuntimeError("A Action e a Lista usam perfis de acesso diferentes.")
+                profile_id = client_list.access_profile_id
+        profile = session.get(ExternalAccessProfile, profile_id) if profile_id else None
+        if (version and version.required_access_profile_id) and profile is None:
+            raise RuntimeError("O perfil de acesso exigido pela Action não está disponível.")
+        external_system = session.get(ExternalSystem, profile.external_system_id) if profile else None
+        run.access_profile_id = profile.id if profile else None
+        run.external_system_id = external_system.id if external_system else None
+        run.run_start_strategy = version.run_start_strategy if version else None
     append_run(run)
 
     run.status = "running"

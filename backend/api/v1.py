@@ -38,6 +38,7 @@ from backend.services.batch_runner import (
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
+from backend.services.session_guardian import detect_microsoft_account_picker
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -74,7 +75,15 @@ from backend.services.system_spreadsheets import (
 )
 from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
 from backend.services.client_lists import ClientListError, create_client_list, list_client_lists
-from backend.services.client_lists import rename_client_list
+from backend.services.client_lists import rename_client_list, set_client_list_access_profile
+from backend.services.access_profiles import (
+    AccessProfileError,
+    access_profile_public,
+    create_access_profile,
+    current_external_system_id,
+    list_access_profiles,
+    update_access_profile,
+)
 from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
 from backend.services.google_settings import public_settings as public_google_settings, remove_credentials as remove_google_credentials, save_credentials as save_google_credentials
 from backend.worker import latest_worker_status
@@ -125,6 +134,20 @@ class ExternalSystemConfigPayload(BaseModel):
     external_login_url: str = ""
     access_profile_email_or_identifier: str = ""
     expected_system_host: str = ""
+    run_start_strategy: str = "persistent_graph_reentry"
+
+
+class AccessProfilePayload(BaseModel):
+    external_system_id: str | None = None
+    display_name: str
+    login_identifier: str
+    external_code: str = ""
+
+
+class AccessProfilePatchPayload(BaseModel):
+    display_name: str | None = None
+    external_code: str | None = None
+    active: bool | None = None
 
 
 class ExternalSessionLoginPayload(BaseModel):
@@ -450,6 +473,8 @@ def _external_session_payload(config: dict[str, Any]) -> dict[str, Any]:
     configured = bool(system_name and login_url)
     return {
         "external_system_name": system_name,
+        "entry_url": str(config.get("entry_url") or login_url),
+        "run_start_strategy": str(config.get("run_start_strategy") or "persistent_graph_reentry"),
         "external_system_configured": configured,
         "login_url_configured": bool(login_url),
         "login_configured": bool(login_url),
@@ -458,6 +483,7 @@ def _external_session_payload(config: dict[str, Any]) -> dict[str, Any]:
         "automation": "manual_operator",
         "validation_mode": validation_mode,
         "session_status": "unknown" if configured else "not_configured",
+        "microsoft_session_available": False,
         "expected_system_host_configured": bool(str(config.get("expected_system_host") or "").strip()),
         "updated_at": config.get("updated_at"),
     }
@@ -470,6 +496,8 @@ def _external_system_config_payload(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "external_system_name": system_name,
         "external_login_url": login_url,
+        "entry_url": str(config.get("entry_url") or login_url),
+        "run_start_strategy": str(config.get("run_start_strategy") or "persistent_graph_reentry"),
         "access_profile_email_or_identifier": str(
             config.get("access_profile_email_or_identifier")
             or config.get("microsoft_saved_account_identifier")
@@ -536,6 +564,25 @@ async def _external_session_status_from_browser(config: dict[str, Any]) -> str:
         return "authenticated"
     if is_reauthentication_url(current_url, expected_hosts):
         return "unauthenticated"
+    microsoft_hosts = {str(item).strip().lower() for item in config.get("microsoft_hosts", []) if str(item).strip()}
+    if any(current_host == host or current_host.endswith(f".{host}") for host in microsoft_hosts):
+        try:
+            playwright = await async_playwright().start()
+            try:
+                connection = await browser_provider("desktop_browser").connect(playwright, "external-account-status")
+                text_content = (await connection.page.locator("body").inner_text(timeout=3000)).casefold()
+            finally:
+                await playwright.stop()
+            identifier = str(config.get("access_profile_email_or_identifier") or config.get("microsoft_saved_account_identifier") or "").casefold()
+            picker = detect_microsoft_account_picker(text_content, [identifier] if identifier else [])
+            if picker["profile_available"]:
+                return "microsoft_session_available"
+            if any(marker in text_content for marker in ("enter password", "digite sua senha", "password")):
+                return "reauth_required"
+            if any(marker in text_content for marker in ("approve sign in", "verify your identity", "mfa", "autenticador")):
+                return "reauth_required"
+        except Exception:
+            pass
     return "unknown"
 
 
@@ -678,16 +725,19 @@ async def client_lists_list(_user: AuthUser = Depends(require_user)) -> dict[str
 @router.post("/client-lists", summary="Cria uma lista operacional de clientes")
 async def client_list_create(payload: dict[str, Any], _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        return {"status": "ok", "client_list": create_client_list(str(payload.get("name") or ""))}
-    except ClientListError as exc:
+        return {"status": "ok", "client_list": create_client_list(str(payload.get("name") or ""), access_profile_id=str(payload.get("access_profile_id") or "").strip() or None)}
+    except (ClientListError, AccessProfileError) as exc:
         raise _error(422, "CLIENT_LIST_INVALID", str(exc)) from exc
 
 
 @router.patch("/client-lists/{list_id}", summary="Renomeia lista de clientes")
 async def client_list_rename(list_id: str, payload: dict[str, Any], _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        return {"status": "ok", "client_list": rename_client_list(list_id, str(payload.get("name") or ""))}
-    except ClientListError as exc:
+        renamed = rename_client_list(list_id, str(payload.get("name") or ""))
+        if "access_profile_id" in payload:
+            renamed = set_client_list_access_profile(list_id, str(payload.get("access_profile_id") or "").strip() or None)
+        return {"status": "ok", "client_list": renamed}
+    except (ClientListError, AccessProfileError) as exc:
         raise _error(422, "CLIENT_LIST_INVALID", str(exc)) from exc
 
 
@@ -976,9 +1026,12 @@ async def action_scope_update(action_id: str, payload: ActionScopePayload, _user
         if action is None:
             raise _error(404, "ACTION_NOT_FOUND", "Acao nao encontrada.")
         if requested:
-            valid = {row.id for row in session.scalars(select(ClientList).where(ClientList.id.in_(requested), ClientList.tenant_id == "default", ClientList.active.is_(True)))}
+            list_rows = list(session.scalars(select(ClientList).where(ClientList.id.in_(requested), ClientList.tenant_id == "default", ClientList.active.is_(True))))
+            valid = {row.id for row in list_rows}
             if valid != set(requested):
                 raise _error(422, "ACTION_SCOPE_INVALID", "Ação referencia uma lista inexistente ou não autorizada.")
+            if action.required_access_profile_id and any(row.access_profile_id != action.required_access_profile_id for row in list_rows):
+                raise _error(422, "ACTION_PROFILE_SCOPE_INVALID", "As listas selecionadas usam outro perfil de acesso.")
         action.allowed_list_ids = requested
         action.scope_mode = "selected" if requested else "all"
     result = find_action(action_id)
@@ -1016,6 +1069,8 @@ async def action_versions(action_id: str, _user: AuthUser = Depends(require_user
                 "published": version.id == action.published_version_id,
                 "created_at": version.created_at.isoformat() if version.created_at else None,
                 "published_at": version.published_at.isoformat() if version.published_at else None,
+                "required_access_profile_id": version.required_access_profile_id,
+                "run_start_strategy": version.run_start_strategy,
             }
             for version in versions
         ]
@@ -1246,6 +1301,8 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
             action_timeout_seconds=payload.action_timeout_seconds,
             learning_mode=payload.learning_mode,
             data_source_id=payload.data_source_id,
+            required_access_profile_id=payload.required_access_profile_id,
+            run_start_strategy=payload.run_start_strategy,
         )
     except DemoSessionError as exc:
         raise _error(409, "LEARNING_SAVE_ERROR", str(exc)) from exc
@@ -1256,6 +1313,10 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
             valid = {row.id for row in session.scalars(select(ClientList).where(ClientList.id.in_(payload.allowed_list_ids), ClientList.tenant_id == "default", ClientList.active.is_(True)))}
             if db_action is None or valid != set(payload.allowed_list_ids):
                 raise _error(422, "ACTION_SCOPE_INVALID", "Ação referencia uma lista inexistente ou não autorizada.")
+            if db_action.required_access_profile_id:
+                scoped_lists = list(session.scalars(select(ClientList).where(ClientList.id.in_(payload.allowed_list_ids))))
+                if any(row.access_profile_id != db_action.required_access_profile_id for row in scoped_lists):
+                    raise _error(422, "ACTION_PROFILE_SCOPE_INVALID", "As listas selecionadas usam outro perfil de acesso.")
             db_action.allowed_list_ids = list(dict.fromkeys(payload.allowed_list_ids))
             db_action.scope_mode = "selected"
     return {"status": "ok", "action": action}
@@ -1334,6 +1395,57 @@ async def external_system_config(_user: AuthUser = Depends(require_user)) -> dic
     return {"status": "ok", "external_system": _external_system_config_payload(config)}
 
 
+@router.get("/access-profiles", summary="Lista perfis de acesso externos")
+async def access_profiles_list(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    return {"status": "ok", "profiles": list_access_profiles()}
+
+
+@router.post("/access-profiles", summary="Cadastra perfil de acesso externo")
+async def access_profile_create(payload: AccessProfilePayload, _admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        profile = create_access_profile(
+            external_system_id=payload.external_system_id or current_external_system_id() or "",
+            display_name=payload.display_name,
+            login_identifier=payload.login_identifier,
+            external_code=payload.external_code,
+        )
+    except AccessProfileError as exc:
+        raise _error(422, "ACCESS_PROFILE_INVALID", str(exc)) from exc
+    return {"status": "ok", "profile": profile}
+
+
+@router.patch("/access-profiles/{profile_id}", summary="Atualiza perfil de acesso externo")
+async def access_profile_update(profile_id: str, payload: AccessProfilePatchPayload, _admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        profile = update_access_profile(profile_id, display_name=payload.display_name, external_code=payload.external_code, active=payload.active)
+    except AccessProfileError as exc:
+        raise _error(409, "ACCESS_PROFILE_UPDATE_BLOCKED", str(exc)) from exc
+    return {"status": "ok", "profile": profile}
+
+
+@router.post("/access-profiles/{profile_id}/validate", summary="Valida disponibilidade do perfil no navegador")
+async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        profile = access_profile_public(profile_id)
+    except AccessProfileError as exc:
+        raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
+    health = await desktop_browser_health()
+    if not health.get("cdp_reachable"):
+        return {"status": "ok", "profile": {**profile, "session_status": "browser_offline"}, "available": False}
+    try:
+        playwright = await async_playwright().start()
+        try:
+            connection = await browser_provider("desktop_browser").connect(playwright, "access-profile-validate")
+            text_content = await connection.page.locator("body").inner_text(timeout=3000)
+        finally:
+            await playwright.stop()
+    except Exception:
+        return {"status": "ok", "profile": {**profile, "session_status": "unknown"}, "available": False}
+    picker = detect_microsoft_account_picker(text_content, [profile["login_identifier"]])
+    available = bool(picker["profile_available"])
+    return {"status": "ok", "profile": {**profile, "session_status": "session_available" if available else "unknown"}, "available": available, "diagnostic": {"account_picker": picker["state"], "matched_identifiers": picker["available_identifiers"]}}
+
+
 @router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")
 async def learning_ai_settings(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
     return {"status": "ok", "learning_ai": public_settings()}
@@ -1391,6 +1503,8 @@ async def external_system_config_save(
             {
                 "external_system_name": payload.external_system_name,
                 "external_login_url": raw_login_url,
+                "entry_url": raw_login_url,
+                "run_start_strategy": payload.run_start_strategy,
                 "access_profile_email_or_identifier": payload.access_profile_email_or_identifier,
                 "microsoft_saved_account_identifier": payload.access_profile_email_or_identifier,
                 "expected_system_host": expected_host,
@@ -1409,6 +1523,7 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
         raise _error(500, "EXTERNAL_SESSION_UNAVAILABLE", str(exc)) from exc
     external_session = _external_session_payload(config)
     external_session["session_status"] = await _external_session_status_from_browser(config)
+    external_session["microsoft_session_available"] = external_session["session_status"] == "microsoft_session_available"
     return {"status": "ok", "external_session": external_session}
 
 
@@ -1452,7 +1567,7 @@ async def external_session_validate(_user: AuthUser = Depends(require_user)) -> 
     external_session["session_status"] = await _external_session_status_from_browser(config)
     return {
         "status": "ok",
-        "valid": external_session["session_status"] == "authenticated",
+        "valid": external_session["session_status"] in {"authenticated", "microsoft_session_available"},
         "configuration_valid": bool(external_session["external_system_configured"]),
         "session_status": external_session["session_status"],
         "manual_login_required": True,

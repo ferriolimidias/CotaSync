@@ -584,6 +584,29 @@ def _render_clients() -> None:
     except DemoApiError as exc:
         st.warning(str(exc))
         groups = []
+    with st.expander("Gerenciar listas e perfis", expanded=False):
+        try:
+            managed_lists = demo_api_request("GET", "/api/v1/client-lists", api_base_url=API_BASE_URL).get("client_lists", [])
+            managed_profiles = demo_api_request("GET", "/api/v1/access-profiles", api_base_url=API_BASE_URL).get("profiles", [])
+        except DemoApiError as exc:
+            managed_lists, managed_profiles = [], []
+            st.warning(str(exc))
+        if managed_lists:
+            managed_labels = {f"{item.get('name')} · {item.get('id')}": item for item in managed_lists if isinstance(item, dict)}
+            chosen_label = st.selectbox("Lista", list(managed_labels), key="managed_list_profile_select")
+            chosen_list = managed_labels[chosen_label]
+            profile_labels = {"Sem perfil": ""}
+            profile_labels.update({f"{item.get('display_name')} · {item.get('login_identifier')}": str(item.get('id')) for item in managed_profiles if isinstance(item, dict)})
+            current_profile = str(chosen_list.get("access_profile_id") or "")
+            current_label = next((label for label, value in profile_labels.items() if value == current_profile), "Sem perfil")
+            chosen_profile_label = st.selectbox("Perfil de acesso da lista", list(profile_labels), index=list(profile_labels).index(current_label), key="managed_list_profile_value")
+            if st.button("Salvar perfil da lista", key="managed_list_profile_save"):
+                try:
+                    demo_api_request("PATCH", f"/api/v1/client-lists/{chosen_list.get('id')}", {"name": chosen_list.get("name"), "access_profile_id": profile_labels[chosen_profile_label]}, api_base_url=API_BASE_URL)
+                    st.success("Perfil da lista atualizado.")
+                    st.rerun()
+                except DemoApiError as exc:
+                    st.error(str(exc))
     group_options = ["Todos"] + [str(item) for item in groups if str(item).strip()]
     filters = st.columns(2)
     selected_group = filters[0].selectbox("Filtrar por grupo/lista", options=group_options, key="clients_filter_group")
@@ -1378,6 +1401,15 @@ def _render_demo_v01() -> None:
                 key=action_name_key,
                 placeholder="Ex.: Consultar quantidade de parcelas pagas",
             )
+            try:
+                teaching_profiles = demo_api_request("GET", "/api/v1/access-profiles", api_base_url=API_BASE_URL).get("profiles", [])
+            except DemoApiError:
+                teaching_profiles = []
+            profile_options = {"Sem perfil vinculado": ""}
+            if isinstance(teaching_profiles, list):
+                profile_options.update({f"{item.get('display_name')} · {item.get('login_identifier')}": str(item.get('id')) for item in teaching_profiles if isinstance(item, dict) and item.get("id")})
+            selected_profile_label = st.selectbox("Perfil de acesso", list(profile_options), key=f"demo_access_profile_{session_id}")
+            st.caption("A Action será publicada para este perfil. A senha e o MFA continuam manuais no navegador.")
             if saved_session_exists:
                 st.caption("Usar sessão salva para ensinar é o caminho recomendado.")
                 if st.button(
@@ -1406,6 +1438,8 @@ def _render_demo_v01() -> None:
                             "output_type": "texto/dados da tela",
                             "ai_result_summary_enabled": True,
                             "ai_recovery_enabled": False,
+                            "required_access_profile_id": profile_options.get(selected_profile_label) or None,
+                            "run_start_strategy": "external_entry_each_run" if profile_options.get(selected_profile_label) else "persistent_graph_reentry",
                         },
                         api_base_url=API_BASE_URL,
                     )
@@ -1646,6 +1680,8 @@ def _render_demo_v01() -> None:
                                 "requires_authenticated_session": bool(session.get("using_external_system", False)),
                                 "ai_result_summary_enabled": True,
                                 "ai_recovery_enabled": False,
+                                "required_access_profile_id": profile_options.get(selected_profile_label) or None,
+                                "run_start_strategy": "external_entry_each_run" if profile_options.get(selected_profile_label) else "persistent_graph_reentry",
                             },
                             api_base_url=API_BASE_URL,
                             timeout=30,
@@ -2699,6 +2735,12 @@ elif menu_selecionado == "Configurações":
             value=str(external_config.get("external_login_url") or ""),
             placeholder="https://login.microsoftonline.com/...&redirect_uri=...&state=...",
         )
+        run_start_strategy = st.selectbox(
+            "Início de cada execução",
+            options=["persistent_graph_reentry", "external_entry_each_run"],
+            format_func=lambda value: "Entrada do sistema a cada Run" if value == "external_entry_each_run" else "Reentrada pelo grafo aprendido",
+            index=1 if external_config.get("run_start_strategy") == "external_entry_each_run" else 0,
+        )
         st.markdown("**Conta Microsoft salva**")
         microsoft_saved_account_text = st.text_input(
             "Nome da conta",
@@ -2732,6 +2774,8 @@ elif menu_selecionado == "Configurações":
                     {
                         "external_system_name": external_system_name,
                         "external_login_url": external_login_url,
+                        "entry_url": external_login_url,
+                        "run_start_strategy": run_start_strategy,
                         "validation": str(external_config.get("validation") or ""),
                         "auth_success_text": str(external_config.get("auth_success_text") or ""),
                         "auth_success_selector": str(external_config.get("auth_success_selector") or ""),
@@ -2748,6 +2792,47 @@ elif menu_selecionado == "Configurações":
                     api_base_url=API_BASE_URL,
                 )
                 st.success("Sistema externo salvo. A próxima sessão usará esta configuração.")
+                st.rerun()
+            except DemoApiError as exc:
+                st.error(str(exc))
+    st.markdown("##### Perfis de acesso")
+    st.caption("Cada perfil identifica uma conta externa. Senha, MFA, cookies e tokens permanecem exclusivamente no navegador.")
+    try:
+        access_profiles = demo_api_request("GET", "/api/v1/access-profiles", api_base_url=API_BASE_URL).get("profiles", [])
+    except DemoApiError as exc:
+        access_profiles = []
+        st.warning(str(exc))
+    if isinstance(access_profiles, list) and access_profiles:
+        for profile in access_profiles:
+            if not isinstance(profile, dict):
+                continue
+            st.write(
+                f"**{profile.get('display_name') or 'Perfil'}** · "
+                f"`{profile.get('login_identifier') or ''}` · "
+                f"{'ativo' if profile.get('active') else 'inativo'}"
+            )
+            if st.button("Validar perfil", key=f"validate_access_profile_{profile.get('id')}"):
+                try:
+                    validation = demo_api_request("POST", f"/api/v1/access-profiles/{profile.get('id')}/validate", api_base_url=API_BASE_URL)
+                    if validation.get("available"):
+                        st.success("Conta Microsoft disponível no navegador.")
+                    else:
+                        st.warning("Perfil cadastrado, mas a conta não foi reconhecida no navegador atual.")
+                except DemoApiError as exc:
+                    st.error(str(exc))
+    with st.form("access_profile_create_form"):
+        profile_name = st.text_input("Nome do perfil", placeholder="Ex.: Priscila Susin")
+        profile_identifier = st.text_input("Login/e-mail do perfil", placeholder="Ex.: D0004267@rdmz.com.br")
+        profile_code = st.text_input("Código externo (opcional)")
+        if st.form_submit_button("Adicionar perfil", use_container_width=True):
+            try:
+                demo_api_request(
+                    "POST",
+                    "/api/v1/access-profiles",
+                    {"display_name": profile_name, "login_identifier": profile_identifier, "external_code": profile_code},
+                    api_base_url=API_BASE_URL,
+                )
+                st.success("Perfil cadastrado. A autenticação continua manual no navegador.")
                 st.rerun()
             except DemoApiError as exc:
                 st.error(str(exc))

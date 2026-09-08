@@ -21,6 +21,8 @@ router = APIRouter(prefix="/api/external-systems", tags=["external-systems"])
 class ExternalSystemRequest(BaseModel):
     external_system_name: str = ""
     external_login_url: str = ""
+    entry_url: str = ""
+    run_start_strategy: str = "persistent_graph_reentry"
     validation: str = ""
     auth_success_text: str = ""
     auth_success_selector: str = ""

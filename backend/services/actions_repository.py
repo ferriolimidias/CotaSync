@@ -26,6 +26,7 @@ from backend.db import (
 from backend.services.action_pages import url_host
 from backend.services.client_fields import canonical_client_field_key, client_field_label
 from backend.services.external_systems import DEFAULT_ACCESS_PROFILE, load_current_external_system
+from backend.services.access_profiles import validate_profile_binding
 from backend.services.learned_graph import ensure_stable_step_ids, resolve_transition_step, validate_compiled_action_graph
 
 logger = logging.getLogger("cotasync.actions")
@@ -272,6 +273,8 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         variables=_friendly_variables(data),
         allowed_list_ids=[str(item) for item in data.get("allowed_list_ids", []) if str(item).strip()] if isinstance(data.get("allowed_list_ids", []), list) else [],
         scope_mode=str(data.get("scope_mode") or ("selected" if data.get("allowed_list_ids") else "all")),
+        required_access_profile_id=str(data.get("required_access_profile_id") or "").strip() or None,
+        run_start_strategy=str(data.get("run_start_strategy") or "persistent_graph_reentry").strip() or "persistent_graph_reentry",
         steps_count=steps_count,
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
         test_mode=bool(data.get("modo_teste", False)),
@@ -378,6 +381,8 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
                 raw.setdefault("descricao", db_action.description)
                 raw.setdefault("allowed_list_ids", list(db_action.allowed_list_ids or []))
                 raw.setdefault("scope_mode", db_action.scope_mode or ("selected" if db_action.allowed_list_ids else "all"))
+                raw.setdefault("required_access_profile_id", db_action.required_access_profile_id)
+                raw.setdefault("run_start_strategy", version.run_start_strategy or "persistent_graph_reentry")
                 actions.append(_normalize_action(db_action.key, raw, used_ids))
             return ActionsCatalog(actions=actions, exists=True, warning=None)
     payload, exists, warning = _load_ui_map(path)
@@ -579,6 +584,13 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             action.status = str(learned_action.get("status") or action.status or "published")
         action.allowed_list_ids = [str(item) for item in learned_action.get("allowed_list_ids", action.allowed_list_ids or []) if str(item).strip()] if isinstance(learned_action.get("allowed_list_ids", action.allowed_list_ids or []), list) else []
         action.scope_mode = "selected" if action.allowed_list_ids else "all"
+        required_profile_id = str(learned_action.get("required_access_profile_id") or "").strip() or None
+        run_start_strategy = str(learned_action.get("run_start_strategy") or "persistent_graph_reentry").strip()
+        if run_start_strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
+            raise ActionsRepositoryError("Estratégia de início da Action inválida.")
+        if required_profile_id:
+            validate_profile_binding(profile_id=required_profile_id, external_system_id=None)
+        action.required_access_profile_id = required_profile_id
 
         version_id = f"{action.id}-v1"
         version = session.get(ActionVersion, version_id)
@@ -608,6 +620,8 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
                 definition=definition,
                 variables=version_variables,
                 metadata_json={"source": "learning"},
+                required_access_profile_id=required_profile_id,
+                run_start_strategy=run_start_strategy,
                 created_at=datetime.now(UTC),
                 published_at=datetime.now(UTC),
             )
@@ -617,6 +631,8 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             version.variables = version_variables
             version.status = "published"
             version.published_at = datetime.now(UTC)
+            version.required_access_profile_id = required_profile_id
+            version.run_start_strategy = run_start_strategy
 
         session.flush()
         session.execute(delete(ActionStep).where(ActionStep.action_version_id == version.id))

@@ -28,6 +28,8 @@ def empty_external_system() -> dict[str, Any]:
     return {
         "external_system_name": "",
         "external_login_url": "",
+        "entry_url": "",
+        "run_start_strategy": "persistent_graph_reentry",
         "validation": "",
         "auth_success_text": "",
         "auth_success_selector": "",
@@ -46,6 +48,8 @@ def _string_keys() -> tuple[str, ...]:
     return (
         "external_system_name",
         "external_login_url",
+        "entry_url",
+        "run_start_strategy",
         "validation",
         "auth_success_text",
         "auth_success_selector",
@@ -108,6 +112,10 @@ def load_current_external_system() -> dict[str, Any]:
                 result = empty_external_system()
                 for key in _string_keys():
                     result[key] = str(payload.get(key) or "")
+                if not result["entry_url"]:
+                    result["entry_url"] = result["external_login_url"]
+                if not result["external_login_url"]:
+                    result["external_login_url"] = result["entry_url"]
                 result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
                 _normalize_access_profile_fields(result)
                 result["updated_at"] = payload.get("updated_at")
@@ -125,6 +133,11 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = str(payload.get(key) or "").strip()
     result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
+    result["entry_url"] = result["entry_url"] or result["external_login_url"]
+    result["external_login_url"] = result["external_login_url"] or result["entry_url"]
+    result["run_start_strategy"] = result["run_start_strategy"] or "persistent_graph_reentry"
+    if result["run_start_strategy"] not in {"persistent_graph_reentry", "external_entry_each_run"}:
+        raise ExternalSystemConfigError("Estratégia de início inválida.")
     _normalize_access_profile_fields(result)
     if not result["microsoft_saved_account_identifier"]:
         result["microsoft_saved_account_identifier"] = result["access_profile_email_or_identifier"]

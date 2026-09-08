@@ -1456,6 +1456,28 @@ async def executar_acao_rapida(
             connection = await provider.connect(p, f"action-{nome_arquivo}")
             browser = connection.browser
             context = connection.context
+            run_start_strategy = str(action_config.get("run_start_strategy") or "persistent_graph_reentry").strip()
+            if run_start_strategy == "external_entry_each_run" and not _same_run_reentry:
+                entry_url = str(
+                    action_config.get("entry_url")
+                    or action_config.get("external_login_url")
+                    or action_config.get("url_inicial")
+                    or ""
+                ).strip()
+                if not entry_url:
+                    raise SessionGuardianError(
+                        "A execução exige uma entrada externa configurada.",
+                        {"reason": "external_entry_url_missing", "execution_model": "external_entry_each_run"},
+                    )
+                await connection.page.goto(entry_url, wait_until="domcontentloaded", timeout=30000)
+                step_trace.append(
+                    {
+                        "event": "entry_navigation",
+                        "run_start_strategy": run_start_strategy,
+                        "entry_url": _safe_result_url(entry_url),
+                        "access_profile_id": str(action_config.get("required_access_profile_id") or "") or None,
+                    }
+                )
             try:
                 page = await select_desktop_page_for_action(action_config, context, connection.page)
             except ActionPageError as exc:

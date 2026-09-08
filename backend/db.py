@@ -118,6 +118,7 @@ class ClientList(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True, default="default")
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -133,6 +134,7 @@ class Action(Base):
     published_version_id: Mapped[str | None] = mapped_column(String(128))
     allowed_list_ids: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default="[]")
     scope_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="all", server_default="all")
+    required_access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -151,6 +153,8 @@ class ActionVersion(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    required_access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
+    run_start_strategy: Mapped[str] = mapped_column(String(64), nullable=False, default="persistent_graph_reentry", server_default="persistent_graph_reentry")
 
 
 class ActionStep(Base):
@@ -191,6 +195,9 @@ class Run(Base):
     action_id: Mapped[str | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"), index=True)
     action_version_id: Mapped[str | None] = mapped_column(ForeignKey("action_versions.id", ondelete="SET NULL"), index=True)
     client_id: Mapped[str | None] = mapped_column(ForeignKey("clients.id", ondelete="SET NULL"), index=True)
+    access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
+    external_system_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_systems.id", ondelete="SET NULL"), index=True)
+    run_start_strategy: Mapped[str | None] = mapped_column(String(64))
     batch_id: Mapped[str | None] = mapped_column(ForeignKey("batches.id", ondelete="SET NULL"), index=True)
     status: Mapped[str] = mapped_column(String(64), index=True)
     run_origin: Mapped[str] = mapped_column(String(32), default="operational", index=True)
@@ -212,6 +219,9 @@ class Batch(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     action_id: Mapped[str | None] = mapped_column(ForeignKey("actions.id", ondelete="SET NULL"), index=True)
     action_version_id: Mapped[str | None] = mapped_column(ForeignKey("action_versions.id", ondelete="SET NULL"), index=True)
+    access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
+    external_system_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_systems.id", ondelete="SET NULL"), index=True)
+    run_start_strategy: Mapped[str | None] = mapped_column(String(64))
     client_group: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(64), index=True)
     worker_id: Mapped[str | None] = mapped_column(String(128), index=True)
@@ -310,6 +320,20 @@ class ExternalSystem(Base):
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ExternalAccessProfile(Base):
+    __tablename__ = "external_access_profiles"
+    __table_args__ = (UniqueConstraint("tenant_id", "external_system_id", "login_identifier", name="uq_access_profile_login"),)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True, default="default")
+    external_system_id: Mapped[str] = mapped_column(ForeignKey("external_systems.id", ondelete="CASCADE"), index=True)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    login_identifier: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_code: Mapped[str | None] = mapped_column(String(255))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

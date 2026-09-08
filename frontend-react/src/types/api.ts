@@ -231,6 +231,7 @@ export type ExternalSessionStatus = {
   automation: string;
   validation_mode?: string;
   session_status: string;
+  microsoft_session_available?: boolean;
   expected_system_host_configured?: boolean;
   updated_at?: string | null;
 };
@@ -240,7 +241,20 @@ export type ExternalSystemConfig = {
   external_login_url: string;
   access_profile_email_or_identifier: string;
   expected_system_host: string;
+  entry_url?: string;
+  run_start_strategy?: "persistent_graph_reentry" | "external_entry_each_run" | string;
   updated_at?: string | null;
+};
+
+export type AccessProfile = {
+  id: string;
+  display_name: string;
+  login_identifier: string;
+  external_system_id: string;
+  external_system_name?: string;
+  external_code?: string;
+  active: boolean;
+  session_status?: string;
 };
 
 export type LearningAISettings = {
