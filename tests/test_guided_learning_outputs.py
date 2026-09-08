@@ -1227,11 +1227,8 @@ class OutputResultTests(unittest.TestCase):
         self.assertEqual(run.result_payload["main_file"], metadata)  # type: ignore[index]
         self.assertEqual(run.operational_summary, "Arquivo gerado com sucesso. Arquivo disponível.")
 
-    def test_disabled_ai_summary_never_calls_openai(self) -> None:
-        llm = Mock()
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "not-used"}), patch(
-            "backend.services.operational_summary.ChatOpenAI", llm
-        ):
+    def test_operational_summary_is_always_deterministic(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "not-used"}):
             summary = asyncio.run(
                 build_operational_summary(
                     {"extraction_targets": ["status"], "ai_result_summary_enabled": False},
@@ -1239,7 +1236,6 @@ class OutputResultTests(unittest.TestCase):
                     result_payload={"dados_extraidos": {"status": "Ativo"}},
                 )
             )
-        llm.assert_not_called()
         self.assertIn("Ativo", summary)
 
 

@@ -1,5 +1,5 @@
 """
-Cérebro do CotaSync: agente LangChain com ChatOpenAI e tools operacionais.
+Compatibilidade do agente legado e fluxos de ensino do CotaSync.
 
 Integração Streamlit: use `processar_mensagem` (assíncrona) ou `asyncio.run(...)` no app.
 """
@@ -14,11 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-# LangChain 1.x: AgentExecutor e create_tool_calling_agent estão em `langchain-classic`
-# (o pacote de compatibilidade; o top-level `langchain` deixou de reexportá-los).
-from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
@@ -195,52 +190,9 @@ def _criar_llm() -> ChatOpenAI:
     )
 
 
-def _historico_dicts_para_mensagens(historico: list[Any]) -> list[BaseMessage]:
-    """
-    Converte o histórico vindo do Streamlit (`role` + `content`) em mensagens LangChain.
-    Ignora entradas sem role reconhecida.
-    """
-    mensagens: list[BaseMessage] = []
-    for item in historico or []:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content", "")
-        if role == "user":
-            mensagens.append(HumanMessage(content=str(content)))
-        elif role == "assistant":
-            mensagens.append(AIMessage(content=str(content)))
-    return mensagens
-
-
-def criar_agente_executor() -> AgentExecutor:
-    """
-    Monta o agente com tools e prompt compatível com `create_tool_calling_agent`.
-    """
-    llm = _criar_llm()
-    tools = [consultar_cadastro_erp]
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                "Você é o CotaSync, assistente operacional. "
-                "Use as ferramentas quando precisar de dados de sistemas externos. "
-                "Seja objetivo e cite o documento consultado quando aplicável.",
-            ),
-            MessagesPlaceholder("chat_history"),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ]
-    )
-
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=True,
-        handle_parsing_errors=True,
-    )
+def criar_agente_executor() -> None:
+    """Legacy compatibility guard: operational agents are deterministic-only."""
+    raise RuntimeError("O agente operacional legado foi desativado; IA só é permitida durante o ensino.")
 
 
 async def processar_mensagem(mensagem_usuario: str, historico: list | None = None) -> Any:
@@ -450,15 +402,12 @@ async def processar_mensagem(mensagem_usuario: str, historico: list | None = Non
                 "*Exemplo: 'Preencha a busca com 123, clique em Pesquisar e extraia o valor total'.*"
             )
 
-    chat_history = _historico_dicts_para_mensagens(historico)
-    executor = criar_agente_executor()
-    resultado = await executor.ainvoke(
-        {
-            "input": mensagem_usuario,
-            "chat_history": chat_history,
-        }
+    # The legacy free-form agent is intentionally not an operational runtime
+    # path. Production execution must never delegate decisions to an LLM.
+    return _montar_resposta(
+        "O assistente operacional legado não executa decisões por IA. "
+        "Use uma ação publicada ou o fluxo de ensino para criar uma nova ação."
     )
-    return _montar_resposta(str(resultado.get("output", "")).strip())
 
 
 async def executar_acao_desktop_replay(
@@ -551,65 +500,23 @@ async def executar_acao_desktop_replay(
         }
 
     except Exception as erro_desktop_replay:
-        logging.warning("[AUTO-HEALING] Desktop replay falhou para a ação '%s' (%s).", nome_acao, type(erro_desktop_replay).__name__)
-        logging.info("[AUTO-HEALING] Acionando a IA para Diagnóstico e Correção da tela...")
-
-        instrucao_recuperacao = f"""
-        A rotina mapeada '{nome_acao}' falhou ao ser repetida com o erro: {str(erro_desktop_replay)}.
-        DIAGNÓSTICO OBRIGATÓRIO:
-        1. Olhe para a tela atual. O sistema alvo está apenas lento (ex: ícone a carregar, erro 504/503) ou apareceu um popup/aviso bloqueador normal do sistema?
-        2. Se for um erro temporário ou popup, feche o aviso ou clique em atualizar e tente concluir a tarefa com os seletores originais.
-        3. Apenas se a interface realmente MUDOU de estrutura (o botão desapareceu definitivamente), encontre o novo botão/caminho.
-        Conclua a tarefa original de '{nome_acao}' e atualize a receita dos passos.
-        """
-
-        try:
-            novos_passos = await acionar_ia_cartografa(nome_acao, instrucao_recuperacao)
-
-            memoria = carregar_ui_map()
-            memoria.setdefault("acoes_conhecidas", {})
-            memoria["acoes_conhecidas"].setdefault(nome_acao, {})
-            memoria["acoes_conhecidas"][nome_acao]["passos_playwright"] = novos_passos.get("passos_playwright", [])
-            salvar_ui_map(memoria)
-
-            logging.info(f"[AUTO-HEALING] SUCESSO! A rotina '{nome_acao}' foi auto-corrigida.")
-
-            healed_payload = {
-                "arquivos": novos_passos.get("arquivos_baixados", []),
-                "dados_extraidos": novos_passos.get("dados_extraidos", {}),
-            }
-            summary = await build_operational_summary(acao, status="success", result_payload=healed_payload)
-            return {
-                "texto": summary,
-                "operational_summary": summary,
-                "status": "success",
-                "estado": "NORMAL",
-                **healed_payload,
-            }
-
-        except Exception as e_ia:
-            logging.error("[AUTO-HEALING FALHOU] %s", type(e_ia).__name__)
-            summary = await build_operational_summary(
-                acao,
-                status="error",
-                error_message=str(e_ia),
-            )
-            return {
-                "texto": summary,
-                "operational_summary": summary,
-                "status": "error",
-                "estado": "NORMAL",
-            }
-
-
-def _normalizar_chat_history_para_executor(chat_history: list[Any] | None) -> list[Any]:
-    """Aceita dicts estilo Streamlit ou mensagens LangChain já instanciadas."""
-    raw = chat_history or []
-    if not raw:
-        return []
-    if isinstance(raw[0], dict):
-        return _historico_dicts_para_mensagens(raw)
-    return raw
+        logging.warning(
+            "[AUTO-HEALING DESABILITADO] Replay da ação '%s' falhou (%s); "
+            "produção não usa IA para corrigir execução.",
+            nome_acao,
+            type(erro_desktop_replay).__name__,
+        )
+        summary = await build_operational_summary(
+            acao,
+            status="error",
+            error_message=str(erro_desktop_replay),
+        )
+        return {
+            "texto": summary,
+            "operational_summary": summary,
+            "status": "error",
+            "estado": "NORMAL",
+        }
 
 
 async def executar_agente(
@@ -619,10 +526,10 @@ async def executar_agente(
     """
     Variante que retorna o dict completo do AgentExecutor (útil para API / logs).
     """
-    executor = criar_agente_executor()
-    return await executor.ainvoke(
-        {
-            "input": mensagem_usuario,
-            "chat_history": _normalizar_chat_history_para_executor(chat_history),
-        }
-    )
+    return {
+        "output": (
+            "O assistente operacional legado não executa decisões por IA. "
+            "Use uma ação publicada ou o fluxo de ensino para criar uma nova ação."
+        ),
+        "status": "deterministic_only",
+    }

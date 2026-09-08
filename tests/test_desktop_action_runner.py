@@ -1029,27 +1029,7 @@ class DesktopActionRunTests(unittest.TestCase):
         with patch(
             "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
-        ) as desktop_replay, patch(
-            "backend.services.action_validation_review._ai_review",
-            new=AsyncMock(
-                return_value={
-                    "review_status": "approved",
-                    "extraction_target_confirmed": True,
-                    "best_label": "Qtd. Pcls. Pagas",
-                    "best_selector": "",
-                    "best_value_example": "032",
-                    "return_format": "somente o número",
-                    "summary_instruction": (
-                        "Retorne somente a quantidade de parcelas pagas encontrada no campo "
-                        "Qtd. Pcls. Pagas. Não inclua outros dados da tela."
-                    ),
-                    "wait_suggestions": [{"after_step_index": 0, "strategy": "wait_for_text", "target": "Qtd. Pcls. Pagas"}],
-                    "selector_alternatives": [],
-                    "risks": [],
-                    "reasoning_summary": "Alvo confirmado na tela final.",
-                }
-            ),
-        ):
+        ) as desktop_replay:
             with authenticated_client() as client:
                 response = client.post("/api/actions/teste2/validate-review", json={"variables": {}, "mode": "sync"})
             self.assertEqual(response.status_code, 200)
@@ -1059,7 +1039,7 @@ class DesktopActionRunTests(unittest.TestCase):
         desktop_replay.assert_awaited_once()
         self.assertEqual(created["run_type"], "validation_review")
         self.assertEqual(created["status"], "success")
-        self.assertEqual(saved["review_status"], "approved")
+        self.assertEqual(saved["review_status"], "needs_attention")
         self.assertEqual(saved["reviewed_overlay"]["extraction"]["expected_example"], "032")
         self.assertIn("Qtd. Pcls. Pagas", saved["final_summary_instruction"])
         self.assertEqual(saved["robust_steps"], raw_action["robust_steps"])
@@ -1100,7 +1080,7 @@ class DesktopActionRunTests(unittest.TestCase):
         with patch(
             "backend.services.action_runner._run_desktop_browser_replay",
             new=AsyncMock(return_value=execution),
-        ), patch("backend.services.action_validation_review._ai_review", new=AsyncMock(return_value=None)):
+        ):
             with authenticated_client() as client:
                 response = client.post(
                     "/api/actions/numero-de-parcelas-pagas/validate-review",

@@ -345,11 +345,8 @@ class OperationalSummaryTests(unittest.TestCase):
             )
         self.assertIn("Ativo", summary)
 
-    def test_openai_error_falls_back_deterministically(self) -> None:
-        fake_llm = SimpleNamespace(ainvoke=AsyncMock(side_effect=RuntimeError("offline")))
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), patch(
-            "backend.services.operational_summary.ChatOpenAI", return_value=fake_llm
-        ):
+    def test_operational_summary_is_deterministic_even_when_ai_is_configured(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
             result = asyncio.run(
                 build_operational_summary_result(
                     _action(),
@@ -359,12 +356,11 @@ class OperationalSummaryTests(unittest.TestCase):
             )
         self.assertEqual(result.summary_source, "deterministic")
         self.assertFalse(result.ai_summary_used)
+        self.assertEqual(result.summary_reason, "production_ai_disabled")
         self.assertIn("Ativo", result.summary)
 
-    def test_ai_disabled_does_not_call_openai(self) -> None:
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), patch(
-            "backend.services.operational_summary.ChatOpenAI"
-        ) as chat_openai:
+    def test_operational_summary_ignores_legacy_ai_flag(self) -> None:
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True):
             result = asyncio.run(
                 build_operational_summary_result(
                     _action(ai_result_summary_enabled=False),
@@ -372,7 +368,6 @@ class OperationalSummaryTests(unittest.TestCase):
                     result_payload={"dados_extraidos": {"status_cliente": "Ativo"}},
                 )
             )
-        chat_openai.assert_not_called()
         self.assertEqual(result.summary_source, "deterministic")
 
     def test_page_only_success_uses_stable_operational_summary(self) -> None:
@@ -401,61 +396,35 @@ class OperationalSummaryTests(unittest.TestCase):
             "Não consegui executar a ação porque a sessão precisa ser autenticada novamente.",
         )
 
-    def test_ai_output_with_technical_or_secret_content_is_rejected(self) -> None:
-        fake_llm = SimpleNamespace(
-            ainvoke=AsyncMock(return_value=SimpleNamespace(content="desktop_browser selector #interno token segredo"))
-        )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True), patch(
-            "backend.services.operational_summary.ChatOpenAI", return_value=fake_llm
-        ):
-            summary = asyncio.run(
-                build_operational_summary(
-                    _action(),
-                    status="success",
-                    result_payload={
-                        "dados_extraidos": {
-                            "#status-interno": "Ativo",
-                            "access_token": "credencial-super-secreta",
-                        }
-                    },
-                )
+    def test_operational_summary_never_exposes_technical_or_secret_content(self) -> None:
+        summary = asyncio.run(
+            build_operational_summary(
+                _action(),
+                status="success",
+                result_payload={
+                    "dados_extraidos": {
+                        "#status-interno": "Ativo",
+                        "access_token": "credencial-super-secreta",
+                    }
+                },
             )
+        )
         lowered = summary.casefold()
         self.assertIn("ativo", lowered)
         self.assertNotIn("desktop_browser", lowered)
         self.assertNotIn("selector", lowered)
         self.assertNotIn("credencial-super-secreta", lowered)
 
-    def test_ai_summary_uses_limited_sanitized_context(self) -> None:
-        fake_llm = SimpleNamespace(
-            ainvoke=AsyncMock(
-                return_value=SimpleNamespace(
-                    content="Consulta concluída. A tela aberta parece ser um formulário de relatório/filtro. Nenhum resultado específico foi listado ainda."
-                )
+    def test_operational_summary_does_not_build_ai_prompt(self) -> None:
+        result = asyncio.run(
+            build_operational_summary_result(
+                _action(extraction_targets=["texto_tela_final"]),
+                status="success",
+                result_payload={"dados_extraidos": {"texto_tela_final": "Ativo"}},
             )
         )
-        noisy = (
-            "Página Inicial Venda Grupo Cobrança Relatórios token=abc123 "
-            "/opt/cotasync-test/src/data/runs/downloads/secret.pdf "
-            "Grupo Período Produto Tipo de venda Situação Consultar " * 400
-        )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "cheap-model"}, clear=True), patch(
-            "backend.services.operational_summary.ChatOpenAI", return_value=fake_llm
-        ) as chat_openai:
-            result = asyncio.run(
-                build_operational_summary_result(
-                    _action(extraction_targets=["texto_tela_final"]),
-                    status="success",
-                    result_payload={"dados_extraidos": {"texto_tela_final": noisy}},
-                )
-            )
-        prompt = fake_llm.ainvoke.await_args.args[0]
-        self.assertEqual(result.summary_source, "ai")
-        self.assertTrue(result.ai_summary_used)
-        self.assertLess(len(prompt), 9500)
-        self.assertNotIn("abc123", prompt)
-        self.assertNotIn("/opt/cotasync-test", prompt)
-        chat_openai.assert_called_once()
+        self.assertEqual(result.summary_source, "deterministic")
+        self.assertFalse(result.ai_summary_used)
 
     def test_quick_execution_chat_uses_operational_summary(self) -> None:
         from backend import agente
@@ -513,7 +482,7 @@ class OperationalSummaryTests(unittest.TestCase):
         self.assertIn("#status-interno", str(run.result_payload))
         self.assertIn("diagnósticos=1", run.technical_summary or "")
         self.assertEqual(run.summary_source, "deterministic")
-        self.assertEqual(run.summary_reason, "openai_api_key_missing")
+        self.assertEqual(run.summary_reason, "production_ai_disabled")
         self.assertFalse(run.ai_summary_used)
 
     def test_operational_summary_does_not_leak_selectors_tokens_credentials_or_paths(self) -> None:

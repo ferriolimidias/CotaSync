@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from dataclasses import dataclass
 from typing import Any
-
-from langchain_openai import ChatOpenAI
 
 from backend.services.extraction_targets import (
     extract_value_near_label,
@@ -27,7 +23,7 @@ _TECHNICAL_TERMS = (
     "playwright", "storage_state",
 )
 _MAX_SUMMARY_LENGTH = 500
-_MAX_AI_CONTEXT_CHARS = 8000
+_MAX_CONTEXT_CHARS = 8000
 _NOISY_TEXT_THRESHOLD = 700
 _FORM_HINTS = (
     "consultar",
@@ -166,7 +162,7 @@ def _is_meaningful_text(text: str) -> bool:
     return len(cleaned) >= 30 and alpha_count >= 20
 
 
-def _dedupe_lines(text: str, *, limit: int = _MAX_AI_CONTEXT_CHARS) -> str:
+def _dedupe_lines(text: str, *, limit: int = _MAX_CONTEXT_CHARS) -> str:
     seen: set[str] = set()
     kept: list[str] = []
     for raw_line in re.split(r"[\r\n]+| {2,}", str(text or "")):
@@ -333,7 +329,7 @@ def _full_page_text(result_payload: dict[str, Any] | None) -> str:
     for key, value in raw.items():
         normalized = str(key or "").strip().casefold()
         if normalized in {"texto_tela_final", "texto tela final", "final_screen_text", "full_page_text"}:
-            return _clean_text(value, limit=_MAX_AI_CONTEXT_CHARS)
+            return _clean_text(value, limit=_MAX_CONTEXT_CHARS)
     return ""
 
 
@@ -437,7 +433,7 @@ def _safe_extracted_context(action: Any, result_payload: dict[str, Any] | None) 
                 selector_labels[selector] = label
 
     safe: dict[str, str] = {}
-    remaining = _MAX_AI_CONTEXT_CHARS
+    remaining = _MAX_CONTEXT_CHARS
     for index, (raw_key, raw_value) in enumerate(raw.items()):
         if remaining <= 0:
             break
@@ -448,7 +444,7 @@ def _safe_extracted_context(action: Any, result_payload: dict[str, Any] | None) 
         if _is_selector_like(label):
             label = targets[index] if index < len(targets) else f"resultado {index + 1}"
         label = _clean_scalar(label.replace("_", " ").strip()) or f"resultado {index + 1}"
-        value_limit = min(_MAX_AI_CONTEXT_CHARS, remaining)
+        value_limit = min(_MAX_CONTEXT_CHARS, remaining)
         value = _dedupe_lines(_clean_text(raw_value, limit=value_limit), limit=value_limit)
         if not value:
             continue
@@ -673,95 +669,17 @@ async def build_operational_summary_result(
     result_payload: dict[str, Any] | None = None,
     error_message: str | None = None,
 ) -> OperationalSummaryResult:
+    # Operational execution must remain AI-free.  The deterministic summary is
+    # also the stable contract consumed by runs, batches and legacy clients.
     fallback = deterministic_operational_summary(
         action, status=status, result_payload=result_payload, error_message=error_message
     )
-    if str(status).lower() != "success" and fallback.startswith("Não consegui executar a ação"):
-        return OperationalSummaryResult(
-            fallback,
-            ai_summary_used=False,
-            summary_source="deterministic",
-            summary_reason="stable_error_without_ai",
-        )
-    if (
-        str(status).lower() == "success"
-        and not extraction_targets(action)
-        and bool(_safe_final_title(result_payload))
-    ):
-        return OperationalSummaryResult(
-            fallback,
-            ai_summary_used=False,
-            summary_source="deterministic",
-            summary_reason="page_opened_without_extracted_data",
-        )
-    enabled = bool(_metadata(action, "ai_result_summary_enabled", True))
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    has_files = _has_files(result_payload)
-    extracted_context = _safe_extracted_context(action, result_payload)
-    if not enabled or not api_key:
-        return OperationalSummaryResult(
-            fallback,
-            ai_summary_used=False,
-            summary_source="deterministic",
-            summary_reason="ai_disabled" if not enabled else "openai_api_key_missing",
-        )
-    if str(status).lower() == "success" and not extracted_context and not has_files:
-        return OperationalSummaryResult(
-            fallback,
-            ai_summary_used=False,
-            summary_source="deterministic",
-            summary_reason="no_extracted_context_or_files",
-        )
-
-    extracted = _safe_extracted_values(action, result_payload)
-    context = {
-        "objective": _clean_scalar(_metadata(action, "objective", "")),
-        "expected_result": _clean_scalar(_metadata(action, "expected_result", "")),
-        "output_type": _clean_scalar(_metadata(action, "output_type", "")),
-        "summary_instruction": _final_summary_instruction(action),
-        "status": "success" if str(status).lower() == "success" else "error",
-        "extracted_data": extracted_context,
-        "has_configured_extraction": bool(extraction_targets(action)),
-        "final_page_title": _safe_final_title(result_payload),
-        "downloaded_files": _safe_file_metadata(result_payload),
-        "fallback": fallback,
-    }
-    prompt = (
-        "Você é o assistente operacional do CotaSync. Resuma o resultado da execução para o usuário final. "
-        "Se houver summary_instruction, siga essa instrução como prioridade. "
-        "Use apenas os dados extraídos. Não invente. Ignore menus de navegação quando não forem o conteúdo "
-        "principal. Se a tela parecer ser apenas um formulário/filtro sem resultado listado, diga isso "
-        "claramente. Seja direto, em português, com no máximo 5 linhas, exceto se houver muitos dados úteis. "
-        "Não mencione seletores, navegador, modo, host, domínio, run id, passos, cliques, logs, tokens, "
-        "credenciais, caminhos locais ou URLs. Contexto seguro: "
-        + json.dumps(context, ensure_ascii=False)
+    return OperationalSummaryResult(
+        fallback,
+        ai_summary_used=False,
+        summary_source="deterministic",
+        summary_reason="production_ai_disabled",
     )
-    try:
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-        response = await ChatOpenAI(
-            model=model, temperature=0, api_key=api_key, timeout=6, max_retries=0
-        ).ainvoke(prompt)
-        candidate = _clean_text(getattr(response, "content", response), limit=_MAX_SUMMARY_LENGTH)
-        if _summary_is_safe(candidate, extracted):
-            return OperationalSummaryResult(
-                candidate,
-                ai_summary_used=True,
-                summary_source="ai",
-                summary_reason="openai_summary_accepted",
-            )
-        return OperationalSummaryResult(
-            fallback,
-            ai_summary_used=False,
-            summary_source="deterministic",
-            summary_reason="openai_summary_rejected",
-        )
-    except Exception:
-        return OperationalSummaryResult(
-            fallback,
-            ai_summary_used=False,
-            summary_source="deterministic",
-            summary_reason="openai_summary_failed",
-        )
 
 
 def build_technical_summary(

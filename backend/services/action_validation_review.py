@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from langchain_openai import ChatOpenAI
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 
 from backend.schemas.actions import ActionDetail
@@ -244,89 +243,6 @@ def _fallback_overlay(
     }
 
 
-def _json_from_ai_response(value: Any) -> dict[str, Any]:
-    text = str(getattr(value, "content", value) or "").strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.S).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        parsed = json.loads(match.group(0)) if match else {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-async def _ai_review(payload: dict[str, Any]) -> dict[str, Any] | None:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        return None
-    prompt = (
-        "Você é o revisor de aprendizado do CotaSync. A IA não pode navegar, clicar ou alterar passos; "
-        "ela apenas observa o replay real já executado e propõe uma camada reviewed_overlay. "
-        "Responda somente JSON no formato solicitado, sem cadeia de pensamento. "
-        "Payload estruturado: "
-        + json.dumps(payload, ensure_ascii=False)
-    )
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-    response = await ChatOpenAI(
-        model=model,
-        temperature=0,
-        api_key=api_key,
-        timeout=12,
-        max_retries=0,
-    ).ainvoke(prompt)
-    parsed = _json_from_ai_response(response)
-    return parsed or None
-
-
-def _overlay_from_ai(
-    *,
-    action: ActionDetail,
-    raw_action: dict[str, Any],
-    run: RunRecord,
-    ai_review: dict[str, Any],
-    candidates: list[dict[str, Any]],
-) -> dict[str, Any]:
-    target = _target_request(raw_action, action)
-    status = str(ai_review.get("review_status") or "needs_attention").strip()
-    if status not in {"approved", "needs_attention", "failed"}:
-        status = "needs_attention"
-    best_label = str(ai_review.get("best_label") or raw_action.get("extraction_target") or target).strip()
-    best_value = str(ai_review.get("best_value_example") or "").strip()
-    if not best_value and candidates:
-        best_value = str(candidates[0].get("value") or "")
-    output_type = str(raw_action.get("output_type") or action.output_type or "")
-    summary_instruction = str(ai_review.get("summary_instruction") or "").strip() or _default_summary_instruction(
-        target,
-        best_label,
-        output_type,
-    )
-    return {
-        "review_status": status,
-        "reviewed_at": _utc_now_iso(),
-        "review_run_id": run.id,
-        "target_user_request": target,
-        "extraction": {
-            "target_label_user": target,
-            "screen_label": best_label,
-            "selector_hint": str(ai_review.get("best_selector") or ""),
-            "nearby_text": best_label,
-            "value_pattern": str(ai_review.get("value_pattern") or "valor próximo ao rótulo"),
-            "return_format": str(ai_review.get("return_format") or "somente o valor"),
-            "expected_example": best_value,
-        },
-        "summary_instruction": summary_instruction,
-        "waits": ai_review.get("wait_suggestions", []) if isinstance(ai_review.get("wait_suggestions"), list) else [],
-        "selector_alternatives": (
-            ai_review.get("selector_alternatives", [])
-            if isinstance(ai_review.get("selector_alternatives"), list)
-            else []
-        ),
-        "risks": ai_review.get("risks", []) if isinstance(ai_review.get("risks"), list) else [],
-        "notes": [str(ai_review.get("reasoning_summary") or "").strip()][:1],
-    }
-
-
 def _save_review_overlay(
     action: ActionDetail,
     run: RunRecord,
@@ -387,59 +303,12 @@ async def review_finished_validation_run(
     else:
         payload = run.result_payload if isinstance(run.result_payload, dict) else {}
         candidates = build_extraction_candidates(action, raw, payload)
-        review_payload = {
-            "action_name": action.name,
-            "target_user_request": _target_request(raw, action),
-            "visible_label_hint": raw.get("extraction_target") or action.extraction_target or "",
-            "variables": [
-                {"key": variable.key, "label": variable.label, "required": variable.required}
-                for variable in action.variables
-            ],
-            "steps_summary": _short_steps(raw),
-            "step_trace": _safe_step_trace(payload),
-            "extraction_candidates": candidates,
-            "final_text": _clean_text(payload.get("final_page_text"), limit=_MAX_FINAL_TEXT_CHARS),
-            "final_dom_excerpt": _clean_text(payload.get("final_page_dom"), limit=_MAX_FINAL_DOM_CHARS),
-            "final_page": payload.get("final_page") if isinstance(payload.get("final_page"), dict) else {},
-            "screenshot": {
-                "path": str(payload.get("screenshot_path") or payload.get("evidencia") or ""),
-            },
-            "downloaded_files": payload.get("downloaded_files", []),
-            "main_file": payload.get("main_file", {}),
-            "required_json_response": {
-                "review_status": "approved|needs_attention|failed",
-                "extraction_target_confirmed": "boolean",
-                "best_label": "string",
-                "best_selector": "string",
-                "best_value_example": "string",
-                "return_format": "string",
-                "summary_instruction": "string",
-                "wait_suggestions": [],
-                "selector_alternatives": [],
-                "risks": [],
-                "reasoning_summary": "curto",
-            },
-        }
-        try:
-            ai_result = await _ai_review(review_payload)
-        except Exception as exc:
-            logger.info("Revisao IA indisponivel: %s", type(exc).__name__)
-            ai_result = None
-        overlay = (
-            _overlay_from_ai(action=action, raw_action=raw, run=run, ai_review=ai_result, candidates=candidates)
-            if isinstance(ai_result, dict)
-            else _fallback_overlay(action=action, raw_action=raw, run=run, candidates=candidates)
-        )
-        ai_summary = (
-            str(ai_result.get("reasoning_summary") or "").strip()
-            if isinstance(ai_result, dict)
-            else "Revisão determinística gerada porque a IA não estava disponível."
-        )
+        overlay = _fallback_overlay(action=action, raw_action=raw, run=run, candidates=candidates)
         _save_review_overlay(
             action,
             run,
             overlay,
-            ai_review_summary=ai_summary,
+            ai_review_summary="Resumo determinístico da validação operacional.",
             extraction_candidates=candidates,
         )
         if isinstance(run.result_payload, dict):

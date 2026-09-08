@@ -90,6 +90,24 @@ class LearningAIReviewTests(unittest.TestCase):
         self.assertFalse(result["ai_reviewed"])
         self.assertIn("replay_hints", result)
 
+    def test_learning_review_calls_provider_once_when_enabled(self):
+        fake = SimpleNamespace(
+            ainvoke=AsyncMock(
+                return_value=SimpleNamespace(
+                    content='{"summary":"revisado","replay_hints":[],"waits":[],"variable_schema":[],"extraction_target":"parcelas","suggested_extraction_targets":[],"suggested_objective":"","suggested_expected_result":"","slow_system_notes":[],"risk_notes":[]}'
+                )
+            )
+        )
+        with patch(
+            "backend.services.ai_observer.openai_configuration_status",
+            return_value={"enabled": True, "configured": True, "model": "gpt-5.4-mini", "provider": "openai_compatible"},
+        ), patch("backend.services.ai_settings.effective_settings", return_value=SimpleNamespace(api_key="test-key")), patch(
+            "backend.services.ai_observer.ChatOpenAI", return_value=fake
+        ):
+            result = asyncio.run(analyze_recorded_action_with_ai(_action()))
+        self.assertTrue(result["ai_reviewed"])
+        fake.ainvoke.assert_awaited_once()
+
     def test_invalid_response_uses_fallback(self):
         fake = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(content="not json")))
         with patch(
