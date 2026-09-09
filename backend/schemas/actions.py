@@ -21,6 +21,7 @@ class ActionSummary(BaseModel):
     allowed_list_ids: list[str] = Field(default_factory=list)
     scope_mode: str = "all"
     required_access_profile_id: str | None = None
+    required_access_profile_name: str | None = None
     run_start_strategy: str = "persistent_graph_reentry"
     steps_count: int
     has_url: bool

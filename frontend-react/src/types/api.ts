@@ -111,6 +111,7 @@ export type ApiAction = {
   needs_attention?: boolean;
   legacy_unconfigured?: boolean;
   required_access_profile_id?: string | null;
+  required_access_profile_name?: string | null;
   run_start_strategy?: string;
   published_version?: { id: string | null; status: string };
   last_run?: ApiRun | null;
@@ -243,6 +244,7 @@ export type ExternalSessionStatus = {
 };
 
 export type ExternalSystemConfig = {
+  id?: string;
   external_system_name: string;
   external_login_url: string;
   expected_system_host: string;

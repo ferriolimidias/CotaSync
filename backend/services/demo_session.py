@@ -2221,6 +2221,8 @@ class DemoSessionManager:
             "learning_events_count": len(session.learning_events),
             "external_system_name": session.external_system_name,
             "external_login_url": session.external_login_url,
+            "external_system_id": getattr(session, "external_system_id", ""),
+            "access_profile_id": getattr(session, "access_profile_id", "") or session.guided_learning.get("required_access_profile_id"),
             "using_external_system": bool(session.external_login_url),
             "access_profile_name": session.access_profile_name,
             "microsoft_saved_account_text": session.microsoft_saved_account_text,
@@ -2242,6 +2244,8 @@ class DemoSessionManager:
             "outputs": [dict(item) for item in getattr(session, "outputs", []) if isinstance(item, dict)],
             "learning_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
             "data_source_id": session.guided_learning.get("data_source_id"),
+            "run_start_strategy": session.guided_learning.get("run_start_strategy") or "persistent_graph_reentry",
+            "allowed_list_ids": list(session.guided_learning.get("allowed_list_ids") or []),
         }
 
     async def operator_diagnostics(self, session_id: str) -> dict[str, Any]:
@@ -2886,13 +2890,45 @@ class DemoSessionManager:
         session = await self.ensure_session(session_id)
         if session.status == "expirada" or session.page.is_closed() or not session.browser.is_connected():
             raise DemoSessionError("A sessão do navegador não está disponível.")
-        session.steps = []
-        session.learning_events = []
-        for task in list(session.observer_tasks):
-            task.cancel()
-        session.observer_tasks.clear()
-        session.operator_recording_suppressed_until = 0.0
         raw_instruction = guided_learning if isinstance(guided_learning, dict) else {}
+        from backend.db import ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
+        from backend.services.access_profiles import validate_profile_binding
+
+        with SessionLocal() as db:
+            external_system = db.get(ExternalSystem, getattr(session, "external_system_id", "")) if getattr(session, "external_system_id", "") else None
+            external_config = dict(external_system.config or {}) if external_system is not None else {}
+        configured_strategy = str(external_config.get("run_start_strategy") or "persistent_graph_reentry").strip()
+        requested_strategy = str(raw_instruction.get("run_start_strategy") or configured_strategy).strip()
+        if requested_strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
+            raise DemoSessionError("Estratégia de início inválida.", code="LEARNING_CONTEXT_INVALID")
+        if configured_strategy == "external_entry_each_run" and requested_strategy != configured_strategy:
+            raise DemoSessionError(
+                "O sistema externo exige iniciar pela entrada do sistema.",
+                code="LEARNING_CONTEXT_INVALID",
+            )
+        requested_profile_id = str(raw_instruction.get("required_access_profile_id") or "").strip() or None
+        if requested_strategy == "external_entry_each_run" and not requested_profile_id:
+            raise DemoSessionError(
+                "Selecione um perfil de acesso antes de iniciar o ensino.",
+                code="ACCESS_PROFILE_REQUIRED",
+            )
+        profile = None
+        if requested_profile_id:
+            try:
+                profile = validate_profile_binding(
+                    profile_id=requested_profile_id,
+                    external_system_id=getattr(session, "external_system_id", "") or None,
+                )
+            except Exception as exc:
+                raise DemoSessionError(str(exc), code="ACCESS_PROFILE_INVALID") from exc
+        requested_lists = [str(item).strip() for item in (raw_instruction.get("allowed_list_ids") or []) if str(item).strip()]
+        if requested_lists:
+            with SessionLocal() as db:
+                list_rows = list(db.query(ClientList).filter(ClientList.id.in_(requested_lists), ClientList.tenant_id == session.tenant_id, ClientList.active.is_(True)).all())
+            if {row.id for row in list_rows} != set(requested_lists):
+                raise DemoSessionError("A seleção de listas do ensino contém uma lista inválida.", code="LEARNING_CONTEXT_INVALID")
+            if profile and any(row.access_profile_id != profile.id for row in list_rows):
+                raise DemoSessionError("As listas selecionadas usam outro perfil de acesso.", code="LEARNING_CONTEXT_INVALID")
         output_type = str(raw_instruction.get("output_type") or "apenas abrir tela").strip()
         if output_type not in {"texto/dados da tela", "arquivo/PDF", "ambos", "apenas abrir tela"}:
             raise DemoSessionError("Selecione um tipo de retorno esperado valido.")
@@ -2907,11 +2943,11 @@ class DemoSessionManager:
             "ai_recovery_enabled": bool(raw_instruction.get("ai_recovery_enabled", False)),
             "learning_mode": str(raw_instruction.get("learning_mode") or "free_action"),
             "data_source_id": str(raw_instruction.get("data_source_id") or "") or None,
-            "required_access_profile_id": str(raw_instruction.get("required_access_profile_id") or "") or None,
-            "run_start_strategy": str(raw_instruction.get("run_start_strategy") or "persistent_graph_reentry"),
+            "required_access_profile_id": requested_profile_id,
+            "run_start_strategy": requested_strategy,
+            "allowed_list_ids": requested_lists,
         }
         if session.guided_learning["run_start_strategy"] == "external_entry_each_run" and session.guided_learning.get("required_access_profile_id"):
-            from backend.db import ExternalAccessProfile, ExternalSystem, SessionLocal
             with SessionLocal() as db:
                 profile = db.get(ExternalAccessProfile, session.guided_learning["required_access_profile_id"])
                 system = db.get(ExternalSystem, profile.external_system_id) if profile else None
@@ -2923,6 +2959,18 @@ class DemoSessionManager:
             # Teaching attaches to the page the operator already opened. The
             # configured entry strategy is persisted for publication/runtime;
             # starting a demonstration must not navigate or replace evidence.
+        session.access_profile_id = profile.id if profile is not None else ""
+        if profile is not None:
+            session.access_profile_name = profile.display_name
+            session.access_profile_email_or_identifier = profile.login_identifier
+        session.guided_learning["allowed_list_ids"] = requested_lists
+        session.guided_learning["run_start_strategy"] = requested_strategy
+        session.steps = []
+        session.learning_events = []
+        for task in list(session.observer_tasks):
+            task.cancel()
+        session.observer_tasks.clear()
+        session.operator_recording_suppressed_until = 0.0
         session.output_candidates = []
         session.learning_synthesis = {}
         session.final_page_snapshot = {}
@@ -3204,7 +3252,8 @@ class DemoSessionManager:
         learning_mode: str = "free_action",
         data_source_id: str | None = None,
         required_access_profile_id: str | None = None,
-        run_start_strategy: str = "persistent_graph_reentry",
+        run_start_strategy: str | None = None,
+        allowed_list_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         session = await self.ensure_session(session_id)
         action_name = str(name or "").strip()
@@ -3582,6 +3631,55 @@ class DemoSessionManager:
             learned_states = learned_state_records
             learned_transitions_to_publish = learned_transitions
 
+        effective_profile_id = str(
+            getattr(session, "access_profile_id", "")
+            or session.guided_learning.get("required_access_profile_id")
+            or required_access_profile_id
+            or ""
+        ).strip() or None
+        effective_strategy = str(
+            session.guided_learning.get("run_start_strategy")
+            or run_start_strategy
+            or "persistent_graph_reentry"
+        ).strip()
+        from backend.db import ClientList, ExternalSystem, SessionLocal
+        with SessionLocal() as db:
+            system = db.get(ExternalSystem, getattr(session, "external_system_id", "")) if getattr(session, "external_system_id", "") else None
+            system_config = dict(system.config or {}) if system is not None else {}
+        configured_strategy = str(system_config.get("run_start_strategy") or "persistent_graph_reentry").strip()
+        if effective_strategy == "external_entry_each_run" and not effective_profile_id:
+            raise DemoSessionError(
+                "O ensino não possui perfil de acesso; não é possível publicar uma ação com entrada do sistema.",
+                code="ACCESS_PROFILE_REQUIRED",
+            )
+        if effective_strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
+            raise DemoSessionError("Estratégia de início inválida.", code="LEARNING_CONTEXT_INVALID")
+        if configured_strategy == "external_entry_each_run" and effective_strategy != configured_strategy:
+            raise DemoSessionError(
+                "O sistema externo exige iniciar pela entrada do sistema; o ensino precisa ser refeito com esse contexto.",
+                code="LEARNING_CONTEXT_INVALID",
+            )
+        if effective_strategy == "external_entry_each_run":
+            entry_url = str(system_config.get("entry_url") or system_config.get("external_login_url") or "").strip()
+            if not getattr(session, "external_system_id", "") or not entry_url:
+                raise DemoSessionError("O sistema externo não possui uma entrada configurada.", code="LEARNING_CONTEXT_INVALID")
+
+        effective_lists = [
+            str(item).strip()
+            for item in (allowed_list_ids if allowed_list_ids is not None else session.guided_learning.get("allowed_list_ids") or [])
+            if str(item).strip()
+        ]
+        if effective_lists:
+            with SessionLocal() as db:
+                list_rows = list(db.query(ClientList).filter(ClientList.id.in_(effective_lists), ClientList.tenant_id == session.tenant_id, ClientList.active.is_(True)).all())
+            if {row.id for row in list_rows} != set(effective_lists):
+                raise DemoSessionError("A ação referencia uma lista inexistente ou inativa.", code="ACTION_SCOPE_INVALID")
+            if effective_profile_id and any(row.access_profile_id != effective_profile_id for row in list_rows):
+                raise DemoSessionError("As listas selecionadas usam outro perfil de acesso.", code="ACTION_PROFILE_SCOPE_INVALID")
+        session.guided_learning["allowed_list_ids"] = effective_lists
+        session.guided_learning["run_start_strategy"] = effective_strategy
+        if effective_profile_id:
+            session.access_profile_id = effective_profile_id
         learned_action: dict[str, Any] = {
             "nome_amigavel": action_name,
             "descricao": str(description or "Rotina aprendida por demonstracao manual.").strip(),
@@ -3619,6 +3717,10 @@ class DemoSessionManager:
             ),
             "teaching_mode": str(session.guided_learning.get("learning_mode") or "free_action"),
             "data_source_id": session.guided_learning.get("data_source_id"),
+            "external_system_id": getattr(session, "external_system_id", "") or None,
+            "required_access_profile_id": effective_profile_id,
+            "allowed_list_ids": effective_lists,
+            "run_start_strategy": effective_strategy,
             "learning_ai_analysis": {},
             "objective": objective_text,
             "input_description": input_description_text,
@@ -3671,14 +3773,16 @@ class DemoSessionManager:
             "expected_system_host": expected_system_host,
             "microsoft_hosts": microsoft_hosts,
             "session_guardian_enabled": bool(session.external_login_url or session.browser_mode == "desktop_browser"),
-            "required_access_profile_id": str(required_access_profile_id or session.guided_learning.get("required_access_profile_id") or "").strip() or None,
-            "run_start_strategy": str(run_start_strategy or session.guided_learning.get("run_start_strategy") or "persistent_graph_reentry").strip(),
+            "required_access_profile_id": effective_profile_id,
+            "run_start_strategy": effective_strategy,
+            "allowed_list_ids": effective_lists,
+            "external_system_id": getattr(session, "external_system_id", "") or None,
         }
         if learned_action["required_access_profile_id"]:
             from backend.db import ExternalAccessProfile, SessionLocal
             with SessionLocal() as db:
                 profile_row = db.get(ExternalAccessProfile, learned_action["required_access_profile_id"])
-            if profile_row is None or not profile_row.active:
+            if profile_row is None or not profile_row.active or profile_row.external_system_id != getattr(session, "external_system_id", ""):
                 raise DemoSessionError("Perfil de acesso não encontrado ou inativo.")
             learned_action["access_profile_name"] = profile_row.display_name
             learned_action["access_profile_email_or_identifier"] = profile_row.login_identifier

@@ -647,7 +647,7 @@ export async function getLearningSession(id: string) {
 
 export async function startLearningRecording(
   id: string,
-  input: { name: string; objective: string; expected_result: string; learning_mode?: string; data_source_id?: string | null },
+  input: { name: string; objective: string; expected_result: string; learning_mode?: string; data_source_id?: string | null; required_access_profile_id?: string | null; run_start_strategy?: string | null; allowed_list_ids?: string[] },
 ) {
   const payload = await apiFetch<{ session: LearningSession }>(
     `/api/v1/learning/sessions/${id}/recording/start`,

@@ -35,7 +35,7 @@ class SaveDemoActionRequest(BaseModel):
     data_source_id: str | None = None
     allowed_list_ids: list[str] = Field(default_factory=list)
     required_access_profile_id: str | None = None
-    run_start_strategy: str = "persistent_graph_reentry"
+    run_start_strategy: str | None = None
 
 
 class GuidedLearningRequest(BaseModel):
@@ -50,7 +50,8 @@ class GuidedLearningRequest(BaseModel):
     learning_mode: str = "free_action"
     data_source_id: str | None = None
     required_access_profile_id: str | None = None
-    run_start_strategy: str = "persistent_graph_reentry"
+    run_start_strategy: str | None = None
+    allowed_list_ids: list[str] = Field(default_factory=list)
 
 
 class OperatorFillRequest(BaseModel):

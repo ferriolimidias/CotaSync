@@ -16,6 +16,7 @@ from backend.db import (
     Action as DbAction,
     ActionStep,
     ActionVersion,
+    ExternalAccessProfile,
     Batch as DbBatch,
     BatchItem,
     ExtractionContract,
@@ -382,6 +383,9 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
                 raw.setdefault("allowed_list_ids", list(db_action.allowed_list_ids or []))
                 raw.setdefault("scope_mode", db_action.scope_mode or ("selected" if db_action.allowed_list_ids else "all"))
                 raw.setdefault("required_access_profile_id", db_action.required_access_profile_id)
+                if db_action.required_access_profile_id:
+                    profile = session.get(ExternalAccessProfile, db_action.required_access_profile_id)
+                    raw.setdefault("required_access_profile_name", profile.display_name if profile else None)
                 raw.setdefault("run_start_strategy", version.run_start_strategy or "persistent_graph_reentry")
                 actions.append(_normalize_action(db_action.key, raw, used_ids))
             return ActionsCatalog(actions=actions, exists=True, warning=None)
@@ -588,8 +592,9 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
         run_start_strategy = str(learned_action.get("run_start_strategy") or "persistent_graph_reentry").strip()
         if run_start_strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
             raise ActionsRepositoryError("Estratégia de início da Action inválida.")
+        external_system_id = str(learned_action.get("external_system_id") or "").strip() or None
         if required_profile_id:
-            validate_profile_binding(profile_id=required_profile_id, external_system_id=None)
+            validate_profile_binding(profile_id=required_profile_id, external_system_id=external_system_id)
         action.required_access_profile_id = required_profile_id
 
         version_id = f"{action.id}-v1"

@@ -501,6 +501,7 @@ def _external_system_config_payload(config: dict[str, Any]) -> dict[str, Any]:
     login_url = str(config.get("external_login_url") or "")
     configured = bool(system_name and login_url.strip())
     return {
+        "id": str(config.get("id") or ""),
         "external_system_name": system_name,
         "external_login_url": login_url,
         "entry_url": str(config.get("entry_url") or login_url),
@@ -1006,7 +1007,17 @@ async def actions_get(action_id: str, _user: AuthUser = Depends(require_user)) -
         raise _error(404, "ACTION_NOT_FOUND", "Acao nao encontrada.")
     runs = list_runs(action_id=action.id, limit=1)
     payload = action.model_dump()
-    payload["published_version"] = {"id": None, "status": "published"}
+    with SessionLocal() as session:
+        db_action = session.get(DbAction, action.id)
+        version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+        if version is not None:
+            definition = dict(version.definition or {})
+            payload["external_system_id"] = definition.get("external_system_id")
+            payload["required_access_profile_id"] = version.required_access_profile_id
+            payload["run_start_strategy"] = version.run_start_strategy
+            payload["published_version"] = {"id": version.id, "status": version.status}
+        else:
+            payload["published_version"] = {"id": None, "status": "published"}
     payload["last_run"] = runs[0].model_dump() if runs else None
     payload["needs_attention"] = bool(action.learning_warnings or action.legacy_unconfigured)
     return {"status": "ok", "action": payload}
@@ -1068,6 +1079,7 @@ async def action_versions(action_id: str, _user: AuthUser = Depends(require_user
                 "published_at": version.published_at.isoformat() if version.published_at else None,
                 "required_access_profile_id": version.required_access_profile_id,
                 "run_start_strategy": version.run_start_strategy,
+                "external_system_id": (version.definition or {}).get("external_system_id") if isinstance(version.definition, dict) else None,
             }
             for version in versions
         ]
@@ -1145,7 +1157,8 @@ async def learning_start_recording(session_id: str, payload: GuidedLearningReque
         await demo_session_manager.ensure_session(session_id)
         session = await demo_session_manager.start_recording(session_id, payload.model_dump() if payload is not None else {})
     except DemoSessionError as exc:
-        raise _error(409, "LEARNING_RECORDING_ERROR", str(exc)) from exc
+        status_code = 422 if exc.code in {"ACCESS_PROFILE_REQUIRED", "ACCESS_PROFILE_INVALID", "LEARNING_CONTEXT_INVALID"} else 409
+        raise _error(status_code, exc.code or "LEARNING_RECORDING_ERROR", str(exc)) from exc
     return {"status": "ok", "session": session}
 
 
@@ -1309,9 +1322,17 @@ async def learning_save_action(session_id: str, payload: SaveDemoActionRequest, 
             data_source_id=payload.data_source_id,
             required_access_profile_id=payload.required_access_profile_id,
             run_start_strategy=payload.run_start_strategy,
+            allowed_list_ids=payload.allowed_list_ids,
         )
     except DemoSessionError as exc:
-        raise _error(409, "LEARNING_SAVE_ERROR", str(exc)) from exc
+        status_code = 422 if exc.code in {
+            "ACCESS_PROFILE_REQUIRED",
+            "ACCESS_PROFILE_INVALID",
+            "ACTION_SCOPE_INVALID",
+            "ACTION_PROFILE_SCOPE_INVALID",
+            "LEARNING_CONTEXT_INVALID",
+        } else 409
+        raise _error(status_code, exc.code or "LEARNING_SAVE_ERROR", str(exc)) from exc
     except ActionsRepositoryError as exc:
         logger.exception("Falha de validacao ao publicar aprendizado: session=%s", session_id)
         raise _error(

@@ -22,6 +22,8 @@ import {
   getLearningSession,
   getSystemSpreadsheets,
   getClientLists,
+  getExternalSystemConfig,
+  listAccessProfiles,
   removeLearningOutput,
   renameLearningOutput,
   saveLearnedAction,
@@ -53,9 +55,13 @@ function EnsinarPage() {
   const [dataSourceFieldId, setDataSourceFieldId] = useState<string>("");
   const [scopeAllLists, setScopeAllLists] = useState(true);
   const [scopeListIds, setScopeListIds] = useState<string[]>([]);
+  const [accessProfileId, setAccessProfileId] = useState<string>("");
   const [outputLabels, setOutputLabels] = useState<Record<string, string>>({});
   const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
+  const externalConfig = useQuery({ queryKey: ["external-system-config"], queryFn: getExternalSystemConfig });
+  const accessProfiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles });
+  const availableProfiles = (accessProfiles.data ?? []).filter((profile) => !externalConfig.data?.id || profile.external_system_id === externalConfig.data.id);
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (sessionId) window.sessionStorage.setItem("cotasync-learning-session-id", sessionId);
@@ -80,7 +86,16 @@ function EnsinarPage() {
   });
   const start = useMutation({
     mutationFn: (id: string) =>
-      startLearningRecording(id, { name, objective, expected_result: expected, learning_mode: learningMode, data_source_id: dataSourceId || null }),
+      startLearningRecording(id, {
+        name,
+        objective,
+        expected_result: expected,
+        learning_mode: learningMode,
+        data_source_id: dataSourceId || null,
+        required_access_profile_id: accessProfileId || null,
+        run_start_strategy: externalConfig.data?.run_start_strategy || "persistent_graph_reentry",
+        allowed_list_ids: scopeAllLists ? [] : scopeListIds,
+      }),
     onSuccess: () => toast.success("Gravação iniciada."),
   });
   const stop = useMutation({
@@ -111,6 +126,14 @@ function EnsinarPage() {
     onError: (error) => {
       if (error instanceof ApiError && error.status === 422) {
         void session.refetch();
+        if (error.code === "ACCESS_PROFILE_REQUIRED") {
+          toast.error("Selecione um perfil de acesso antes de publicar a ação.");
+          return;
+        }
+        if (error.code === "ACTION_PROFILE_SCOPE_INVALID") {
+          toast.error("As listas escolhidas usam outro perfil de acesso.");
+          return;
+        }
         if (error.code === "LEARNED_GRAPH_INVALID") {
           toast.error("Não foi possível validar o fluxo aprendido. O ensino foi preservado; tente publicar novamente.");
         } else {
@@ -286,6 +309,18 @@ function EnsinarPage() {
               />
             </div>
             <div className="grid gap-2">
+              <Label>Perfil de acesso</Label>
+              <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={accessProfileId} onChange={(event) => setAccessProfileId(event.target.value)} disabled={Boolean(sessionId)}>
+                <option value="">Selecione o perfil usado nesta ação</option>
+                {availableProfiles.filter((profile) => profile.active).map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.display_name} · {profile.login_identifier}</option>
+                ))}
+              </select>
+              {externalConfig.data?.run_start_strategy === "external_entry_each_run" && !accessProfileId && !sessionId && (
+                <p className="text-xs text-amber-700">Este sistema exige um perfil antes de iniciar o ensino.</p>
+              )}
+            </div>
+            <div className="grid gap-2">
               <Label>Disponível para</Label>
               <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={scopeAllLists ? "all" : "specific"} onChange={(event) => setScopeAllLists(event.target.value === "all")}>
                 <option value="all">Todas as listas</option>
@@ -314,7 +349,7 @@ function EnsinarPage() {
             {!sessionId ? (
               <Button
                 className="w-full"
-                disabled={!name || create.isPending}
+                disabled={!name || create.isPending || (externalConfig.data?.run_start_strategy === "external_entry_each_run" && !accessProfileId)}
                 onClick={() => create.mutate()}
               >
                 <Play className="h-4 w-4" /> Começar ensino
