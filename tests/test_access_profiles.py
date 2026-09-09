@@ -6,7 +6,7 @@ from uuid import uuid4
 import tests  # noqa: F401
 from backend.db import Action, ActionVersion, ClientList, ExternalSystem, SessionLocal
 from backend.api.v1 import _external_system_config_payload
-from backend.services.access_profiles import AccessProfileError, create_access_profile, list_access_profiles, update_access_profile, validate_access_bootstrap
+from backend.services.access_profiles import AccessProfileError, create_access_profile, list_access_profiles, record_profile_validation, update_access_profile, validate_access_bootstrap
 from backend.services.external_systems import load_current_external_system
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 
@@ -27,6 +27,25 @@ class AccessProfileTests(unittest.TestCase):
         renamed = update_access_profile(profile["id"], display_name="Priscila")
         self.assertEqual(renamed["id"], profile["id"])
         self.assertEqual(renamed["display_name"], "Priscila")
+
+    def test_last_validation_status_is_durable_and_returned_by_list(self) -> None:
+        profile = create_access_profile(external_system_id=self.system_id, display_name="Durable", login_identifier=f"durable-{uuid4()}@example.test")
+        updated = record_profile_validation(profile["id"], status="available", reason="profile_available")
+        self.assertEqual(updated["validation_status"], "available")
+        self.assertTrue(updated["last_validated_at"])
+        listed = next(item for item in list_access_profiles() if item["id"] == profile["id"])
+        self.assertEqual(listed["validation_status"], "available")
+        self.assertEqual(listed["session_status"], "available")
+
+        for status, reason in (("reauth_required", "mfa_required"), ("not_found", "account_not_found")):
+            record_profile_validation(profile["id"], status=status, reason=reason)
+            current = next(item for item in list_access_profiles() if item["id"] == profile["id"])
+            self.assertEqual(current["validation_status"], status)
+            self.assertEqual(current["last_validation_reason"], reason)
+
+        self.assertEqual(list_access_profiles(tenant_id="other-tenant"), [])
+        with self.assertRaises(AccessProfileError):
+            record_profile_validation(profile["id"], status="available", tenant_id="other-tenant")
 
     def test_picker_uses_identifier_not_dom_order(self) -> None:
         text = "Pick an account João Signed in Priscila Susin D0004267@rdmz.com.br Signed in Maria Signed in"

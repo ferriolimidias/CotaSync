@@ -30,7 +30,7 @@ import {
   authenticateAccessProfile,
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
-import type { ExternalSystemConfig } from "@/types/api";
+import type { AccessProfile, ExternalSystemConfig } from "@/types/api";
 
 export const Route = createFileRoute("/configuracoes")({
   head: () => ({ meta: [{ title: "Configurações — CotaSync" }] }),
@@ -53,7 +53,6 @@ function ConfigPage() {
   const [profileForm, setProfileForm] = useState({ display_name: "", login_identifier: "", external_code: "" });
   const [aiForm, setAiForm] = useState({ enabled: false, provider: "openai_compatible", model: "gpt-4o-mini", base_url: "", api_key: "" });
   const [googleCredential, setGoogleCredential] = useState<File | null>(null);
-  const [profileStatuses, setProfileStatuses] = useState<Record<string, string>>({});
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
@@ -298,15 +297,20 @@ function ConfigPage() {
               <div className="space-y-3 border-t border-border pt-4">
                 <div><h3 className="text-sm font-semibold text-foreground">Perfis de acesso</h3><p className="text-xs text-muted-foreground">Identidades externas estáveis. Senha, MFA, cookies e tokens nunca são cadastrados aqui.</p></div>
                 <div className="space-y-2">
-                  {(profiles.data || []).map((profile) => (
+                  {(profiles.data || []).map((profile) => {
+                    const status = profile.validation_status || "unverified";
+                    const statusLabel = status === "available" ? "Disponível" : status === "reauth_required" ? "Reautenticação necessária" : status === "not_found" ? "Conta não encontrada nesta sessão" : status === "browser_offline" ? "Browser indisponível" : "Não verificado";
+                    const validatedLabel = profile.last_validated_at ? ` · última verificação ${new Date(profile.last_validated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+                    return (
                     <div key={profile.id} className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
-                      <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div><div className="mt-1 text-xs text-muted-foreground">Microsoft: {profileStatuses[profile.id] || "Não verificado"}</div></div>
+                      <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div><div className="mt-1 text-xs text-muted-foreground">Microsoft: {statusLabel}{validatedLabel}</div></div>
                       <div className="flex flex-wrap gap-2">
-                        <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => { const status = result.profile.session_status === "reauth_required" ? "Reautenticação necessária" : result.profile.session_status === "account_not_found" ? "Conta não encontrada nesta sessão" : result.available ? "Disponível" : "Não verificado"; setProfileStatuses((current) => ({ ...current, [profile.id]: status })); result.available ? toast.success("Conta disponível no navegador.") : result.profile.session_status === "reauth_required" ? toast.warning("Faça a autenticação manual no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual."); }).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
+                        <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => { queryClient.setQueryData<AccessProfile[]>(["access-profiles"], (current) => (current || []).map((item) => item.id === result.profile.id ? result.profile : item)); result.available ? toast.success("Conta disponível no navegador.") : result.profile.validation_status === "reauth_required" ? toast.warning("Faça a autenticação manual no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual."); }).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
                         <Button type="button" size="sm" onClick={() => authenticateAccessProfile(profile.id).then(() => { toast.success(`Entrada aberta para ${profile.display_name}. Conclua a autenticação manual no navegador.`); void navigate({ to: "/configuracoes/navegador" }); }).catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível abrir a autenticação do perfil."))} disabled={!loginConfigured}><ExternalLink className="h-4 w-4" /> Autenticar</Button>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <div className="grid gap-2 sm:grid-cols-3">
                   <Input placeholder="Nome amigável" value={profileForm.display_name} onChange={(event) => setProfileForm((current) => ({ ...current, display_name: event.target.value }))} />

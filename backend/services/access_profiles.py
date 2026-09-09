@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -30,7 +31,11 @@ def _public(row: ExternalAccessProfile, *, system_name: str = "") -> dict[str, A
         "login_identifier": row.login_identifier,
         "external_code": row.external_code or "",
         "active": bool(row.active),
-        "session_status": "unknown",
+        "validation_status": row.validation_status or "unverified",
+        "last_validated_at": row.last_validated_at.isoformat() if row.last_validated_at else None,
+        "last_validation_reason": row.last_validation_reason or "",
+        # Kept for compatibility with the existing live-validation response.
+        "session_status": row.validation_status or "unverified",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -61,6 +66,33 @@ def access_profile_public(profile_id: str, *, tenant_id: str = "default") -> dic
         row = db.scalar(select(ExternalAccessProfile).where(ExternalAccessProfile.id == str(profile_id), ExternalAccessProfile.tenant_id == tenant_id))
         if row is None:
             raise AccessProfileError("Perfil de acesso não encontrado.")
+        system = db.get(ExternalSystem, row.external_system_id)
+        return _public(row, system_name=system.name if system else "")
+
+
+def record_profile_validation(
+    profile_id: str,
+    *,
+    status: str,
+    reason: str = "",
+    tenant_id: str = "default",
+) -> dict[str, Any]:
+    allowed = {"available", "reauth_required", "not_found", "unknown", "browser_offline"}
+    normalized = str(status or "unknown").strip()
+    if normalized not in allowed:
+        normalized = "unknown"
+    with SessionLocal.begin() as db:
+        row = db.scalar(
+            select(ExternalAccessProfile).where(
+                ExternalAccessProfile.id == str(profile_id),
+                ExternalAccessProfile.tenant_id == tenant_id,
+            )
+        )
+        if row is None:
+            raise AccessProfileError("Perfil de acesso não encontrado.")
+        row.validation_status = normalized
+        row.last_validated_at = datetime.now(UTC)
+        row.last_validation_reason = str(reason or "")[:255] or None
         system = db.get(ExternalSystem, row.external_system_id)
         return _public(row, system_name=system.name if system else "")
 

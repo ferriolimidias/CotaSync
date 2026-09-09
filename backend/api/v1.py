@@ -86,6 +86,7 @@ from backend.services.access_profiles import (
     create_access_profile,
     current_external_system_id,
     list_access_profiles,
+    record_profile_validation,
     update_access_profile,
 )
 from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
@@ -1468,20 +1469,26 @@ async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(req
         raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
     observation = await browser_observation_service.observe_deep(source="access_profile_validate")
     if not observation.browser_available:
-        return {"status": "ok", "profile": {**profile, "session_status": "browser_offline"}, "available": False}
+        persisted = record_profile_validation(profile_id, status="browser_offline", reason="browser_unavailable")
+        return {"status": "ok", "profile": persisted, "available": False}
     if not observation.page_available:
-        return {"status": "ok", "profile": {**profile, "session_status": "unknown"}, "available": False}
+        persisted = record_profile_validation(profile_id, status="unknown", reason="page_unavailable")
+        return {"status": "ok", "profile": persisted, "available": False}
     text_content = observation.body_text
     picker = detect_microsoft_account_picker(text_content, [profile["login_identifier"]])
     available = bool(picker["profile_available"])
     auth_state = classify_microsoft_auth_state(text_content)
     if auth_state in {"password_required", "mfa_required"}:
         profile_status = "reauth_required"
+        reason = auth_state
     elif picker["state"] == "account_picker" and not available:
-        profile_status = "account_not_found"
+        profile_status = "not_found"
+        reason = "account_not_found"
     else:
-        profile_status = "session_available" if available else "unknown"
-    return {"status": "ok", "profile": {**profile, "session_status": profile_status}, "available": available, "diagnostic": {"account_picker": picker["state"], "matched_identifiers": picker["available_identifiers"], "auth_state": auth_state}}
+        profile_status = "available" if available else "unknown"
+        reason = "profile_available" if available else "profile_not_confirmed"
+    persisted = record_profile_validation(profile_id, status=profile_status, reason=reason)
+    return {"status": "ok", "profile": persisted, "available": available, "diagnostic": {"account_picker": picker["state"], "matched_identifiers": picker["available_identifiers"], "auth_state": auth_state}}
 
 
 @router.post("/access-profiles/{profile_id}/authenticate", summary="Abre a entrada para autenticação manual do perfil")

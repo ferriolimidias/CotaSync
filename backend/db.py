@@ -334,6 +334,9 @@ class ExternalAccessProfile(Base):
     login_identifier: Mapped[str] = mapped_column(String(255), nullable=False)
     external_code: Mapped[str | None] = mapped_column(String(255))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    validation_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unverified", server_default="unverified", index=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_validation_reason: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

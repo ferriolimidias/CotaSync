@@ -262,6 +262,9 @@ export type AccessProfile = {
   external_code?: string;
   active: boolean;
   session_status?: string;
+  validation_status?: "available" | "reauth_required" | "not_found" | "unknown" | "unverified" | "browser_offline" | string;
+  last_validated_at?: string | null;
+  last_validation_reason?: string;
 };
 
 export type LearningAISettings = {
