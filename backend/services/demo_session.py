@@ -28,6 +28,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
+from sqlalchemy.exc import IntegrityError
 
 from backend.services.action_pages import (
     ActionPageError,
@@ -100,6 +101,10 @@ _MANUAL_CONFIRMATION_BLOCK_TEXTS = (
 
 class DemoSessionError(RuntimeError):
     """Erro operacional seguro no fluxo da demonstracao."""
+
+    def __init__(self, message: str, *, code: str = "LEARNING_SESSION_ERROR") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class DemoReplayStepError(DemoSessionError):
@@ -2168,12 +2173,21 @@ class DemoSessionManager:
             if browser is not None and provider.close_browser_on_session_end:
                 await browser.close()
             await playwright.stop()
-            if isinstance(exc, (DemoSessionError, BrowserProviderError)):
-                if isinstance(exc, BrowserProviderError):
-                    raise DemoSessionError(str(exc)) from exc
+            if isinstance(exc, DemoSessionError):
                 raise
+            if isinstance(exc, BrowserProviderError):
+                raise DemoSessionError(str(exc), code="BROWSER_UNAVAILABLE") from exc
+            if isinstance(exc, IntegrityError):
+                logger.exception("Falha de persistencia ao criar sessao assistida")
+                raise DemoSessionError(
+                    "Nao foi possivel persistir a sessao de aprendizado.",
+                    code="LEARNING_SESSION_PERSISTENCE_ERROR",
+                ) from exc
             logger.exception("Falha ao criar sessao assistida")
-            raise DemoSessionError("Nao foi possivel abrir a sessao do navegador.") from exc
+            raise DemoSessionError(
+                "Nao foi possivel anexar a sessao de aprendizado ao navegador.",
+                code="LEARNING_SESSION_ATTACH_FAILED",
+            ) from exc
 
     async def status(self, session_id: str) -> dict[str, Any]:
         session = await self.ensure_session(session_id)

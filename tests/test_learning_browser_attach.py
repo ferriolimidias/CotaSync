@@ -81,6 +81,12 @@ class ExistingBrowserAttachTests(unittest.TestCase):
         provider.connect.assert_awaited_once()
         self.assertFalse(page.url.endswith("/entry"))
 
+    def test_attach_failure_has_specific_diagnostic(self) -> None:
+        from backend.services.demo_session import DemoSessionError
+
+        error = DemoSessionError("CDP unavailable", code="BROWSER_UNAVAILABLE")
+        self.assertEqual(error.code, "BROWSER_UNAVAILABLE")
+
 
 if __name__ == "__main__":
     unittest.main()

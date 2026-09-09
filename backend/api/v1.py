@@ -1125,7 +1125,7 @@ async def learning_create_session(_user: AuthUser = Depends(require_user)) -> di
     try:
         session = await demo_session_manager.create()
     except DemoSessionError as exc:
-        raise _error(503, "LEARNING_SESSION_UNAVAILABLE", str(exc)) from exc
+        raise _error(503, exc.code, str(exc)) from exc
     return {"status": "ok", "session": session}
 
 
