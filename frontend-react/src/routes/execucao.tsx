@@ -102,8 +102,8 @@ function ExecucaoPage() {
   );
   const singleClients = useQuery({
     queryKey: ["clients", "single", debouncedClientSearch],
-    queryFn: () => getClients({ pageSize: 50, search: debouncedClientSearch, includeInactive: false }),
-    enabled: debouncedClientSearch.trim().length >= 2,
+    queryFn: () => getClients({ pageSize: 30, search: debouncedClientSearch, includeInactive: false }),
+    enabled: true,
   });
   const executableActions = useMemo(
     () => (actions.data?.items ?? []).filter(actionIsExecutable),
@@ -298,21 +298,20 @@ function ExecucaoPage() {
                 }}
               />
             </div>
-            {singleClient && (
-              <div className="grid gap-2">
-                <Label>Ação</Label>
-                <SearchableSelect
-                  value={singleActionId}
-                  options={individualActions.map((action) => ({ value: action.id, label: action.name }))}
-                  onValueChange={setSingleActionId}
-                  placeholder={individualActionsQuery.isFetching ? "Carregando ações..." : "Selecione uma ação"}
-                  emptyLabel={individualActionsQuery.isError ? "Não foi possível carregar as ações." : "Nenhuma ação disponível para este cliente."}
-                />
-                {!individualActionsQuery.isLoading && !individualActionsQuery.isError && individualActions.length === 0 && (
-                  <p className="text-xs text-muted-foreground">Nenhuma ação publicada é compatível com a lista e o acesso deste cliente.</p>
-                )}
-              </div>
-            )}
+            <div className="grid gap-2">
+              <Label>Ação</Label>
+              <SearchableSelect
+                value={singleActionId}
+                options={individualActions.map((action) => ({ value: action.id, label: action.name }))}
+                onValueChange={setSingleActionId}
+                disabled={!singleClient || individualActionsQuery.isLoading}
+                placeholder={!singleClient ? "Selecione um cliente primeiro" : individualActionsQuery.isFetching ? "Carregando ações..." : "Selecione uma ação"}
+                emptyLabel={individualActionsQuery.isError ? "Não foi possível carregar as ações." : "Nenhuma ação disponível para este cliente."}
+              />
+              {singleClient && !individualActionsQuery.isLoading && !individualActionsQuery.isError && individualActions.length === 0 && (
+                <p className="text-xs text-muted-foreground">Nenhuma ação publicada é compatível com a lista e o acesso deste cliente.</p>
+              )}
+            </div>
             {singleClient && (
               <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
                 Grupo {singleClient.display_variables.grupo || "-"} · Cota {singleClient.display_variables.cota || "-"} · Versão {singleClient.display_variables.versao || "-"}
