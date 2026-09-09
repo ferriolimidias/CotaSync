@@ -55,6 +55,19 @@ class FakePage:
         return None
 
 
+class LearningEntryPage(FakePage):
+    def __init__(self) -> None:
+        self.url = "https://system.example.test/residual-result"
+        self.goto_calls: list[tuple[str, dict[str, object]]] = []
+
+    async def goto(self, url: str, **kwargs: object) -> None:
+        self.goto_calls.append((url, kwargs))
+        self.url = url
+
+    async def wait_for_load_state(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
 class SequencedRecorderPage:
     def __init__(self, snapshots: list[dict[str, object]]) -> None:
         self.snapshots = snapshots
@@ -394,6 +407,46 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(session.guided_learning["objective"], "")
         self.assertTrue(session.guided_learning["ai_result_summary_enabled"])
         self.assertEqual(result["id"], "session")
+
+    def test_new_learning_moves_residual_page_to_external_entry_before_recording(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()
+        page = LearningEntryPage()
+        session.page = page
+        session.guided_learning = {}
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch.object(manager, "_set_active_page", new=AsyncMock()):
+            asyncio.run(manager._prepare_learning_external_entry(session, "https://system.example.test/entry"))
+        self.assertEqual(page.goto_calls[0][0], "https://system.example.test/entry")
+        self.assertEqual(session.guided_learning["entry_url"], "https://system.example.test/entry")
+        self.assertEqual(session.guided_learning["access_bootstrap_boundary"], "before_main_recording")
+        self.assertTrue(session.guided_learning["main_recording_starts_after_external_entry"])
+
+    def test_new_learning_never_uses_residual_url_as_entry(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()
+        page = LearningEntryPage()
+        session.page = page
+        session.guided_learning = {}
+        with patch.object(manager, "_set_active_page", new=AsyncMock()):
+            asyncio.run(manager._prepare_learning_external_entry(session, "https://system.example.test/entry"))
+        self.assertNotEqual(page.goto_calls[0][0], "https://system.example.test/residual-result")
+
+    def test_new_learning_keeps_account_selection_inside_bootstrap(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()
+        page = LearningEntryPage()
+        session.page = page
+        session.guided_learning = {}
+        session.microsoft_hosts = ["login.microsoftonline.com"]
+        session.access_profile_email_or_identifier = "profile@example.test"
+        guardian = SimpleNamespace(click_configured_saved_account=AsyncMock(return_value=True))
+        with patch.object(manager, "_set_active_page", new=AsyncMock()), patch(
+            "backend.services.session_guardian.SessionGuardian", return_value=guardian
+        ):
+            asyncio.run(manager._prepare_learning_external_entry(session, "https://login.microsoftonline.com/entry"))
+        guardian.click_configured_saved_account.assert_awaited_once()
+        self.assertEqual(session.guided_learning["access_bootstrap_boundary"], "before_main_recording")
 
     def test_recording_can_start_from_waiting_login_screen(self) -> None:
         manager = DemoSessionManager()
