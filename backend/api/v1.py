@@ -25,6 +25,7 @@ from backend.services.actions_repository import (
     resolve_compatible_actions,
 )
 from backend.services.action_runner import missing_required_variables, run_action_sync, schedule_finish_action_run, start_action_run
+from backend.services.execution_preflight import preflight_action_execution
 from backend.services.auth import AuthUser, require_admin, require_user
 from backend.services.batch_runner import (
     BatchIdempotencyConflict,
@@ -1157,6 +1158,13 @@ async def action_run(action_id: str, payload: ActionRunPayload, _user: AuthUser 
     missing = missing_required_variables(action, payload.variables)
     if missing:
         raise _error(422, "ACTION_VARIABLES_MISSING", f"Variaveis obrigatorias ausentes: {', '.join(missing)}.")
+    # The current product flow always supplies client_id. Keep the old
+    # direct-action contract for integrations that do not carry client context;
+    # contextual runs go through the full structural preflight.
+    if client_id:
+        preflight = preflight_action_execution(action, client_id=client_id, variables=payload.variables)
+        if not preflight["ok"]:
+            raise _error(422, str(preflight["code"]), str(preflight["message"]))
     try:
         if payload.mode == "async":
             run = start_action_run(action, payload)  # type: ignore[arg-type]

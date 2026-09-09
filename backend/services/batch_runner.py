@@ -529,10 +529,11 @@ def create_batch(
         published_version_id = db_action.published_version_id if db_action is not None else None
         version = session.get(ActionVersion, published_version_id) if published_version_id else None
         list_row = session.get(ClientList, str(list_id)) if list_id else None
-        external_system = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
+        configured_system = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
         required_profile_id = str((version.required_access_profile_id if version else None) or (db_action.required_access_profile_id if db_action else None) or "").strip() or None
         run_start_strategy = str((version.run_start_strategy if version else None) or "persistent_graph_reentry").strip()
         profile = session.get(ExternalAccessProfile, required_profile_id) if required_profile_id else None
+        external_system = session.get(ExternalSystem, profile.external_system_id) if profile else configured_system
         if list_id and (list_row is None or not list_row.active):
             raise BatchRunnerError("Lista de clientes não encontrada.")
         if list_row and list_row.access_profile_id != required_profile_id:
