@@ -25,6 +25,7 @@ from backend.services.clients_repository import (
 )
 from backend.services.learned_graph import validate_graph_reentrancy
 from backend.services.access_profiles import validate_access_bootstrap
+from backend.services.execution_preflight import preflight_action_execution
 
 logger = logging.getLogger("cotasync.batch_runner")
 
@@ -534,6 +535,14 @@ def create_batch(
         run_start_strategy = str((version.run_start_strategy if version else None) or "persistent_graph_reentry").strip()
         profile = session.get(ExternalAccessProfile, required_profile_id) if required_profile_id else None
         external_system = session.get(ExternalSystem, profile.external_system_id) if profile else configured_system
+        if db_action is not None and published_version_id:
+            preflight = preflight_action_execution(
+                action,
+                list_id=list_id,
+                spreadsheet_id=spreadsheet_id,
+            )
+            if not preflight["ok"]:
+                raise BatchRunnerError(str(preflight["message"]))
         if list_id and (list_row is None or not list_row.active):
             raise BatchRunnerError("Lista de clientes não encontrada.")
         if list_row and list_row.access_profile_id != required_profile_id:
