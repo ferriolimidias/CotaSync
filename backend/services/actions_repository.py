@@ -374,6 +374,11 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
             rows = session.query(DbAction, ActionVersion).join(
                 ActionVersion, ActionVersion.id == DbAction.published_version_id
             ).filter(DbAction.status != "archived").order_by(DbAction.name).all()
+            profile_ids = {str(row.required_access_profile_id) for row, _version in rows if row.required_access_profile_id}
+            profiles = {
+                profile.id: profile
+                for profile in session.query(ExternalAccessProfile).filter(ExternalAccessProfile.id.in_(profile_ids)).all()
+            } if profile_ids else {}
             actions: list[ActionDetail] = []
             used_ids: set[str] = set()
             for db_action, version in rows:
@@ -384,7 +389,7 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
                 raw.setdefault("scope_mode", db_action.scope_mode or ("selected" if db_action.allowed_list_ids else "all"))
                 raw.setdefault("required_access_profile_id", db_action.required_access_profile_id)
                 if db_action.required_access_profile_id:
-                    profile = session.get(ExternalAccessProfile, db_action.required_access_profile_id)
+                    profile = profiles.get(db_action.required_access_profile_id)
                     raw.setdefault("required_access_profile_name", profile.display_name if profile else None)
                 raw.setdefault("run_start_strategy", version.run_start_strategy or "persistent_graph_reentry")
                 actions.append(_normalize_action(db_action.key, raw, used_ids))

@@ -83,7 +83,7 @@ function Dashboard() {
   const dashboard = useQuery({
     queryKey: ["dashboard"],
     queryFn: getDashboard,
-    refetchInterval: 3000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 15000 : false),
   });
   const runs = useQuery({
     queryKey: ["reports", "runs", "dashboard"],

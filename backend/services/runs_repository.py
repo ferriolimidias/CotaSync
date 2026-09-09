@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -87,6 +87,27 @@ def _empty_payload() -> dict[str, list[dict[str, Any]]]:
     return {"runs": []}
 
 
+def _db_run_to_record(row: DbRun) -> RunRecord:
+    diagnostics = row.diagnostics if isinstance(row.diagnostics, dict) else {}
+    record = diagnostics.get("_record", {})
+    payload = diagnostics.get("_result_payload", {})
+    record = dict(record) if isinstance(record, dict) else {}
+    record.update({
+        "id": row.id,
+        "action_id": row.action_id or record.get("action_id") or "",
+        "action_key": record.get("action_key") or row.action_id or "",
+        "status": row.status if row.status in {"pending", "running", "success", "error"} else "error",
+        "run_origin": row.run_origin if row.run_origin in {"operational", "smoke", "validation", "automated_test", "migration"} else "operational",
+        "created_at": row.created_at.isoformat() if row.created_at else record.get("created_at") or "",
+        "started_at": row.started_at.isoformat() if row.started_at else record.get("started_at"),
+        "finished_at": row.finished_at.isoformat() if row.finished_at else record.get("finished_at"),
+        "variables": row.input_variables or record.get("variables") or {},
+        "result_summary": row.result_summary or record.get("result_summary"),
+        "result_payload": payload or record.get("result_payload"),
+    })
+    return RunRecord.model_validate(record)
+
+
 def _load_payload(path: Path) -> dict[str, Any]:
     if not path.exists():
         return _empty_payload()
@@ -129,23 +150,7 @@ def load_runs(path: Path | None = None) -> list[RunRecord]:
             rows = session.query(DbRun).order_by(DbRun.created_at).all()
             result = []
             for row in rows:
-                record = (row.diagnostics or {}).get("_record", {}) if isinstance(row.diagnostics, dict) else {}
-                payload = (row.diagnostics or {}).get("_result_payload", {}) if isinstance(row.diagnostics, dict) else {}
-                record = dict(record) if isinstance(record, dict) else {}
-                record.update({
-                    "id": row.id,
-                    "action_id": row.action_id or record.get("action_id") or "",
-                    "action_key": record.get("action_key") or row.action_id or "",
-                    "status": row.status if row.status in {"pending", "running", "success", "error"} else "error",
-                    "run_origin": row.run_origin if row.run_origin in {"operational", "smoke", "validation", "automated_test", "migration"} else "operational",
-                    "created_at": row.created_at.isoformat() if row.created_at else record.get("created_at") or "",
-                    "started_at": row.started_at.isoformat() if row.started_at else record.get("started_at"),
-                    "finished_at": row.finished_at.isoformat() if row.finished_at else record.get("finished_at"),
-                    "variables": row.input_variables or record.get("variables") or {},
-                    "result_summary": row.result_summary or record.get("result_summary"),
-                    "result_payload": payload or record.get("result_payload"),
-                })
-                result.append(RunRecord.model_validate(record))
+                result.append(_db_run_to_record(row))
             return result
     runs_path = path or default_runs_path()
     payload = _load_payload(runs_path)
@@ -236,8 +241,30 @@ def list_runs(
     action_id: str | None = None,
     status: RunStatus | None = None,
     limit: int | None = None,
+    run_origin: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
     path: Path | None = None,
 ) -> list[RunRecord]:
+    if path is None:
+        with SessionLocal() as session:
+            query = session.query(DbRun)
+            if action_id:
+                query = query.filter(DbRun.action_id == str(action_id).strip())
+            if status:
+                query = query.filter(DbRun.status == str(status))
+            if run_origin:
+                query = query.filter(DbRun.run_origin == str(run_origin))
+            if created_from and (parsed := _parse_dt(created_from)) is not None:
+                query = query.filter(DbRun.created_at >= parsed)
+            if created_to and (parsed := _parse_dt(created_to)) is not None:
+                if len(str(created_to)) == 10:
+                    parsed += timedelta(days=1)
+                query = query.filter(DbRun.created_at < parsed)
+            query = query.order_by(DbRun.created_at.desc())
+            if limit is not None:
+                query = query.limit(max(0, min(int(limit), 500)))
+            return [_db_run_to_record(row) for row in query.all()]
     runs = load_runs(path)
     if action_id:
         wanted = str(action_id).strip()
@@ -250,3 +277,28 @@ def list_runs(
         safe_limit = max(0, min(int(limit), 500))
         runs = runs[:safe_limit]
     return runs
+
+
+def count_runs(
+    *,
+    action_id: str | None = None,
+    status: RunStatus | None = None,
+    run_origin: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+) -> int:
+    with SessionLocal() as session:
+        query = session.query(DbRun.id)
+        if action_id:
+            query = query.filter(DbRun.action_id == str(action_id).strip())
+        if status:
+            query = query.filter(DbRun.status == str(status))
+        if run_origin:
+            query = query.filter(DbRun.run_origin == str(run_origin))
+        if created_from and (parsed := _parse_dt(created_from)) is not None:
+            query = query.filter(DbRun.created_at >= parsed)
+        if created_to and (parsed := _parse_dt(created_to)) is not None:
+            if len(str(created_to)) == 10:
+                parsed += timedelta(days=1)
+            query = query.filter(DbRun.created_at < parsed)
+        return query.count()

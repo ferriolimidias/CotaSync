@@ -77,7 +77,7 @@ from backend.services.system_spreadsheets import (
     test_service_account_auth,
     update_system_spreadsheet_row,
 )
-from backend.services.runs_repository import RunsRepositoryError, get_run, list_runs
+from backend.services.runs_repository import RunsRepositoryError, count_runs, get_run, list_runs
 from backend.services.client_lists import ClientListError, create_client_list, list_client_lists
 from backend.services.client_lists import rename_client_list, set_client_list_access_profile
 from backend.services.access_profiles import (
@@ -1768,7 +1768,7 @@ async def batches_create(
 
 @router.get("/batches", summary="Lista batches")
 async def batches_list(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=200), _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
-    batches = [_batch_summary(batch) for batch in list_batches(limit=200)]
+    batches = [_batch_summary(batch) for batch in list_batches(limit=200, summary_only=True)]
     return {"status": "ok", "batches": _paginate(batches, page, page_size)}
 
 
@@ -1853,13 +1853,20 @@ async def reports_runs(
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     try:
-        runs = [run.model_dump() for run in list_runs(action_id=action_id, status=status, limit=500)]  # type: ignore[arg-type]
+        fetch_limit = page * page_size if not client else 500
+        runs = [run.model_dump() for run in list_runs(action_id=action_id, status=status, run_origin=run_origin, created_from=date_from, created_to=date_to, limit=fetch_limit)]  # type: ignore[arg-type]
     except RunsRepositoryError as exc:
         raise _error(500, "RUNS_UNAVAILABLE", str(exc)) from exc
     if run_origin:
         runs = [run for run in runs if run.get("run_origin") == run_origin]
     runs = [run for run in runs if _run_matches_filters(run, client=client, date_from=date_from, date_to=date_to)]
-    return {"status": "ok", "runs": _paginate(runs, page, page_size)}
+    if client:
+        page_data = _paginate(runs, page, page_size)
+    else:
+        total = count_runs(action_id=action_id, status=status, run_origin=run_origin, created_from=date_from, created_to=date_to)  # type: ignore[arg-type]
+        start = (page - 1) * page_size
+        page_data = {"page": page, "page_size": page_size, "total": total, "items": runs[start : start + page_size]}
+    return {"status": "ok", "runs": page_data}
 
 
 @router.get("/reports/runs.csv", summary="Exporta histórico filtrado de runs em CSV")
@@ -1888,7 +1895,7 @@ async def reports_runs_csv(
 
 @router.get("/reports/batches", summary="Histórico paginado de batches")
 async def reports_batches(page: int = Query(default=1, ge=1), page_size: int = Query(default=50, ge=1, le=200), status: str | None = None, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
-    batches = list_batches(limit=200)
+    batches = list_batches(limit=200, summary_only=True)
     if status:
         batches = [batch for batch in batches if batch.get("status") == status]
     return {"status": "ok", "batches": _paginate([_batch_summary(batch) for batch in batches], page, page_size)}

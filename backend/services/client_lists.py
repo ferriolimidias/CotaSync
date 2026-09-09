@@ -17,15 +17,24 @@ def list_client_lists(*, tenant_id: str = "default") -> list[dict[str, Any]]:
     with SessionLocal() as db:
         rows = list(db.scalars(select(ClientList).where(ClientList.tenant_id == tenant_id, ClientList.active.is_(True)).order_by(ClientList.name)))
         from backend.db import Client, DataSource
+        list_ids = [row.id for row in rows]
+        counts = dict(db.execute(select(Client.list_id, func.count()).where(Client.list_id.in_(list_ids)).group_by(Client.list_id)).all()) if list_ids else {}
+        active_counts = dict(db.execute(select(Client.list_id, func.count()).where(Client.list_id.in_(list_ids), Client.active.is_(True)).group_by(Client.list_id)).all()) if list_ids else {}
+        spreadsheet_counts: dict[str, int] = {}
+        sheets = db.scalars(select(DataSource).where(DataSource.source_type == "system_spreadsheet")).all()
+        for sheet in sheets:
+            default_list_id = (sheet.configuration or {}).get("default_list_id")
+            if default_list_id:
+                spreadsheet_counts[default_list_id] = spreadsheet_counts.get(default_list_id, 0) + 1
         return [{
             "id": row.id,
             "name": row.name,
             "active": row.active,
             "tenant_id": row.tenant_id,
             "access_profile_id": row.access_profile_id,
-            "client_count": db.scalar(select(func.count()).select_from(Client).where(Client.list_id == row.id)) or 0,
-            "active_client_count": db.scalar(select(func.count()).select_from(Client).where(Client.list_id == row.id, Client.active.is_(True))) or 0,
-            "spreadsheet_count": sum(1 for sheet in db.scalars(select(DataSource).where(DataSource.source_type == "system_spreadsheet")) if (sheet.configuration or {}).get("default_list_id") == row.id),
+            "client_count": counts.get(row.id, 0),
+            "active_client_count": active_counts.get(row.id, 0),
+            "spreadsheet_count": spreadsheet_counts.get(row.id, 0),
         } for row in rows]
 
 

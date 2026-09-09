@@ -23,23 +23,23 @@ function DiagPage() {
   const diagnostics = useQuery({
     queryKey: ["diagnostics"],
     queryFn: getDiagnostics,
-    refetchInterval: 5000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 15000 : false),
     retry: false,
   });
   const worker = useQuery({
     queryKey: ["worker"],
     queryFn: getWorkerStatus,
-    refetchInterval: 3000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 10000 : false),
   });
   const browser = useQuery({
     queryKey: ["browser"],
     queryFn: getBrowserStatus,
-    refetchInterval: 5000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 15000 : false),
   });
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
-    refetchInterval: 5000,
+    refetchInterval: () => (document.visibilityState === "visible" ? 15000 : false),
   });
   const apiAvailable = Boolean(worker.data || browser.data || diagnostics.data || external.data);
 

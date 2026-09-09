@@ -14,7 +14,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.db import Client, ClientList, DataSource, DataSourceField, Run, SessionLocal, SpreadsheetConnector
 from backend.services.google_sync_queue import enqueue_pending_change
@@ -119,13 +119,21 @@ def create_system_spreadsheet(name: str, headers: list[str], *, identity_mapping
 def list_system_spreadsheets(*, tenant_id: str = "default") -> list[dict[str, Any]]:
     with SessionLocal() as db:
         sheets = list(db.scalars(select(DataSource).where(DataSource.source_type == SYSTEM_TYPE).order_by(DataSource.created_at.desc())))
+        sheet_ids = [sheet.id for sheet in sheets if (sheet.configuration or {}).get("tenant_id", "default") == tenant_id]
+        all_fields = list(db.scalars(select(DataSourceField).where(DataSourceField.data_source_id.in_(sheet_ids)))) if sheet_ids else []
+        all_connectors = list(db.scalars(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id.in_(sheet_ids)))) if sheet_ids else []
+        client_counts = dict(db.execute(select(Client.system_spreadsheet_id, func.count()).where(Client.system_spreadsheet_id.in_(sheet_ids)).group_by(Client.system_spreadsheet_id)).all()) if sheet_ids else {}
+        fields_by_sheet: dict[str, list[DataSourceField]] = {}
+        connectors_by_sheet: dict[str, list[SpreadsheetConnector]] = {}
+        for field in all_fields:
+            fields_by_sheet.setdefault(field.data_source_id, []).append(field)
+        for connector in all_connectors:
+            connectors_by_sheet.setdefault(connector.spreadsheet_id, []).append(connector)
         result = []
         for sheet in sheets:
             if (sheet.configuration or {}).get("tenant_id", "default") != tenant_id:
                 continue
-            connectors = list(db.scalars(select(SpreadsheetConnector).where(SpreadsheetConnector.spreadsheet_id == sheet.id)))
-            count = db.query(Client).filter(Client.system_spreadsheet_id == sheet.id).count()
-            result.append(_dump_sheet(sheet, _fields(db, sheet.id), connectors, count))
+            result.append(_dump_sheet(sheet, sorted(fields_by_sheet.get(sheet.id, []), key=lambda field: (int(str(field.source_column_reference or "column:0").split(":")[-1]), field.id)), connectors_by_sheet.get(sheet.id, []), client_counts.get(sheet.id, 0)))
         return result
 
 

@@ -450,9 +450,41 @@ def load_batch(batch_id: str, batches_dir: Path | None = None) -> dict[str, Any]
         return _batch_to_dict(db_batch, items, action=action, clients=clients)
 
 
-def list_batches(*, limit: int = 20, batches_dir: Path | None = None) -> list[dict[str, Any]]:
+def _batch_summary_from_row(row: DbBatch) -> dict[str, Any]:
+    return {
+        "batch_id": row.id,
+        "action_id": row.action_id or "",
+        "action_version_id": row.action_version_id or "",
+        "status": _normalize_batch_status(row.status),
+        "requested_by": row.created_by or "api",
+        "client_group": row.client_group or "",
+        "delay_between_rows_seconds": row.delay_seconds,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+        "worker_id": row.worker_id or "",
+        "cancel_requested": row.cancel_requested,
+        "total_items": row.total_items,
+        "processed_items": row.processed_items,
+        "success_items": row.success_items,
+        "error_items": row.error_items,
+        "interrupted_items": row.interrupted_items,
+        "cancelled_items": row.cancelled_items,
+        "not_processed_items": max(int(row.total_items or 0) - int(row.processed_items or 0), 0),
+        "current_position": None,
+        "current_client_id": None,
+        "action_key": (row.metadata_json or {}).get("action_key", ""),
+        "action_name": (row.metadata_json or {}).get("action_name", (row.metadata_json or {}).get("action_key", "")),
+        "spreadsheet_id": (row.metadata_json or {}).get("spreadsheet_id"),
+    }
+
+
+def list_batches(*, limit: int = 20, batches_dir: Path | None = None, summary_only: bool = False) -> list[dict[str, Any]]:
     with SessionLocal() as session:
         rows = session.query(DbBatch).order_by(DbBatch.created_at.desc()).limit(max(0, min(int(limit), 200))).all()
+        if summary_only:
+            return [_batch_summary_from_row(row) for row in rows]
         result: list[dict[str, Any]] = []
         for row in rows:
             items = session.query(BatchItem).filter(BatchItem.batch_id == row.id).order_by(BatchItem.position).all()

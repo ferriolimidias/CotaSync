@@ -40,18 +40,6 @@ export const Route = createFileRoute("/execucao")({
 
 function ExecucaoPage() {
   const queryClient = useQueryClient();
-  const actions = useQuery({ queryKey: ["actions"], queryFn: () => getActions({ pageSize: 200 }) });
-  const clients = useQuery({
-    queryKey: ["clients"],
-    queryFn: () => getClients({ pageSize: 200, includeInactive: false }),
-  });
-  const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
-  const spreadsheets = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
-  const batches = useQuery({
-    queryKey: ["batches"],
-    queryFn: () => getBatches({ pageSize: 10 }),
-    refetchInterval: 3000,
-  });
   const [actionId, setActionId] = useState("");
   const [group, setGroup] = useState("");
   const [spreadsheetId, setSpreadsheetId] = useState("");
@@ -63,18 +51,49 @@ function ExecucaoPage() {
   const [singleClientSearch, setSingleClientSearch] = useState("");
   const [debouncedClientSearch, setDebouncedClientSearch] = useState("");
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const actions = useQuery({
+    queryKey: ["actions"],
+    queryFn: () => getActions({ pageSize: 200 }),
+    enabled: Boolean(group),
+  });
+  const clients = useQuery({
+    queryKey: ["clients"],
+    queryFn: () => getClients({ pageSize: 200, includeInactive: false }),
+    enabled: Boolean(group),
+  });
+  const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
+  const spreadsheets = useQuery({
+    queryKey: ["system-spreadsheets"],
+    queryFn: getSystemSpreadsheets,
+    enabled: Boolean(group),
+  });
+  const batches = useQuery({
+    queryKey: ["batches"],
+    queryFn: () => getBatches({ pageSize: 10 }),
+    refetchInterval: (query) =>
+      currentBatchId &&
+      document.visibilityState === "visible" &&
+      !isFinalBatch(query.state.data?.items?.[0] as ApiBatch | undefined)
+        ? 3000
+        : false,
+  });
   const currentBatch = useQuery({
     queryKey: ["batch", currentBatchId],
     queryFn: () => getBatch(currentBatchId as string),
     enabled: Boolean(currentBatchId),
     refetchInterval: (query) =>
-      isFinalBatch(query.state.data as ApiBatch | undefined) ? false : 2500,
+      document.visibilityState !== "visible" || isFinalBatch(query.state.data as ApiBatch | undefined)
+        ? false
+        : 2500,
   });
   const currentRun = useQuery({
     queryKey: ["run", currentRunId],
     queryFn: () => getRun(currentRunId as string),
     enabled: Boolean(currentRunId),
-    refetchInterval: (query) => (isFinalRun(query.state.data as ApiRun | undefined) ? false : 2500),
+    refetchInterval: (query) =>
+      document.visibilityState !== "visible" || isFinalRun(query.state.data as ApiRun | undefined)
+        ? false
+        : 2500,
   });
 
   const selectedClients = useMemo(
@@ -84,6 +103,7 @@ function ExecucaoPage() {
   const singleClients = useQuery({
     queryKey: ["clients", "single", debouncedClientSearch],
     queryFn: () => getClients({ pageSize: 50, search: debouncedClientSearch, includeInactive: false }),
+    enabled: debouncedClientSearch.trim().length >= 2,
   });
   const executableActions = useMemo(
     () => (actions.data?.items ?? []).filter(actionIsExecutable),

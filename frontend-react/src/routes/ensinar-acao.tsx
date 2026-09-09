@@ -88,7 +88,8 @@ function EnsinarPage() {
     queryKey: ["learning-session", sessionId],
     queryFn: () => getLearningSession(sessionId as string),
     enabled: Boolean(sessionId),
-    refetchInterval: stopped ? false : 2500,
+    refetchInterval: () =>
+      stopped || document.visibilityState !== "visible" ? false : 2500,
   });
 
   useEffect(() => {
