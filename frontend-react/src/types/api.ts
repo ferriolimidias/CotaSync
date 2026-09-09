@@ -286,6 +286,7 @@ export type GoogleSheetsSettings = {
 };
 
 export type LearningSession = {
+  access_profile_id?: string | null;
   id?: string;
   session_id?: string;
   status?: string;

@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Check, CircleDot, Crosshair, Play, Save, Square, Trash2, X } from "lucide-react";
 
@@ -32,6 +32,7 @@ import {
   stopLearningRecording,
 } from "@/services/api";
 import type { ResultSelectionCandidate } from "@/types/api";
+import { compatibleTeachingList, restoredTeachingProfile, teachingProfiles, teachingProfileStatus } from "@/lib/teaching-profile";
 
 export const Route = createFileRoute("/ensinar-acao")({
   head: () => ({ meta: [{ title: "Ensinar ação — CotaSync" }] }),
@@ -61,7 +62,8 @@ function EnsinarPage() {
   const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
   const externalConfig = useQuery({ queryKey: ["external-system-config"], queryFn: getExternalSystemConfig });
   const accessProfiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles });
-  const availableProfiles = (accessProfiles.data ?? []).filter((profile) => !externalConfig.data?.id || profile.external_system_id === externalConfig.data.id);
+  const availableProfiles = teachingProfiles(accessProfiles.data ?? [], externalConfig.data?.id);
+  const hydratedSessionId = useRef<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (sessionId) window.sessionStorage.setItem("cotasync-learning-session-id", sessionId);
@@ -74,10 +76,42 @@ function EnsinarPage() {
     refetchInterval: stopped ? false : 2500,
   });
 
+  useEffect(() => {
+    if (!sessionId || !session.data || hydratedSessionId.current === sessionId) return;
+    hydratedSessionId.current = sessionId;
+    setAccessProfileId(restoredTeachingProfile(session.data));
+    const lists = Array.isArray(session.data.allowed_list_ids) ? session.data.allowed_list_ids.map(String) : [];
+    setScopeListIds(lists);
+    setScopeAllLists(lists.length === 0);
+  }, [sessionId, session.data]);
+
+  const incompatibleScope = !scopeAllLists && (scopeListIds.length === 0 || scopeListIds.some((id) =>
+    !compatibleTeachingList(clientLists.data?.find((list) => list.id === id)?.access_profile_id, accessProfileId),
+  ));
+
+  function newTeaching() {
+    setSessionId(null);
+    hydratedSessionId.current = null;
+    setAccessProfileId("");
+    setScopeListIds([]);
+    setScopeAllLists(true);
+    setStopped(false);
+    setName("");
+    setObjective("");
+    setExpected("");
+    setSelectionMode("idle");
+    setSelectionCandidate(null);
+    setResultConfirmed(false);
+    setOutputLabels({});
+    setDataSourceId("");
+    setDataSourceFieldId("");
+  }
+
   const create = useMutation({
     mutationFn: createLearningSession,
     onSuccess: async (created) => {
       const id = String(created.session_id || created.id || "");
+      hydratedSessionId.current = id;
       setSessionId(id);
       await start.mutateAsync(id);
     },
@@ -93,7 +127,7 @@ function EnsinarPage() {
         learning_mode: learningMode,
         data_source_id: dataSourceId || null,
         required_access_profile_id: accessProfileId || null,
-        run_start_strategy: externalConfig.data?.run_start_strategy || "persistent_graph_reentry",
+        run_start_strategy: externalConfig.data?.run_start_strategy,
         allowed_list_ids: scopeAllLists ? [] : scopeListIds,
       }),
     onSuccess: () => toast.success("Gravação iniciada."),
@@ -309,13 +343,23 @@ function EnsinarPage() {
               />
             </div>
             <div className="grid gap-2">
+              <Label>Sistema externo</Label>
+              <p className="text-sm">{externalConfig.data?.external_system_name || "Carregando sistema..."}</p>
+            </div>
+            <div className="grid gap-2">
               <Label>Perfil de acesso</Label>
-              <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={accessProfileId} onChange={(event) => setAccessProfileId(event.target.value)} disabled={Boolean(sessionId)}>
+              <select aria-label="Perfil de acesso" className="h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={accessProfileId} onChange={(event) => { setAccessProfileId(event.target.value); setScopeListIds([]); }} disabled={Boolean(sessionId)}>
                 <option value="">Selecione o perfil usado nesta ação</option>
-                {availableProfiles.filter((profile) => profile.active).map((profile) => (
+                {availableProfiles.map((profile) => (
                   <option key={profile.id} value={profile.id}>{profile.display_name} · {profile.login_identifier}</option>
                 ))}
               </select>
+              {accessProfileId && <p className="text-xs text-muted-foreground">{teachingProfileStatus(availableProfiles.find((profile) => profile.id === accessProfileId)?.validation_status)}</p>}
+              {accessProfiles.isError && <p className="text-xs text-amber-700">Não foi possível carregar os perfis. Atualize a página.</p>}
+              {accessProfiles.isSuccess && externalConfig.isSuccess && !availableProfiles.length && <p className="text-xs text-amber-700">{accessProfiles.data.some((profile) => profile.external_system_id === externalConfig.data.id) ? "Nenhum perfil ativo disponível." : "Nenhum perfil de acesso cadastrado para este sistema."}</p>}
+              {sessionId && !accessProfileId && <p className="text-xs text-amber-700">O ensino retomado não possui perfil de acesso definido.</p>}
+              {sessionId && (session.data?.recording === false || (session.error instanceof ApiError && session.error.status === 404)) && <Button type="button" variant="outline" onClick={newTeaching}><Play className="h-4 w-4" /> Novo ensino</Button>}
+              <p className="text-xs text-muted-foreground">Início: {externalConfig.data?.run_start_strategy === "external_entry_each_run" ? "Entrada do sistema" : externalConfig.data?.run_start_strategy === "persistent_graph_reentry" ? "Reentrada pelo grafo" : "Configuração pendente"}</p>
               {externalConfig.data?.run_start_strategy === "external_entry_each_run" && !accessProfileId && !sessionId && (
                 <p className="text-xs text-amber-700">Este sistema exige um perfil antes de iniciar o ensino.</p>
               )}
@@ -323,10 +367,11 @@ function EnsinarPage() {
             <div className="grid gap-2">
               <Label>Disponível para</Label>
               <select className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={scopeAllLists ? "all" : "specific"} onChange={(event) => setScopeAllLists(event.target.value === "all")}>
-                <option value="all">Todas as listas</option>
+                <option value="all">Todas as listas compatíveis com o perfil</option>
                 <option value="specific">Listas específicas</option>
               </select>
-              {!scopeAllLists && <div className="grid gap-1 rounded-md border border-border p-2">{(clientLists.data ?? []).map((list) => <label className="flex items-center gap-2 text-sm" key={list.id}><input type="checkbox" checked={scopeListIds.includes(list.id)} onChange={() => setScopeListIds((current) => current.includes(list.id) ? current.filter((id) => id !== list.id) : [...current, list.id])} /> {list.name}</label>)}</div>}
+              {!scopeAllLists && <div className="grid gap-1 rounded-md border border-border p-2">{(clientLists.data ?? []).map((list) => <label className="flex items-center gap-2 text-sm" key={list.id}><input type="checkbox" disabled={!compatibleTeachingList(list.access_profile_id, accessProfileId)} checked={scopeListIds.includes(list.id)} onChange={() => setScopeListIds((current) => current.includes(list.id) ? current.filter((id) => id !== list.id) : [...current, list.id])} /> {list.name}{!list.access_profile_id ? " · Perfil não definido" : !compatibleTeachingList(list.access_profile_id, accessProfileId) ? " · Outro perfil" : ""}</label>)}</div>}
+              {(clientLists.data ?? []).some((list) => !list.access_profile_id) && <p className="text-xs text-muted-foreground">Há listas que ainda precisam de um perfil. <Link to="/clientes" className="underline">Configurar em Clientes → Listas</Link></p>}
             </div>
             <div className="grid gap-2">
               <Label>Objetivo</Label>
@@ -349,7 +394,7 @@ function EnsinarPage() {
             {!sessionId ? (
               <Button
                 className="w-full"
-                disabled={!name || create.isPending || (externalConfig.data?.run_start_strategy === "external_entry_each_run" && !accessProfileId)}
+                disabled={!name || create.isPending || !externalConfig.data?.id || !externalConfig.data?.run_start_strategy || !availableProfiles.some((profile) => profile.id === accessProfileId) || incompatibleScope}
                 onClick={() => create.mutate()}
               >
                 <Play className="h-4 w-4" /> Começar ensino
