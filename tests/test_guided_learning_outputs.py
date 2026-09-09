@@ -55,6 +55,30 @@ class FakePage:
         return None
 
 
+class SequencedRecorderPage:
+    def __init__(self, snapshots: list[dict[str, object]]) -> None:
+        self.snapshots = snapshots
+        self.index = 0
+
+    @property
+    def url(self) -> str:
+        return str(self.snapshots[min(self.index, len(self.snapshots) - 1)]["url"])
+
+    async def title(self) -> str:
+        return str(self.snapshots[min(self.index, len(self.snapshots) - 1)].get("title") or "")
+
+    def is_closed(self) -> bool:
+        return False
+
+    async def screenshot(self, **_kwargs: object) -> None:
+        return None
+
+    async def evaluate(self, _script: str) -> dict[str, object]:
+        snapshot = self.snapshots[min(self.index, len(self.snapshots) - 1)]
+        self.index = min(self.index + 1, len(self.snapshots) - 1)
+        return dict(snapshot.get("dom_summary") or {})
+
+
 class FakeBrowser:
     def is_connected(self) -> bool:
         return True
@@ -185,6 +209,101 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(saved["external_login_url"], self.FULL_MICROSOFT_URL)
         self.assertEqual(loaded["external_login_url"], self.FULL_MICROSOFT_URL)
         self.assertEqual(saved["expected_system_host"], "nwcweb.randonconsorcios.com.br")
+
+    def _recorder_state(self, page: SequencedRecorderPage) -> dict[str, object]:
+        manager = DemoSessionManager()
+        return asyncio.run(
+            manager._stabilize_recorder_after_state(
+                page,  # type: ignore[arg-type]
+                None,
+                {
+                    "url_before": "https://example.test/a",
+                    "title_before": "A",
+                    "dom_summary_before": {"stable_interactive_selectors": ["#go"]},
+                },
+            )
+        )
+
+    def test_recorder_waits_for_delayed_click_navigation(self) -> None:
+        page = SequencedRecorderPage([
+            {"url": "https://example.test/a", "title": "A", "dom_summary": {"stable_interactive_selectors": ["#go"]}},
+            {"url": "https://example.test/a", "title": "A", "dom_summary": {"stable_interactive_selectors": ["#go"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+        ])
+        self.assertEqual(self._recorder_state(page)["url"], "https://example.test/b")
+
+    def test_recorder_preserves_self_loop_without_navigation(self) -> None:
+        page = SequencedRecorderPage([
+            {"url": "https://example.test/a", "title": "A", "dom_summary": {"stable_interactive_selectors": ["#go"]}},
+        ])
+        observed = self._recorder_state(page)
+        self.assertEqual(observed["url"], "https://example.test/a")
+        self.assertEqual(observed["dom_summary"]["stable_interactive_selectors"], ["#go"])  # type: ignore[index]
+
+    def test_recorder_waits_through_redirect_chain_to_stable_state(self) -> None:
+        page = SequencedRecorderPage([
+            {"url": "https://example.test/a", "title": "A", "dom_summary": {"stable_interactive_selectors": ["#go"]}},
+            {"url": "https://example.test/intermediate", "title": "Loading", "dom_summary": {"stable_interactive_selectors": []}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+        ])
+        self.assertEqual(self._recorder_state(page)["url"], "https://example.test/b")
+
+    def test_recorder_keeps_consecutive_states_connected_after_delayed_click(self) -> None:
+        manager = DemoSessionManager()
+        session = _session()
+        session.steps = []
+        session.learning_events = []
+        page = SequencedRecorderPage([
+            {"url": "https://example.test/a", "title": "A", "dom_summary": {"stable_interactive_selectors": ["#go"]}},
+            {"url": "https://example.test/a", "title": "A", "dom_summary": {"stable_interactive_selectors": ["#go"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+            {"url": "https://example.test/b", "title": "B", "dom_summary": {"stable_interactive_selectors": ["#field"]}},
+        ])
+        session.page = page
+        session.context.pages = [page]
+        session.last_page_count = 1
+        manager._sessions["session"] = session  # type: ignore[attr-defined]
+        with patch("backend.services.demo_session.Page", SequencedRecorderPage), patch(
+            "backend.services.demo_session.persist_learning_session"
+        ):
+            first = asyncio.run(
+                manager._record_live_step(
+                    session,
+                    {
+                        "tipo": "clicar",
+                        "event_type": "click",
+                        "seletor": "#go",
+                        "url_before": "https://example.test/a",
+                        "title_before": "A",
+                        "dom_summary_before": {"stable_interactive_selectors": ["#go"]},
+                    },
+                    {"page": page},
+                )
+            )
+            second = asyncio.run(
+                manager._record_live_step(
+                    session,
+                    {
+                        "tipo": "preencher",
+                        "event_type": "fill",
+                        "seletor": "#field",
+                        "url_before": "https://example.test/b",
+                        "title_before": "B",
+                        "dom_summary_before": {"stable_interactive_selectors": ["#field"]},
+                    },
+                    {"page": page},
+                )
+            )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first["before_state_id"], first["after_state_id"])  # type: ignore[index]
+        self.assertEqual(first["after_state_id"], second["before_state_id"])  # type: ignore[index]
+        self.assertEqual(second["before_state_id"], second["after_state_id"])  # type: ignore[index]
 
     def test_saved_session_target_uses_complete_external_url_not_expected_host(self) -> None:
         manager = DemoSessionManager()

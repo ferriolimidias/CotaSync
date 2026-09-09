@@ -88,6 +88,12 @@ _REPLAY_ACTION_TIMEOUT_MS = _env_seconds("COTASYNC_ACTION_TIMEOUT_SECONDS", 180)
 _REPLAY_NAVIGATION_TIMEOUT_MS = _env_seconds("COTASYNC_NAVIGATION_TIMEOUT_SECONDS", 45) * 1000
 _LONG_ACTION_MAX_MS = _env_seconds("COTASYNC_LONG_ACTION_MAX_SECONDS", 300) * 1000
 _REPLAY_FALLBACK_DELAY_MS = 1200
+_RECORDER_POST_ACTION_TIMEOUT_MS = max(
+    500,
+    _env_seconds("COTASYNC_RECORDER_POST_ACTION_TIMEOUT_SECONDS", 3) * 1000,
+)
+_RECORDER_POST_ACTION_STABLE_MS = 180
+_RECORDER_POST_ACTION_QUIET_MS = 300
 _MANUAL_CONFIRMATION_BLOCK_TEXTS = (
     "acesso bloqueado",
     "access blocked",
@@ -196,10 +202,37 @@ _RECORDER_SCRIPT = r"""
     title: String(document.title || '').slice(0, 200),
     dom_summary: domSummary()
   });
+  const snapshotKey = (value) => JSON.stringify({
+    url: value.url,
+    title: value.title,
+    dom_summary: value.dom_summary
+  });
+  const nextObservation = () => new Promise((resolve) => setTimeout(resolve, 50));
+  const stabilizedAfter = async (before) => {
+    const startedAt = performance.now();
+    const deadline = startedAt + 3000;
+    const beforeKey = snapshotKey(before);
+    let current = snapshot();
+    let previousKey = snapshotKey(current);
+    let changed = previousKey !== beforeKey;
+    let stableSince = performance.now();
+    while (performance.now() < deadline) {
+      await nextObservation();
+      current = snapshot();
+      const currentKey = snapshotKey(current);
+      if (currentKey !== beforeKey) changed = true;
+      if (currentKey !== previousKey) stableSince = performance.now();
+      previousKey = currentKey;
+      const stableFor = performance.now() - stableSince;
+      if (changed && stableFor >= 180) return current;
+      if (!changed && performance.now() - startedAt >= 300) return current;
+    }
+    return current;
+  };
   const send = (payload, before, delay = 0) => {
     if (!payload.seletor || typeof window.__cotasyncRecord !== 'function') return;
-    setTimeout(() => {
-      const after = snapshot();
+    setTimeout(async () => {
+      const after = await stabilizedAfter(before);
       Promise.resolve(window.__cotasyncRecord({
         ...payload,
         timestamp_before: before.timestamp,
@@ -1566,6 +1599,110 @@ class DemoSessionManager:
             bypass_operator_suppression=bypass_operator_suppression,
         )
 
+    async def _recorder_observation(
+        self,
+        page: Page,
+        frame: Frame | None,
+    ) -> dict[str, Any]:
+        target: Any = frame if frame is not None else page
+        url = _full_page_url(getattr(target, "url", "") or getattr(page, "url", ""))
+        title = ""
+        dom_summary: dict[str, Any] = {}
+        try:
+            if frame is None:
+                title = str(await page.title() or "")[:200]
+            else:
+                title = str(await frame.evaluate("() => document.title") or "")[:200]
+        except Exception:
+            pass
+        try:
+            observed = await target.evaluate(
+                """() => ({
+                    ready_state: document.readyState,
+                    element_count: document.body ? document.body.querySelectorAll('*').length : 0,
+                    interactive_count: document.querySelectorAll('button,input,select,textarea,a,[role="button"]').length,
+                    modal_count: document.querySelectorAll('[role="dialog"],dialog[open],.modal.show,[aria-modal="true"]').length,
+                    authenticated_marker: document.body?.dataset?.cotasyncAuthenticated === 'true',
+                    stable_interactive_selectors: Array.from(document.querySelectorAll(
+                        'button, input, select, textarea, a, [role="button"], [data-testid], [data-cotasync-output]'
+                    )).filter((element) => {
+                        const style = window.getComputedStyle(element);
+                        return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+                    }).map((element) => {
+                        const id = element.id ? `#${element.id}` : '';
+                        const name = element.getAttribute('name') ? `[name="${element.getAttribute('name')}"]` : '';
+                        const testId = element.getAttribute('data-testid') ? `[data-testid="${element.getAttribute('data-testid')}"]` : '';
+                        const role = element.getAttribute('role') ? `[role="${element.getAttribute('role')}"]` : '';
+                        return id || testId || name || role;
+                    }).filter(Boolean).filter((selector, index, all) => all.indexOf(selector) === index).slice(0, 32)
+                })"""
+            )
+            if isinstance(observed, dict):
+                dom_summary = observed
+        except Exception:
+            pass
+        return {
+            "timestamp": _utc_now(),
+            "url": url,
+            "title": title,
+            "dom_summary": dom_summary,
+        }
+
+    async def _stabilize_recorder_after_state(
+        self,
+        page: Page,
+        frame: Frame | None,
+        raw: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Observe the result of an action without assuming it is immediate.
+
+        A quiet observation is enough for a genuine no-op/self-loop. Once URL or
+        DOM evidence changes, two consecutive equal observations are required so
+        redirects and frame navigation settle before the state is persisted.
+        """
+        before = {
+            "url": _full_page_url(raw.get("url_before") or getattr(frame or page, "url", "")),
+            "title": str(raw.get("title_before") or "")[:200],
+            "dom_summary": raw.get("dom_summary_before") if isinstance(raw.get("dom_summary_before"), dict) else {},
+        }
+        def observation_key(value: dict[str, Any]) -> str:
+            comparable = {
+                "url": value.get("url", ""),
+                "title": value.get("title", ""),
+                "dom_summary": value.get("dom_summary", {}),
+            }
+            try:
+                return json.dumps(comparable, sort_keys=True, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return repr(comparable)
+
+        try:
+            before_key = observation_key(before)
+        except (TypeError, ValueError):
+            before_key = repr(before)
+        started = time.monotonic()
+        deadline = started + (_RECORDER_POST_ACTION_TIMEOUT_MS / 1000)
+        current = await self._recorder_observation(page, frame)
+        previous_key = ""
+        changed = False
+        stable_since = time.monotonic()
+        while time.monotonic() < deadline:
+            current_key = observation_key(current)
+            if current_key != before_key:
+                changed = True
+            if current_key != previous_key:
+                stable_since = time.monotonic()
+            previous_key = current_key
+            stable_for_ms = (time.monotonic() - stable_since) * 1000
+            elapsed_ms = (time.monotonic() - started) * 1000
+            if changed and stable_for_ms >= _RECORDER_POST_ACTION_STABLE_MS:
+                break
+            if not changed and elapsed_ms >= _RECORDER_POST_ACTION_QUIET_MS:
+                break
+            await asyncio.sleep(0.05)
+            current = await self._recorder_observation(page, frame)
+        return current
+
     async def _record_live_step(
         self,
         session: DemoBrowserSession,
@@ -1603,6 +1740,26 @@ class DemoSessionManager:
         active_page_changed = page is not session.page
         if active_page_changed:
             await self._set_active_page(session, page)
+
+        # The browser-side event can arrive before a click-triggered navigation
+        # or frame redirect has committed. Re-observe the same target here so
+        # the persisted after-state represents the settled result, not the
+        # action's immediate snapshot.
+        observed_after = await self._stabilize_recorder_after_state(page, source_frame, dict(raw))
+        raw = dict(raw)
+        raw["url_after"] = observed_after.get("url") or raw.get("url_after") or page.url
+        raw["title_after"] = observed_after.get("title") or raw.get("title_after") or ""
+        raw["dom_summary_after"] = observed_after.get("dom_summary") or (
+            raw.get("dom_summary_after") if isinstance(raw.get("dom_summary_after"), dict) else {}
+        )
+        raw["timestamp_after"] = observed_after.get("timestamp") or raw.get("timestamp_after") or _utc_now()
+        try:
+            raw["elapsed_ms"] = max(
+                int(raw.get("elapsed_ms") or 0),
+                int((datetime.fromisoformat(str(raw["timestamp_after"]).replace("Z", "+00:00")) - datetime.fromisoformat(str(raw.get("timestamp_before") or raw["timestamp_after"]).replace("Z", "+00:00"))).total_seconds() * 1000),
+            )
+        except (TypeError, ValueError, OverflowError):
+            pass
 
         page_identity = id(page)
         page_refs = getattr(session, "page_refs", None)
@@ -2648,7 +2805,6 @@ class DemoSessionManager:
                     element.dispatchEvent(new Event('change', {bubbles: true}));
                 }"""
             )
-            await asyncio.sleep(0.4)
         except Exception as exc:
             raise DemoSessionError("Não foi possível preencher o campo na página ativa.") from exc
         if effective_record_action and session.recording:
@@ -2737,7 +2893,6 @@ class DemoSessionManager:
             target_metadata = {}
         try:
             await locator.click(timeout=_REPLAY_STEP_TIMEOUT_MS)
-            await asyncio.sleep(1.1)
         except Exception as exc:
             raise DemoSessionError("Não foi possível clicar no elemento da página ativa.") from exc
         if effective_record_action and session.recording:
