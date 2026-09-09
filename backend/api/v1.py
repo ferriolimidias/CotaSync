@@ -25,6 +25,7 @@ from backend.services.actions_repository import (
     resolve_compatible_actions,
 )
 from backend.services.action_runner import missing_required_variables, run_action_sync, schedule_finish_action_run, start_action_run
+from backend.schemas.runs import ActionRunRequest
 from backend.services.execution_preflight import preflight_action_execution
 from backend.services.auth import AuthUser, require_admin, require_user
 from backend.services.batch_runner import (
@@ -129,12 +130,10 @@ class GoogleCredentialPayload(BaseModel):
     credential_json: str
 
 
-class ActionRunPayload(BaseModel):
-    variables: dict[str, Any] = Field(default_factory=dict)
-    mode: str = "async"
+class ActionRunPayload(ActionRunRequest):
+    """Canonical run request used by the v1 individual execution endpoint."""
+
     requested_by: str = "api-v1"
-    session_id: str | None = None
-    run_origin: str = "operational"
 
 
 class ExternalSystemConfigPayload(BaseModel):
@@ -1173,6 +1172,9 @@ async def action_run(action_id: str, payload: ActionRunPayload, _user: AuthUser 
             run = await run_action_sync(action, payload)  # type: ignore[arg-type]
     except RunsRepositoryError as exc:
         raise _error(500, "RUN_UNAVAILABLE", str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Falha ao iniciar execução individual da action %s", action_id)
+        raise _error(500, "RUN_START_FAILED", "Não foi possível iniciar a execução.") from exc
     return {"status": "ok", "run": run.model_dump()}
 
 

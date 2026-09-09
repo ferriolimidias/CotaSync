@@ -218,6 +218,69 @@ class ApiV1ContractTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["run"]["id"], "run-v1")
 
+    def test_action_run_v1_async_uses_canonical_request_contract(self) -> None:
+        fake_run = SimpleNamespace(
+            model_dump=lambda: {
+                "id": "run-v1-async",
+                "action_id": "teste",
+                "action_key": "Teste",
+                "status": "pending",
+                "mode": "async",
+                "run_type": "action_run",
+                "run_origin": "operational",
+                "requested_by": "react",
+                "session_id": None,
+                "client_id": None,
+                "batch_id": None,
+                "created_at": "2026-09-09T00:00:00+00:00",
+                "started_at": None,
+                "finished_at": None,
+                "variables": {"grupo": "935", "cota": "438"},
+                "result_summary": None,
+                "operational_summary": None,
+                "technical_summary": None,
+                "result_payload": None,
+                "ai_summary_used": False,
+                "summary_source": None,
+                "summary_reason": None,
+                "error_message": None,
+            }
+        )
+        with authenticated_client("operator") as client, patch(
+            "backend.api.v1.find_action", return_value=fake_action()
+        ), patch(
+            "backend.api.v1.missing_required_variables", return_value=[]
+        ), patch(
+            "backend.api.v1.start_action_run", return_value=fake_run
+        ) as start_run, patch(
+            "backend.api.v1.schedule_finish_action_run"
+        ) as schedule_run:
+            response = client.post(
+                "/api/v1/actions/teste/run",
+                json={"variables": {"grupo": "935", "cota": "438"}, "mode": "async"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        request = start_run.call_args.args[1]
+        self.assertIsNone(request.batch_id)
+        schedule_run.assert_called_once()
+
+    def test_action_run_v1_start_failure_has_structured_error(self) -> None:
+        with authenticated_client("operator") as client, patch(
+            "backend.api.v1.find_action", return_value=fake_action()
+        ), patch(
+            "backend.api.v1.missing_required_variables", return_value=[]
+        ), patch(
+            "backend.api.v1.start_action_run", side_effect=RuntimeError("contract failure")
+        ):
+            response = client.post(
+                "/api/v1/actions/teste/run",
+                json={"variables": {"grupo": "935", "cota": "438"}, "mode": "async"},
+            )
+
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(response.json()["error"]["code"], "RUN_START_FAILED")
+
     def test_run_detail_and_reports_csv_contract(self) -> None:
         with SessionLocal.begin() as session:
             session.add(
