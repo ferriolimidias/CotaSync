@@ -234,18 +234,15 @@ function ConfigPage() {
                   placeholder="https://..."
                 />
               </div>
-              <div className="grid gap-2">
+              <details className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <summary className="cursor-pointer text-sm font-medium text-foreground">Configurações avançadas</summary>
+              <div className="mt-3 grid gap-2">
                 <Label htmlFor="external-run-strategy">Início de cada execução</Label>
                 <select id="external-run-strategy" className="h-9 rounded-md border border-input bg-background px-3 text-sm" value={form.run_start_strategy || "persistent_graph_reentry"} onChange={(event) => updateForm("run_start_strategy", event.target.value)}>
-                  <option value="external_entry_each_run">Entrada do sistema a cada Run</option>
-                  <option value="persistent_graph_reentry">Reentrada pelo grafo aprendido</option>
+                  <option value="external_entry_each_run">Entrada do sistema a cada cliente</option>
+                  <option value="persistent_graph_reentry">Continuar pelo fluxo aprendido</option>
                 </select>
-                <p className="text-xs text-muted-foreground">O navegador continua persistente; somente a nova Run volta ao entry point configurado.</p>
               </div>
-              <details className="rounded-md border border-border bg-muted/20 px-3 py-2">
-                <summary className="cursor-pointer text-sm font-medium text-foreground">
-                  Configurações avançadas
-                </summary>
                 <div className="mt-3 grid gap-2">
                   <Label htmlFor="external-expected-host">Host esperado após login</Label>
                   <Input
@@ -266,7 +263,7 @@ function ConfigPage() {
             </div>
 
             <div className="space-y-2 border-t border-border pt-4">
-              <h3 className="text-xs font-semibold uppercase text-muted-foreground">Status</h3>
+              <h3 className="text-xs font-semibold uppercase text-muted-foreground">Navegador e acessos</h3>
               <StatusRow label="Configuração">
                 <BadgeStatus
                   tone={external.data?.configuration_complete ? "success" : "warning"}

@@ -762,7 +762,7 @@ async def client_list_create(payload: dict[str, Any], _user: AuthUser = Depends(
 @router.patch("/client-lists/{list_id}", summary="Renomeia lista de clientes")
 async def client_list_rename(list_id: str, payload: dict[str, Any], _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        renamed = rename_client_list(list_id, str(payload.get("name") or ""))
+        renamed = rename_client_list(list_id, str(payload.get("name") or "")) if "name" in payload else {}
         if "access_profile_id" in payload:
             renamed = set_client_list_access_profile(list_id, str(payload.get("access_profile_id") or "").strip() or None)
         return {"status": "ok", "client_list": renamed}
@@ -1172,6 +1172,23 @@ async def learning_create_session(_user: AuthUser = Depends(require_user)) -> di
     return {"status": "ok", "session": session}
 
 
+@router.get("/learning/drafts", summary="Lista rascunhos de ensino")
+async def learning_drafts(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    from backend.db import LearningSession
+    with SessionLocal() as db:
+        rows = db.scalars(select(LearningSession).where(LearningSession.tenant_id == "default", LearningSession.publication_status != "published").order_by(LearningSession.updated_at.desc()).limit(20))
+        return {"drafts": [{"id": row.id, "name": row.action_name, "recording_status": row.recording_status, "publication_status": row.publication_status, "access_profile_id": row.access_profile_id, "updated_at": row.updated_at.isoformat() if row.updated_at else None} for row in rows]}
+
+
+@router.post("/learning/context", summary="Resolve acesso e listas antes do ensino")
+async def learning_context(payload: dict[str, Any], _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    from backend.services.teaching_context import TeachingContextError, resolve_teaching_context
+    try:
+        return resolve_teaching_context(profile_id=payload.get("required_access_profile_id"), spreadsheet_id=payload.get("data_source_id"), list_ids=payload.get("allowed_list_ids"))
+    except TeachingContextError as exc:
+        raise _error(422, "LEARNING_CONTEXT_INVALID", str(exc)) from exc
+
+
 @router.get("/learning/sessions/{session_id}", summary="Estado da sessão de aprendizado")
 async def learning_get_session(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
@@ -1191,6 +1208,14 @@ async def learning_start_recording(session_id: str, payload: GuidedLearningReque
         status_code = 422 if exc.code in {"ACCESS_PROFILE_REQUIRED", "ACCESS_PROFILE_INVALID", "LEARNING_CONTEXT_INVALID"} else 409
         raise _error(status_code, exc.code or "LEARNING_RECORDING_ERROR", str(exc)) from exc
     return {"status": "ok", "session": session}
+
+
+@router.post("/learning/sessions/{session_id}/recording/resume", summary="Continua gravação interrompida")
+async def learning_resume_recording(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        return {"session": await demo_session_manager.resume_recording(session_id)}
+    except DemoSessionError as exc:
+        raise _error(409, "LEARNING_RESUME_UNAVAILABLE", str(exc)) from exc
 
 
 @router.post("/learning/sessions/{session_id}/recording/stop", summary="Finaliza gravação")

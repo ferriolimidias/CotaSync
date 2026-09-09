@@ -20,10 +20,16 @@ import {
   captureLearningResultSelection,
   confirmLearningResultSelection,
   getLearningSession,
+  getLearningDrafts,
+  resumeLearningRecording,
+  resolveTeachingContext,
+  validateAccessProfile,
+  authenticateAccessProfile,
   getSystemSpreadsheets,
   getClientLists,
   getExternalSystemConfig,
   listAccessProfiles,
+  updateClientListAccessProfile,
   removeLearningOutput,
   renameLearningOutput,
   saveLearnedAction,
@@ -40,9 +46,7 @@ export const Route = createFileRoute("/ensinar-acao")({
 });
 
 function EnsinarPage() {
-  const [sessionId, setSessionId] = useState<string | null>(() => (
-    typeof window === "undefined" ? null : window.sessionStorage.getItem("cotasync-learning-session-id")
-  ));
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
   const [expected, setExpected] = useState("");
@@ -58,17 +62,28 @@ function EnsinarPage() {
   const [scopeListIds, setScopeListIds] = useState<string[]>([]);
   const [accessProfileId, setAccessProfileId] = useState<string>("");
   const [outputLabels, setOutputLabels] = useState<Record<string, string>>({});
+  const drafts = useQuery({ queryKey: ["learning-drafts"], queryFn: getLearningDrafts });
   const dataSources = useQuery({ queryKey: ["system-spreadsheets"], queryFn: getSystemSpreadsheets });
   const clientLists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists });
   const externalConfig = useQuery({ queryKey: ["external-system-config"], queryFn: getExternalSystemConfig });
   const accessProfiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles });
   const availableProfiles = teachingProfiles(accessProfiles.data ?? [], externalConfig.data?.id);
-  const hydratedSessionId = useRef<string | null>(null);
+  const selectedSheet = dataSources.data?.find((sheet) => sheet.id === dataSourceId);
+  const sheetList = clientLists.data?.find((list) => list.id === selectedSheet?.default_list_id);
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (sessionId) window.sessionStorage.setItem("cotasync-learning-session-id", sessionId);
-    else window.sessionStorage.removeItem("cotasync-learning-session-id");
-  }, [sessionId]);
+    if (sessionId) return;
+    if (learningMode === "spreadsheet" && !dataSourceId && dataSources.data?.length === 1) setDataSourceId(dataSources.data[0].id);
+    if (learningMode === "spreadsheet" && sheetList?.access_profile_id) {
+      setAccessProfileId(sheetList.access_profile_id);
+      setScopeAllLists(false);
+      setScopeListIds([sheetList.id]);
+    } else if (!accessProfileId && availableProfiles.length === 1) {
+      setAccessProfileId(availableProfiles[0].id);
+    }
+  }, [sessionId, learningMode, dataSourceId, dataSources.data, sheetList, accessProfileId, accessProfiles.data, externalConfig.data]);
+  const hydratedSessionId = useRef<string | null>(null);
+  const preparedContext = useRef<Awaited<ReturnType<typeof resolveTeachingContext>> | null>(null);
+  const [reauthRequired, setReauthRequired] = useState(false);
   const session = useQuery({
     queryKey: ["learning-session", sessionId],
     queryFn: () => getLearningSession(sessionId as string),
@@ -80,6 +95,11 @@ function EnsinarPage() {
     if (!sessionId || !session.data || hydratedSessionId.current === sessionId) return;
     hydratedSessionId.current = sessionId;
     setAccessProfileId(restoredTeachingProfile(session.data));
+    setName(String(session.data.action_name || ""));
+    setObjective(String(session.data.objective || ""));
+    setExpected(String(session.data.expected_result || ""));
+    setLearningMode(session.data.learning_mode === "spreadsheet" ? "spreadsheet" : "free_action");
+    setDataSourceId(String(session.data.data_source_id || ""));
     const lists = Array.isArray(session.data.allowed_list_ids) ? session.data.allowed_list_ids.map(String) : [];
     setScopeListIds(lists);
     setScopeAllLists(lists.length === 0);
@@ -108,7 +128,16 @@ function EnsinarPage() {
   }
 
   const create = useMutation({
-    mutationFn: createLearningSession,
+    mutationFn: async () => {
+      preparedContext.current = await resolveTeachingContext({ required_access_profile_id: accessProfileId || undefined, data_source_id: learningMode === "spreadsheet" ? dataSourceId : undefined, allowed_list_ids: scopeAllLists ? [] : scopeListIds });
+      const validation = await validateAccessProfile(preparedContext.current.required_access_profile_id);
+      if (validation.profile.validation_status === "reauth_required") {
+        setReauthRequired(true);
+        throw new Error(`${validation.profile.display_name} precisa ser autenticado novamente.`);
+      }
+      setReauthRequired(false);
+      return createLearningSession();
+    },
     onSuccess: async (created) => {
       const id = String(created.session_id || created.id || "");
       hydratedSessionId.current = id;
@@ -129,6 +158,7 @@ function EnsinarPage() {
         required_access_profile_id: accessProfileId || null,
         run_start_strategy: externalConfig.data?.run_start_strategy,
         allowed_list_ids: scopeAllLists ? [] : scopeListIds,
+        ...preparedContext.current,
       }),
     onSuccess: () => toast.success("Gravação iniciada."),
   });
@@ -310,6 +340,7 @@ function EnsinarPage() {
             <CardTitle className="text-base">Dados da ação</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            {!sessionId && (drafts.data ?? []).length > 0 && <details><summary className="text-sm">Ensinos salvos</summary>{drafts.data?.map((draft) => <Button key={draft.id} variant="ghost" onClick={async () => { try { if (["interrupted", "recording"].includes(draft.recording_status)) await resumeLearningRecording(draft.id); setName(draft.name); setSessionId(draft.id); } catch (error) { toast.error(error instanceof Error ? error.message : "Não foi possível continuar o ensino."); } }}>{draft.recording_status === "interrupted" || draft.recording_status === "recording" ? "Continuar ensino" : "Revisar ensino"}: {draft.name || "Sem nome"}</Button>)}</details>}
             <div className="grid gap-2">
               <Label>O que você quer ensinar?</Label>
               <div className="grid grid-cols-2 gap-2">
@@ -347,14 +378,15 @@ function EnsinarPage() {
               <p className="text-sm">{externalConfig.data?.external_system_name || "Carregando sistema..."}</p>
             </div>
             <div className="grid gap-2">
-              <Label>Perfil de acesso</Label>
-              <select aria-label="Perfil de acesso" className="h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={accessProfileId} onChange={(event) => { setAccessProfileId(event.target.value); setScopeListIds([]); }} disabled={Boolean(sessionId)}>
+              <Label>Acesso</Label>
+              {availableProfiles.length === 1 || (learningMode === "spreadsheet" && sheetList?.access_profile_id) ? <p className="text-sm">{availableProfiles.find((profile) => profile.id === accessProfileId)?.display_name || "Acesso da lista"}</p> : <select aria-label="Perfil de acesso" className="h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm" value={accessProfileId} onChange={(event) => { setAccessProfileId(event.target.value); setScopeListIds([]); }} disabled={Boolean(sessionId)}>
                 <option value="">Selecione o perfil usado nesta ação</option>
                 {availableProfiles.map((profile) => (
                   <option key={profile.id} value={profile.id}>{profile.display_name} · {profile.login_identifier}</option>
                 ))}
-              </select>
+              </select>}
               {accessProfileId && <p className="text-xs text-muted-foreground">{teachingProfileStatus(availableProfiles.find((profile) => profile.id === accessProfileId)?.validation_status)}</p>}
+              {reauthRequired && <Button type="button" variant="outline" onClick={() => authenticateAccessProfile(accessProfileId).then(() => toast.message("Conclua a autenticação no navegador abaixo e inicie o ensino novamente. Seus dados continuam preenchidos.")).catch((error) => toast.error(error.message))}>Autenticar</Button>}
               {accessProfiles.isError && <p className="text-xs text-amber-700">Não foi possível carregar os perfis. Atualize a página.</p>}
               {accessProfiles.isSuccess && externalConfig.isSuccess && !availableProfiles.length && <p className="text-xs text-amber-700">{accessProfiles.data.some((profile) => profile.external_system_id === externalConfig.data.id) ? "Nenhum perfil ativo disponível." : "Nenhum perfil de acesso cadastrado para este sistema."}</p>}
               {sessionId && !accessProfileId && <p className="text-xs text-amber-700">O ensino retomado não possui perfil de acesso definido.</p>}
@@ -371,7 +403,7 @@ function EnsinarPage() {
                 <option value="specific">Listas específicas</option>
               </select>
               {!scopeAllLists && <div className="grid gap-1 rounded-md border border-border p-2">{(clientLists.data ?? []).map((list) => <label className="flex items-center gap-2 text-sm" key={list.id}><input type="checkbox" disabled={!compatibleTeachingList(list.access_profile_id, accessProfileId)} checked={scopeListIds.includes(list.id)} onChange={() => setScopeListIds((current) => current.includes(list.id) ? current.filter((id) => id !== list.id) : [...current, list.id])} /> {list.name}{!list.access_profile_id ? " · Perfil não definido" : !compatibleTeachingList(list.access_profile_id, accessProfileId) ? " · Outro perfil" : ""}</label>)}</div>}
-              {(clientLists.data ?? []).some((list) => !list.access_profile_id) && <p className="text-xs text-muted-foreground">Há listas que ainda precisam de um perfil. <Link to="/clientes" className="underline">Configurar em Clientes → Listas</Link></p>}
+              {(clientLists.data ?? []).filter((list) => !list.access_profile_id).map((list) => <div key={list.id} className="text-xs text-muted-foreground">{list.name}: acesso ainda não definido. <Button type="button" size="sm" variant="outline" disabled={!accessProfileId} onClick={() => updateClientListAccessProfile(list.id, accessProfileId).then(() => clientLists.refetch()).catch((error) => toast.error(error.message))}>Vincular a {availableProfiles.find((profile) => profile.id === accessProfileId)?.display_name || "um acesso"}</Button></div>)}
             </div>
             <div className="grid gap-2">
               <Label>Objetivo</Label>
@@ -407,6 +439,7 @@ function EnsinarPage() {
                 <p className="text-xs text-muted-foreground">
                   {eventCount} passos · {variableCount} variáveis
                 </p>
+                {sessionStopped && <div className="space-y-1 text-sm"><p>Ação: {name || "Ensino salvo"}</p><p>Acesso: {availableProfiles.find((profile) => profile.id === accessProfileId)?.display_name || "Não definido"}</p><p>Listas: {scopeAllLists ? "Compatíveis com o acesso" : (clientLists.data ?? []).filter((list) => scopeListIds.includes(list.id)).map((list) => list.name).join(", ")}</p><p>Resultados: {outputs.length}</p><p>Variáveis: {(session.data?.variables ?? []).map((key) => ({ grupo: "Grupo", cota: "Cota", versao: "Versão" })[key] || key).join(", ") || "Nenhuma"}</p></div>}
                 {(() => {
                   const reviewStatus = String((session.data?.ai_review as Record<string, unknown> | undefined)?.status || "");
                   if (reviewStatus === "completed") return <p className="text-xs text-emerald-700">Revisão por IA concluída; validação local preservada.</p>;

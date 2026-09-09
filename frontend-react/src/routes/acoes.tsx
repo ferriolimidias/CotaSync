@@ -110,7 +110,7 @@ function ActionCard({ action }: { action: ApiAction }) {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <Info label="Versão" value={versionLabel} />
+          <Info label="Resultados" value={String(action.outputs?.length ?? 0)} />
           <Info label="Passos" value={String(action.steps_count ?? 0)} />
           <Info
             label="Última execução"
@@ -120,8 +120,8 @@ function ActionCard({ action }: { action: ApiAction }) {
             label="Variáveis"
             value={action.variables.map((item) => item.key).join(", ") || "Nenhuma"}
           />
-          <Info label="Perfil de acesso" value={action.required_access_profile_name || (action.required_access_profile_id ? "Configurado" : "Não definido")} />
-          <Info label="Início" value={action.run_start_strategy === "external_entry_each_run" ? "Entrada do sistema" : "Reentrada pelo grafo"} />
+          <Info label="Acesso" value={action.required_access_profile_name || (action.required_access_profile_id ? "Configurado" : "Não definido")} />
+          <Info label="Início" value={action.run_start_strategy === "external_entry_each_run" ? "Entrada do sistema" : "Fluxo aprendido"} />
         </div>
         {action.legacy_unconfigured && (
           <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">

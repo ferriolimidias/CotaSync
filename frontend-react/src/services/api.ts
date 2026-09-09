@@ -200,9 +200,22 @@ export async function updateClientListAccessProfile(id: string, access_profile_i
   return payload.client_list;
 }
 
-export async function createClientList(name: string) {
-  const payload = await apiFetch<{ client_list: { id: string; name: string } }>("/api/v1/client-lists", { method: "POST", body: JSON.stringify({ name }) });
+export async function createClientList(name: string, access_profile_id?: string) {
+  const payload = await apiFetch<{ client_list: { id: string; name: string } }>("/api/v1/client-lists", { method: "POST", body: JSON.stringify({ name, access_profile_id }) });
   return payload.client_list;
+}
+
+export async function getLearningDrafts() {
+  const payload = await apiFetch<{ drafts: Array<{ id: string; name: string; recording_status: string; publication_status: string }> }>("/api/v1/learning/drafts");
+  return payload.drafts;
+}
+
+export async function resumeLearningRecording(id: string) {
+  return apiFetch(`/api/v1/learning/sessions/${id}/recording/resume`, { method: "POST" });
+}
+
+export async function resolveTeachingContext(input: { required_access_profile_id?: string; data_source_id?: string; allowed_list_ids: string[] }) {
+  return apiFetch<{ external_system_id: string; required_access_profile_id: string; allowed_list_ids: string[]; run_start_strategy: string }>("/api/v1/learning/context", { method: "POST", body: JSON.stringify(input) });
 }
 
 export async function createSystemSpreadsheet(input: { name: string; headers: string[]; list_id?: string }) {

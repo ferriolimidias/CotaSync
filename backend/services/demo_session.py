@@ -2324,6 +2324,14 @@ class DemoSessionManager:
                 getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
             ),
             "reviewed_session_id": session.id,
+            "access_profile_id": session.access_profile_id,
+            "external_system_id": session.external_system_id,
+            "allowed_list_ids": list(session.guided_learning.get("allowed_list_ids") or []),
+            "learning_mode": session.guided_learning.get("learning_mode", "free_action"),
+            "data_source_id": session.guided_learning.get("data_source_id"),
+            "action_name": session.guided_learning.get("name", ""),
+            "objective": session.guided_learning.get("objective", ""),
+            "expected_result": session.guided_learning.get("expected_result", ""),
             "status": session.status,
             "recording": bool(session.recording),
             "recording_status": "recording" if session.recording else "stopped",
@@ -3000,6 +3008,26 @@ class DemoSessionManager:
         session.download_detected = False
         persist_learning_session(session)
         logger.info("Gravacao iniciada na sessao %s", session_id)
+        return await self.status(session_id)
+
+    async def resume_recording(self, session_id: str) -> dict[str, Any]:
+        session = await self.ensure_session(session_id)
+        if session.recording:
+            return await self.status(session_id)
+        if session.status != "interrupted" or session.publication_status == "published":
+            raise DemoSessionError("Este ensino já foi finalizado. Abra a revisão ou inicie um novo ensino.")
+        if not session.access_profile_id:
+            raise DemoSessionError("O ensino salvo não possui acesso definido.")
+        session.recording = True
+        session.active_recording_session_id = session.id
+        try:
+            await self._install_recorder_for_session(session)
+            session.status = "gravando"
+            persist_learning_session(session)
+        except Exception:
+            session.recording = False
+            session.status = "interrupted"
+            raise
         return await self.status(session_id)
 
     async def stop_recording(self, session_id: str) -> dict[str, Any]:

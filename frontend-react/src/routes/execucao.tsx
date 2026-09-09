@@ -90,21 +90,26 @@ function ExecucaoPage() {
     [actions.data],
   );
   const compatibleActions = useMemo(
-    () => executableActions.filter((action) => !group || action.scope_mode === "all" || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(group)),
-    [executableActions, group],
+    () => executableActions.filter((action) => Boolean(group) && Boolean(action.required_access_profile_id) && action.required_access_profile_id === clientLists.data?.find((list) => list.id === group)?.access_profile_id && (action.scope_mode === "all" || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(group))),
+    [executableActions, group, clientLists.data],
   );
   const compatibleSpreadsheets = useMemo(
     () => (spreadsheets.data ?? []).filter((sheet) => !group || sheet.default_list_id === group),
     [spreadsheets.data, group],
   );
+  useEffect(() => {
+    if (!group && clientLists.data?.length === 1) setGroup(clientLists.data[0].id);
+    if (!actionId && compatibleActions.length === 1) setActionId(compatibleActions[0].id);
+    if (!spreadsheetId && compatibleSpreadsheets.length === 1) setSpreadsheetId(compatibleSpreadsheets[0].id);
+  }, [group, actionId, spreadsheetId, clientLists.data, compatibleActions, compatibleSpreadsheets]);
   const selectedAction = useMemo(() => compatibleActions.find((action) => action.id === actionId), [compatibleActions, actionId]);
   const selectedSpreadsheet = useMemo(() => compatibleSpreadsheets.find((sheet) => sheet.id === spreadsheetId), [compatibleSpreadsheets, spreadsheetId]);
   const requiredFieldIds = useMemo(() => (selectedAction?.outputs ?? []).map((output) => output.destination?.field_id).filter(Boolean) as string[], [selectedAction]);
   const requiresSpreadsheet = requiredFieldIds.length > 0;
   const missingFieldIds = useMemo(() => requiredFieldIds.filter((fieldId) => !selectedSpreadsheet?.fields.some((field) => field.field_id === fieldId || field.id === fieldId)), [requiredFieldIds, selectedSpreadsheet]);
   const individualActions = useMemo(
-    () => executableActions.filter((action) => !singleClient || action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(singleClient.list_id || "")),
-    [executableActions, singleClient],
+    () => executableActions.filter((action) => Boolean(singleClient) && Boolean(action.required_access_profile_id) && action.required_access_profile_id === clientLists.data?.find((list) => list.id === singleClient?.list_id)?.access_profile_id && (action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(singleClient?.list_id || ""))),
+    [executableActions, singleClient, clientLists.data],
   );
   const selectedSingleAction = useMemo(
     () => individualActions.find((action) => action.id === singleActionId),
@@ -367,6 +372,8 @@ function ExecucaoPage() {
               <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
                 <span>Lista: <strong className="text-foreground">{(clientLists.data ?? []).find((item) => item.id === group)?.name || "Todas as listas"}</strong></span>
                 <span>Ação: <strong className="text-foreground">{selectedAction?.name || "-"}</strong></span>
+                <span>Acesso: <strong className="text-foreground">{selectedAction?.required_access_profile_name || "-"}</strong></span>
+                <span>Início de cada cliente: {selectedAction?.run_start_strategy === "external_entry_each_run" ? "Entrada do sistema" : "Fluxo aprendido"}</span>
                 <span>Planilha: <strong className="text-foreground">{selectedSpreadsheet?.name || "-"}</strong></span>
                 <span>Clientes ativos: <strong className="text-foreground">{selectedClients.length}</strong></span>
                 <span>Processamento: <strong className="text-foreground">1 cliente por vez · {delay}s entre clientes</strong></span>
