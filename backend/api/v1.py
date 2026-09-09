@@ -22,6 +22,7 @@ from backend.services.actions_repository import (
     delete_or_archive_action,
     find_action,
     load_actions_catalog,
+    resolve_compatible_actions,
 )
 from backend.services.action_runner import missing_required_variables, run_action_sync, schedule_finish_action_run, start_action_run
 from backend.services.auth import AuthUser, require_admin, require_user
@@ -1044,9 +1045,13 @@ async def client_list_delete(list_id: str, delete_clients_too: bool = False, _us
 
 
 @router.get("/actions", summary="Lista ações publicadas")
-async def actions_list(page: int = Query(default=1, ge=1), page_size: int = Query(default=50, ge=1, le=200), _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+async def actions_list(page: int = Query(default=1, ge=1), page_size: int = Query(default=50, ge=1, le=200), list_id: str | None = Query(default=None), access_profile_id: str | None = Query(default=None), _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        actions = [action.model_dump() for action in load_actions_catalog().actions]
+        catalog = load_actions_catalog()
+        selected = catalog.actions
+        if list_id or access_profile_id:
+            selected = resolve_compatible_actions(selected, list_id=list_id, access_profile_id=access_profile_id)
+        actions = [action.model_dump() for action in selected]
     except ActionsRepositoryError as exc:
         raise _error(500, "ACTIONS_UNAVAILABLE", str(exc)) from exc
     return {"status": "ok", "actions": _paginate(actions, page, page_size)}

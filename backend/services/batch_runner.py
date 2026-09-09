@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, ClientList, DataSource, DataSourceField, ExternalAccessProfile, ExternalSystem, Run as DbRun, SessionLocal
 from backend.services.google_sync_queue import pending_count
-from backend.services.actions_repository import find_action
+from backend.services.actions_repository import find_action, resolve_compatible_actions
 from backend.services.clients_repository import (
     get_client_display_fields,
     resolve_variables_for_action,
@@ -537,6 +537,8 @@ def create_batch(
             raise BatchRunnerError("Lista de clientes não encontrada.")
         if list_row and list_row.access_profile_id != required_profile_id:
             raise BatchRunnerError("A Action e a Lista usam perfis de acesso diferentes ou a Action ainda não possui perfil vinculado.")
+        if list_id and not resolve_compatible_actions([action], list_id=list_id, access_profile_id=required_profile_id):
+            raise BatchRunnerError("A Action não é compatível com a lista e o perfil selecionados.")
         if run_start_strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
             raise BatchRunnerError("Estratégia de início da Action inválida.")
         if required_profile_id and external_system is None:

@@ -117,24 +117,40 @@ function ExecucaoPage() {
     () => (spreadsheets.data ?? []).filter((sheet) => !group || sheet.default_list_id === group),
     [spreadsheets.data, group],
   );
-  useEffect(() => {
-    if (!group && clientLists.data?.length === 1) setGroup(clientLists.data[0].id);
-    if (!actionId && compatibleActions.length === 1) setActionId(compatibleActions[0].id);
-    if (!spreadsheetId && compatibleSpreadsheets.length === 1) setSpreadsheetId(compatibleSpreadsheets[0].id);
-  }, [group, actionId, spreadsheetId, clientLists.data, compatibleActions, compatibleSpreadsheets]);
   const selectedAction = useMemo(() => compatibleActions.find((action) => action.id === actionId), [compatibleActions, actionId]);
   const selectedSpreadsheet = useMemo(() => compatibleSpreadsheets.find((sheet) => sheet.id === spreadsheetId), [compatibleSpreadsheets, spreadsheetId]);
   const requiredFieldIds = useMemo(() => (selectedAction?.outputs ?? []).map((output) => output.destination?.field_id).filter(Boolean) as string[], [selectedAction]);
   const requiresSpreadsheet = requiredFieldIds.length > 0;
   const missingFieldIds = useMemo(() => requiredFieldIds.filter((fieldId) => !selectedSpreadsheet?.fields.some((field) => field.field_id === fieldId || field.id === fieldId)), [requiredFieldIds, selectedSpreadsheet]);
+  const singleClientList = useMemo(
+    () => clientLists.data?.find((list) => list.id === singleClient?.list_id),
+    [clientLists.data, singleClient],
+  );
+  const individualActionsQuery = useQuery({
+    queryKey: ["actions", "individual", singleClient?.list_id, singleClientList?.access_profile_id],
+    queryFn: () => getActions({
+      pageSize: 200,
+      listId: singleClient?.list_id,
+      accessProfileId: singleClientList?.access_profile_id,
+    }),
+    enabled: Boolean(singleClient?.list_id && singleClientList?.access_profile_id),
+  });
   const individualActions = useMemo(
-    () => executableActions.filter((action) => Boolean(singleClient) && Boolean(action.required_access_profile_id) && action.required_access_profile_id === clientLists.data?.find((list) => list.id === singleClient?.list_id)?.access_profile_id && (action.allowed_list_ids.length === 0 || action.allowed_list_ids.includes(singleClient?.list_id || ""))),
-    [executableActions, singleClient, clientLists.data],
+    () => (individualActionsQuery.data?.items ?? []).filter(actionIsExecutable),
+    [individualActionsQuery.data],
   );
   const selectedSingleAction = useMemo(
     () => individualActions.find((action) => action.id === singleActionId),
     [individualActions, singleActionId],
   );
+  useEffect(() => {
+    if (!group && clientLists.data?.length === 1) setGroup(clientLists.data[0].id);
+    if (!actionId && compatibleActions.length === 1) setActionId(compatibleActions[0].id);
+    if (!spreadsheetId && compatibleSpreadsheets.length === 1) setSpreadsheetId(compatibleSpreadsheets[0].id);
+    if (!singleClient) setSingleActionId("");
+    else if (individualActions.length === 1 && singleActionId !== individualActions[0].id) setSingleActionId(individualActions[0].id);
+    else if (singleActionId && !individualActions.some((action) => action.id === singleActionId)) setSingleActionId("");
+  }, [group, actionId, spreadsheetId, clientLists.data, compatibleActions, compatibleSpreadsheets, singleClient, individualActions, singleActionId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedClientSearch(singleClientSearch), 250);
@@ -267,15 +283,6 @@ function ExecucaoPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-2">
-              <Label>Ação</Label>
-              <SearchableSelect
-                value={singleActionId}
-                options={individualActions.map((action) => ({ value: action.id, label: action.name }))}
-                onValueChange={setSingleActionId}
-                placeholder="Selecione uma ação"
-              />
-            </div>
-            <div className="grid gap-2">
               <Label>Cliente</Label>
               <ClientSearchCombobox
                 value={singleClient}
@@ -291,6 +298,21 @@ function ExecucaoPage() {
                 }}
               />
             </div>
+            {singleClient && (
+              <div className="grid gap-2">
+                <Label>Ação</Label>
+                <SearchableSelect
+                  value={singleActionId}
+                  options={individualActions.map((action) => ({ value: action.id, label: action.name }))}
+                  onValueChange={setSingleActionId}
+                  placeholder={individualActionsQuery.isFetching ? "Carregando ações..." : "Selecione uma ação"}
+                  emptyLabel={individualActionsQuery.isError ? "Não foi possível carregar as ações." : "Nenhuma ação disponível para este cliente."}
+                />
+                {!individualActionsQuery.isLoading && !individualActionsQuery.isError && individualActions.length === 0 && (
+                  <p className="text-xs text-muted-foreground">Nenhuma ação publicada é compatível com a lista e o acesso deste cliente.</p>
+                )}
+              </div>
+            )}
             {singleClient && (
               <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground">
                 Grupo {singleClient.display_variables.grupo || "-"} · Cota {singleClient.display_variables.cota || "-"} · Versão {singleClient.display_variables.versao || "-"}

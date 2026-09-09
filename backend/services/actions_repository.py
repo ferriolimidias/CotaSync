@@ -62,6 +62,27 @@ class ActionsCatalog:
     warning: str | None = None
 
 
+def resolve_compatible_actions(
+    actions: list[ActionDetail],
+    *,
+    list_id: str | None,
+    access_profile_id: str | None,
+) -> list[ActionDetail]:
+    """Apply the authoritative list/profile compatibility rule to published actions."""
+    wanted_list = str(list_id or "").strip()
+    wanted_profile = str(access_profile_id or "").strip()
+    if not wanted_list or not wanted_profile:
+        return []
+    return [
+        action for action in actions
+        if action.required_access_profile_id == wanted_profile
+        and not action.legacy_unconfigured
+        and action.steps_count > 0
+        and action.has_url
+        and (action.scope_mode == "all" or not action.allowed_list_ids or wanted_list in action.allowed_list_ids)
+    ]
+
+
 def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 

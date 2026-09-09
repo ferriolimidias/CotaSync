@@ -388,11 +388,13 @@ export async function exportClientsCsv() {
   return apiFetch<string>("/api/v1/clients/export.csv");
 }
 
-export async function getActions(params: { page?: number; pageSize?: number } = {}) {
+export async function getActions(params: { page?: number; pageSize?: number; listId?: string; accessProfileId?: string } = {}) {
   const query = new URLSearchParams({
     page: String(params.page ?? 1),
     page_size: String(params.pageSize ?? 50),
   });
+  if (params.listId) query.set("list_id", params.listId);
+  if (params.accessProfileId) query.set("access_profile_id", params.accessProfileId);
   const payload = await apiFetch<{ actions: ApiPage<ApiAction> }>(`/api/v1/actions?${query}`);
   return payload.actions;
 }
