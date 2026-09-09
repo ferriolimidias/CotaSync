@@ -497,6 +497,36 @@ def _external_session_payload(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _external_configuration_diagnostics(config: dict[str, Any]) -> dict[str, Any]:
+    """Check technical access configuration without requiring a live login."""
+    system_id = str(config.get("id") or "").strip()
+    system_name = str(config.get("external_system_name") or "").strip()
+    strategy = str(config.get("run_start_strategy") or "").strip()
+    entry_url = str(config.get("entry_url") or config.get("external_login_url") or "").strip()
+    expected_host = str(config.get("expected_system_host") or "").strip()
+    missing: list[str] = []
+    if not system_id:
+        missing.append("external_system_id")
+    if not system_name:
+        missing.append("external_system_name")
+    if strategy not in {"persistent_graph_reentry", "external_entry_each_run"}:
+        missing.append("run_start_strategy")
+    if strategy == "external_entry_each_run" and not entry_url:
+        missing.append("entry_url")
+    if not expected_host:
+        missing.append("expected_system_host")
+    profiles = list_access_profiles(external_system_id=system_id) if system_id else []
+    active_profiles = [profile for profile in profiles if profile.get("active")]
+    if strategy == "external_entry_each_run" and not active_profiles:
+        missing.append("no_access_profile")
+    return {
+        "complete": not missing,
+        "missing_fields": missing,
+        "reason": "ok" if not missing else missing[0],
+        "active_profile_count": len(active_profiles),
+    }
+
+
 def _external_system_config_payload(config: dict[str, Any]) -> dict[str, Any]:
     system_name = str(config.get("external_system_name") or "").strip()
     login_url = str(config.get("external_login_url") or "")
@@ -1591,6 +1621,9 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
     except ExternalSystemConfigError as exc:
         raise _error(500, "EXTERNAL_SESSION_UNAVAILABLE", str(exc)) from exc
     external_session = _external_session_payload(config)
+    configuration = _external_configuration_diagnostics(config)
+    external_session["configuration_complete"] = configuration["complete"]
+    external_session["configuration_missing_fields"] = configuration["missing_fields"]
     external_session["session_status"] = await _external_session_status_from_browser(config)
     external_session["microsoft_session_available"] = external_session["session_status"] == "microsoft_session_available"
     profiles = list_access_profiles()
@@ -1642,13 +1675,24 @@ async def external_session_open_login(
 @router.post("/external-session/validate", summary="Valida configuração de sessão externa")
 async def external_session_validate(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     config = load_current_external_system()
+    configuration = _external_configuration_diagnostics(config)
     external_session = _external_session_payload(config)
     external_session["session_status"] = await _external_session_status_from_browser(config, deep=True)
+    external_session["configuration_complete"] = configuration["complete"]
+    external_session["configuration_missing_fields"] = configuration["missing_fields"]
+    external_session["microsoft_status"] = {
+        "microsoft_session_available": "available",
+        "microsoft_pick_account": "account_picker",
+        "reauth_required": "reauth_required",
+    }.get(external_session["session_status"], "not_verified")
+    external_session["external_system_status"] = "inside" if external_session["session_status"] == "authenticated" else "outside"
     return {
         "status": "ok",
-        "valid": external_session["session_status"] in {"authenticated", "microsoft_session_available"},
-        "configuration_valid": bool(external_session["external_system_configured"]),
+        "valid": configuration["complete"],
+        "configuration_valid": configuration["complete"],
+        "configuration": configuration,
         "session_status": external_session["session_status"],
+        "access_valid": external_session["session_status"] in {"authenticated", "microsoft_session_available"},
         "manual_login_required": True,
         "external_session": external_session,
     }

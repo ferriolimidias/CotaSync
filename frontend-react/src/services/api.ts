@@ -609,7 +609,7 @@ export async function openExternalLogin(force = false) {
 }
 
 export async function validateExternalSession() {
-  return apiFetch<{ valid: boolean; manual_login_required: boolean }>(
+  return apiFetch<{ valid: boolean; configuration_valid: boolean; configuration?: { missing_fields?: string[]; reason?: string }; manual_login_required: boolean }>(
     "/api/v1/external-session/validate",
     { method: "POST" },
   );

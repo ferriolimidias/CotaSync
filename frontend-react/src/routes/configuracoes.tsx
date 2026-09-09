@@ -110,7 +110,7 @@ function ConfigPage() {
   const validate = useMutation({
     mutationFn: validateExternalSession,
     onSuccess: (result) => {
-      toast.success(result.valid ? "Configuração externa válida." : "Configuração incompleta.");
+      toast.success(result.configuration_valid ? "Acessos verificados." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
       void queryClient.invalidateQueries({ queryKey: ["external-session"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -269,9 +269,9 @@ function ConfigPage() {
               <h3 className="text-xs font-semibold uppercase text-muted-foreground">Status</h3>
               <StatusRow label="Configuração">
                 <BadgeStatus
-                  tone={external.data?.external_system_configured ? "success" : "warning"}
+                  tone={external.data?.configuration_complete ? "success" : "warning"}
                 >
-                  {external.data?.external_system_configured ? "Configurado" : "Não configurado"}
+                  {external.data?.configuration_complete ? "Configurado" : `Incompleto${external.data?.configuration_missing_fields?.length ? `: ${external.data.configuration_missing_fields.join(", ")}` : ""}`}
                 </BadgeStatus>
               </StatusRow>
               <StatusRow label="Browser">

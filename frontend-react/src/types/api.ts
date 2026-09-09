@@ -241,6 +241,8 @@ export type ExternalSessionStatus = {
   access_profile_count?: number;
   expected_system_host_configured?: boolean;
   updated_at?: string | null;
+  configuration_complete?: boolean;
+  configuration_missing_fields?: string[];
 };
 
 export type ExternalSystemConfig = {
