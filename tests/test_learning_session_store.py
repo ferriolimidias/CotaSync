@@ -58,6 +58,33 @@ class LearningSessionStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["diagnostics"]["ai_review"]["status"], "completed")
         self.assertNotIn("playwright", snapshot)
 
+    def test_empty_optional_foreign_keys_are_persisted_as_null(self) -> None:
+        session = SimpleNamespace(
+            id="empty-fk-snapshot",
+            tenant_id="default",
+            status="aguardando_login",
+            recording=False,
+            publication_status="not_attempted",
+            external_system_id="",
+            access_profile_id="",
+            external_system_name="",
+            external_login_url="",
+            access_profile_name="",
+            access_profile_email_or_identifier="",
+            expected_system_host="",
+            guided_learning={},
+            learning_events=[],
+            steps=[],
+            outputs=[],
+            recorder_errors=[],
+            result_selection={},
+            extraction_review={},
+            final_page_snapshot={},
+        )
+        snapshot = session_snapshot(session)
+        self.assertIsNone(snapshot["external_system_id"])
+        self.assertIsNone(snapshot["access_profile_id"])
+
     def test_write_through_increments_revision_and_keeps_failed_publication_retryable(self) -> None:
         session_id = f"store-test-{uuid4()}"
         session = SimpleNamespace(

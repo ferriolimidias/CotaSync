@@ -121,6 +121,9 @@ def load_current_external_system() -> dict[str, Any]:
             if row is not None:
                 payload = dict(row.config or {})
                 result = empty_external_system()
+                # The relational ID is runtime metadata, not legacy identity
+                # configuration. Learning sessions use it for an optional FK.
+                result["id"] = str(row.id)
                 for key in _string_keys():
                     result[key] = str(payload.get(key) or "")
                 if not result["entry_url"]:

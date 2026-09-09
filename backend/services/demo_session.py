@@ -2081,7 +2081,6 @@ class DemoSessionManager:
             raise DemoSessionError(str(exc)) from exc
         external_login_url = str(external_config.get("external_login_url") or "")
         external_system_name = str(external_config.get("external_system_name") or "").strip()
-        target_url = external_login_url or _demo_target_url()
         storage_state_path = (
             _external_storage_state_path(external_system_name, session_id)
             if external_login_url
@@ -2097,7 +2096,6 @@ class DemoSessionManager:
             context = connection.context
             page = connection.page
             await self._prepare_reconnected_context(session_id, context)
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
             cdp = await context.new_cdp_session(page)
             target_info = await cdp.send("Target.getTargetInfo")
             target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
@@ -2116,7 +2114,7 @@ class DemoSessionManager:
                 tracking_id=_tracking_id(session_id),
                 browser_mode=selected_mode,
                 external_system_name=external_system_name,
-                external_system_id=str(external_config.get("id") or external_config.get("external_system_id") or ""),
+                external_system_id=str(external_config.get("id") or external_config.get("external_system_id") or "").strip(),
                 external_login_url=external_login_url,
                 auth_validation_mode=str(external_config.get("validation") or "").strip(),
                 auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
@@ -2908,7 +2906,9 @@ class DemoSessionManager:
                 raise DemoSessionError("Perfil de acesso não encontrado ou inativo.")
             if not entry_url:
                 raise DemoSessionError("O sistema externo não possui entry_url configurado.")
-            await session.page.goto(entry_url, wait_until="domcontentloaded", timeout=30000)
+            # Teaching attaches to the page the operator already opened. The
+            # configured entry strategy is persisted for publication/runtime;
+            # starting a demonstration must not navigate or replace evidence.
         session.output_candidates = []
         session.learning_synthesis = {}
         session.final_page_snapshot = {}

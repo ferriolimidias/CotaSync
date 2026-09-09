@@ -57,6 +57,11 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _optional_id(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
 def learning_evidence_fingerprint(session: Any, extra: Any = None) -> str:
     """Stable identity for the evidence reviewed by Learning AI.
 
@@ -111,8 +116,10 @@ def session_snapshot(session: Any) -> dict[str, Any]:
         "status": str(getattr(session, "status", "active") or "active"),
         "recording_status": "recording" if bool(getattr(session, "recording", False)) else "stopped",
         "publication_status": str(getattr(session, "publication_status", "not_attempted") or "not_attempted"),
-        "external_system_id": getattr(session, "external_system_id", None),
-        "access_profile_id": (guided or {}).get("required_access_profile_id") or getattr(session, "access_profile_id", None),
+        "external_system_id": _optional_id(getattr(session, "external_system_id", None)),
+        "access_profile_id": _optional_id(
+            (guided or {}).get("required_access_profile_id") or getattr(session, "access_profile_id", None)
+        ),
         "allowed_list_ids": sanitize_learning_value((guided or {}).get("allowed_list_ids") or []),
         "run_start_strategy": str((guided or {}).get("run_start_strategy") or "persistent_graph_reentry"),
         "raw_events": events,
