@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import asyncio
 
-from test_demo_v01_cycle import main as run_demo_cycle
+try:
+    from test_demo_v01_cycle import main as run_demo_cycle
+except ModuleNotFoundError:
+    # The optional human-demo harness is not part of the repository checkout.
+    # Keep collection usable; invoking this script still reports the missing
+    # external harness explicitly.
+    run_demo_cycle = None
 
 
 async def main() -> None:
+    if run_demo_cycle is None:
+        raise RuntimeError("test_demo_v01_cycle.py não está disponível neste checkout.")
     await run_demo_cycle(
         cycle_count=1,
         include_revalidation=False,

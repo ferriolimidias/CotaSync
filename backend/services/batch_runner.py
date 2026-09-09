@@ -542,7 +542,13 @@ def create_batch(
                 spreadsheet_id=spreadsheet_id,
             )
             if not preflight["ok"]:
-                raise BatchRunnerError(str(preflight["message"]))
+                detail = str(preflight.get("message") or "Preflight de batch falhou.")
+                if preflight.get("code") == "profile_list_mismatch":
+                    detail += (
+                        " (perfil da ação/lista incompatível: "
+                        f"{preflight.get('action_profile_id')} != {preflight.get('list_profile_id')})"
+                    )
+                raise BatchRunnerError(detail)
         if list_id and (list_row is None or not list_row.active):
             raise BatchRunnerError("Lista de clientes não encontrada.")
         if list_row and list_row.access_profile_id != required_profile_id:

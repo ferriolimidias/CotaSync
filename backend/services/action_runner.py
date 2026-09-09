@@ -713,7 +713,6 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             }
             run.finished_at = utc_now_iso()
             try:
-                update_run(run)
                 persist_terminal_run_fallback(
                     run.id,
                     code="UNHANDLED_RUN_EXCEPTION",
@@ -721,6 +720,10 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 )
             except Exception:
                 logger.exception("Fallback terminal indisponivel para o run %s", run.id)
+            try:
+                update_run(run)
+            except Exception:
+                logger.exception("Persistencia secundaria indisponivel para o run %s", run.id)
 
     return run
 

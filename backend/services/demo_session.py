@@ -2324,8 +2324,8 @@ class DemoSessionManager:
                 getattr(session, "active_recording_session_id", "") or (session.id if session.recording else "")
             ),
             "reviewed_session_id": session.id,
-            "access_profile_id": session.access_profile_id,
-            "external_system_id": session.external_system_id,
+            "access_profile_id": getattr(session, "access_profile_id", None),
+            "external_system_id": getattr(session, "external_system_id", None),
             "allowed_list_ids": list(session.guided_learning.get("allowed_list_ids") or []),
             "learning_mode": session.guided_learning.get("learning_mode", "free_action"),
             "data_source_id": session.guided_learning.get("data_source_id"),

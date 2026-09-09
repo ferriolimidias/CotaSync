@@ -906,9 +906,10 @@ class AccessProfileCatalogTests(unittest.TestCase):
             catalog = load_actions_catalog(catalog_path)
         action = catalog.actions[0]
         self.assertTrue(action.legacy_unconfigured)
-        self.assertEqual(action.access_profile_name, "Priscila")
-        self.assertEqual(action.microsoft_saved_account_identifier, "D0004267@rdmz.com.br")
-        self.assertEqual(action.expected_system_host, "nwcweb.randonconsorcios.com.br")
+        # Legacy catalog entries remain visible as unconfigured, but identity
+        # now comes only from AccessProfile-bound published versions.
+        self.assertIsNone(action.access_profile_name)
+        self.assertIsNone(action.microsoft_saved_account_identifier)
 
 
 class DesktopActionRunTests(unittest.TestCase):

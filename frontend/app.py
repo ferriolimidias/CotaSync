@@ -2799,8 +2799,8 @@ elif menu_selecionado == "Configurações":
                 except DemoApiError as exc:
                     st.error(str(exc))
     with st.form("access_profile_create_form"):
-        profile_name = st.text_input("Nome do perfil", placeholder="Ex.: Priscila Susin")
-        profile_identifier = st.text_input("Login/e-mail do perfil", placeholder="Ex.: D0004267@rdmz.com.br")
+        profile_name = st.text_input("Nome da conta / perfil", placeholder="Ex.: Priscila Susin")
+        profile_identifier = st.text_input("Identificador/e-mail da conta", placeholder="Ex.: D0004267@rdmz.com.br")
         profile_code = st.text_input("Código externo (opcional)")
         if st.form_submit_button("Adicionar perfil", use_container_width=True):
             try:

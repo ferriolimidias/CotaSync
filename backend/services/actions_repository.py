@@ -419,7 +419,13 @@ def load_actions_catalog(path: Path | None = None) -> ActionsCatalog:
                     profile = profiles.get(db_action.required_access_profile_id)
                     raw.setdefault("required_access_profile_name", profile.display_name if profile else None)
                 raw.setdefault("run_start_strategy", version.run_start_strategy or "persistent_graph_reentry")
-                actions.append(_normalize_action(db_action.key, raw, used_ids))
+                normalized = _normalize_action(db_action.key, raw, used_ids)
+                # The database Action id is canonical. Do not regenerate it
+                # from the display name, otherwise repeated catalog reads can
+                # resolve a different identity after a rename or collision.
+                normalized = normalized.model_copy(update={"id": db_action.id})
+                used_ids.add(str(db_action.id))
+                actions.append(normalized)
             return ActionsCatalog(actions=actions, exists=True, warning=None)
     payload, exists, warning = _load_ui_map(path)
     raw_actions = payload.get("acoes_conhecidas", {})

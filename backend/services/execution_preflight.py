@@ -48,7 +48,13 @@ def preflight_action_execution(
 
         profile_id = str(version.required_access_profile_id or db_action.required_access_profile_id or "").strip() or None
         if list_row and profile_id != str(list_row.access_profile_id or "").strip():
-            return {"ok": False, "code": "profile_list_mismatch", "message": "A ação e a lista usam acessos diferentes."}
+            return {
+                "ok": False,
+                "code": "profile_list_mismatch",
+                "message": "A ação e a lista usam acessos diferentes.",
+                "action_profile_id": profile_id,
+                "list_profile_id": str(list_row.access_profile_id or "").strip() or None,
+            }
         if client is not None and not list_row:
             return {"ok": False, "code": "client_context_missing", "message": "Este cliente ainda não possui uma lista configurada."}
         profile = db.get(ExternalAccessProfile, profile_id) if profile_id else None

@@ -24,7 +24,7 @@ class OperatorLoginControlsTests(unittest.TestCase):
             demo_session_manager,
             "operator_insert_active",
             new=AsyncMock(return_value={"operation": "insert_active_text", "typed_chars": len(value), "sensitive": False}),
-        ) as mocked:
+        ) as mocked, patch.object(demo_session_manager, "ensure_session", new=AsyncMock()):
             with authenticated_client() as client:
                 response = client.post(
                     "/api/demo/sessions/session-1/operator/insert-active",
@@ -41,7 +41,7 @@ class OperatorLoginControlsTests(unittest.TestCase):
             demo_session_manager,
             "operator_insert_active",
             new=AsyncMock(return_value={"operation": "insert_active_text", "typed_chars": len(secret), "sensitive": True}),
-        ) as mocked:
+        ) as mocked, patch.object(demo_session_manager, "ensure_session", new=AsyncMock()):
             with authenticated_client() as client:
                 response = client.post(
                     "/api/demo/sessions/session-1/operator/insert-active",
@@ -60,7 +60,7 @@ class OperatorLoginControlsTests(unittest.TestCase):
             demo_session_manager,
             "operator_press",
             new=AsyncMock(return_value={"operation": "press_key", "key": "Enter"}),
-        ) as mocked:
+        ) as mocked, patch.object(demo_session_manager, "ensure_session", new=AsyncMock()):
             with authenticated_client() as client:
                 enter = client.post("/api/demo/sessions/session-1/operator/press", json={"key": "Enter"})
                 tab = client.post("/api/demo/sessions/session-1/operator/press", json={"key": "Tab"})
@@ -75,7 +75,11 @@ class OperatorLoginControlsTests(unittest.TestCase):
             demo_session_manager,
             "operator_clear_active",
             new=AsyncMock(return_value={"operation": "clear_active"}),
-        ) as mocked:
+        ) as mocked, patch.object(
+            demo_session_manager,
+            "ensure_session",
+            new=AsyncMock(),
+        ):
             with authenticated_client() as client:
                 response = client.post("/api/demo/sessions/session-1/operator/clear-active")
 

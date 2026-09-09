@@ -130,8 +130,8 @@ function ExecucaoPage() {
     queryKey: ["actions", "individual", singleClient?.list_id, singleClientList?.access_profile_id],
     queryFn: () => getActions({
       pageSize: 200,
-      listId: singleClient?.list_id,
-      accessProfileId: singleClientList?.access_profile_id,
+      listId: singleClient?.list_id ?? undefined,
+      accessProfileId: singleClientList?.access_profile_id ?? undefined,
     }),
     enabled: Boolean(singleClient?.list_id && singleClientList?.access_profile_id),
   });
