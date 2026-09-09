@@ -88,6 +88,7 @@ from backend.services.access_profiles import (
     list_access_profiles,
     record_profile_validation,
     update_access_profile,
+    validate_profile_from_observation,
 )
 from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
 from backend.services.google_settings import public_settings as public_google_settings, remove_credentials as remove_google_credentials, save_credentials as save_google_credentials
@@ -575,15 +576,10 @@ def _expected_external_hosts(config: dict[str, Any]) -> set[str]:
     return {host for host in hosts if host}
 
 
-async def _external_session_status_from_browser(config: dict[str, Any], *, deep: bool = False) -> str:
+def _external_session_status_from_observation(config: dict[str, Any], observation: Any, profiles: list[dict[str, Any]] | None = None) -> str:
     external_session = _external_session_payload(config)
     if not external_session["external_system_configured"]:
         return "not_configured"
-    observation = await (
-        browser_observation_service.observe_deep(source="external_session_validate")
-        if deep
-        else browser_observation_service.observe(source="external_session_status")
-    )
     if not observation.browser_available:
         return "browser_offline"
     if not observation.page_available:
@@ -599,8 +595,8 @@ async def _external_session_status_from_browser(config: dict[str, Any], *, deep:
     if any(current_host == host or current_host.endswith(f".{host}") for host in microsoft_hosts):
         if observation.deep and observation.body_text:
             text_content = observation.body_text.casefold()
-            profiles = list_access_profiles()
-            identifiers = [str(profile.get("login_identifier") or "") for profile in profiles if profile.get("active")]
+            active_profiles = profiles if profiles is not None else list_access_profiles()
+            identifiers = [str(profile.get("login_identifier") or "") for profile in active_profiles if profile.get("active")]
             picker = detect_microsoft_account_picker(text_content, identifiers)
             if picker["profile_available"]:
                 return "microsoft_session_available"
@@ -613,6 +609,31 @@ async def _external_session_status_from_browser(config: dict[str, Any], *, deep:
         # A passive status knows the Microsoft host, but does not guess the account state.
         return "unknown"
     return "unknown"
+
+
+async def _external_session_status_from_browser(config: dict[str, Any], *, deep: bool = False) -> str:
+    observation = await (
+        browser_observation_service.observe_deep(source="external_session_validate")
+        if deep
+        else browser_observation_service.observe(source="external_session_status")
+    )
+    return _external_session_status_from_observation(config, observation)
+
+
+def _microsoft_profile_summary(profiles: list[dict[str, Any]]) -> tuple[str, int, int]:
+    active = [profile for profile in profiles if profile.get("active")]
+    available_count = sum(profile.get("validation_status") == "available" for profile in active)
+    if not active:
+        return "not_verified", 0, 0
+    if available_count == len(active):
+        return "available", available_count, len(active)
+    if available_count:
+        return "available", available_count, len(active)
+    if any(profile.get("validation_status") == "reauth_required" for profile in active):
+        return "reauth_required", 0, len(active)
+    if all(profile.get("validation_status") == "not_found" for profile in active):
+        return "not_found", 0, len(active)
+    return "not_verified", 0, len(active)
 
 
 def _action_executable(action: Any) -> bool:
@@ -1529,21 +1550,7 @@ async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(req
     if not observation.page_available:
         persisted = record_profile_validation(profile_id, status="unknown", reason="page_unavailable")
         return {"status": "ok", "profile": persisted, "available": False}
-    text_content = observation.body_text
-    picker = detect_microsoft_account_picker(text_content, [profile["login_identifier"]])
-    available = bool(picker["profile_available"])
-    auth_state = classify_microsoft_auth_state(text_content)
-    if auth_state in {"password_required", "mfa_required"}:
-        profile_status = "reauth_required"
-        reason = auth_state
-    elif picker["state"] == "account_picker" and not available:
-        profile_status = "not_found"
-        reason = "account_not_found"
-    else:
-        profile_status = "available" if available else "unknown"
-        reason = "profile_available" if available else "profile_not_confirmed"
-    persisted = record_profile_validation(profile_id, status=profile_status, reason=reason)
-    return {"status": "ok", "profile": persisted, "available": available, "diagnostic": {"account_picker": picker["state"], "matched_identifiers": picker["available_identifiers"], "auth_state": auth_state}}
+    return {"status": "ok", **validate_profile_from_observation(profile, observation)}
 
 
 @router.post("/access-profiles/{profile_id}/authenticate", summary="Abre a entrada para autenticação manual do perfil")
@@ -1702,14 +1709,22 @@ async def external_session_validate(_user: AuthUser = Depends(require_user)) -> 
     config = load_current_external_system()
     configuration = _external_configuration_diagnostics(config)
     external_session = _external_session_payload(config)
-    external_session["session_status"] = await _external_session_status_from_browser(config, deep=True)
+    observation = await browser_observation_service.observe_deep(source="external_session_validate")
+    profiles = list_access_profiles(external_system_id=str(config.get("id") or ""))
+    validated_profiles = []
+    for profile in profiles:
+        if profile.get("active"):
+            validated_profiles.append(validate_profile_from_observation(profile, observation))
+    persisted_profiles = [item["profile"] for item in validated_profiles]
+    profile_summary, available_count, profile_count = _microsoft_profile_summary(persisted_profiles)
+    external_session["session_status"] = _external_session_status_from_observation(config, observation, profiles=persisted_profiles)
     external_session["configuration_complete"] = configuration["complete"]
     external_session["configuration_missing_fields"] = configuration["missing_fields"]
-    external_session["microsoft_status"] = {
-        "microsoft_session_available": "available",
-        "microsoft_pick_account": "account_picker",
-        "reauth_required": "reauth_required",
-    }.get(external_session["session_status"], "not_verified")
+    external_session["microsoft_status"] = profile_summary
+    external_session["microsoft_session_available"] = profile_summary == "available"
+    external_session["browser_status"] = "ready" if observation.browser_available else "offline"
+    external_session["access_profile_count"] = profile_count
+    external_session["available_profile_count"] = available_count
     external_session["external_system_status"] = "inside" if external_session["session_status"] == "authenticated" else "outside"
     return {
         "status": "ok",
@@ -1719,6 +1734,7 @@ async def external_session_validate(_user: AuthUser = Depends(require_user)) -> 
         "session_status": external_session["session_status"],
         "access_valid": external_session["session_status"] in {"authenticated", "microsoft_session_available"},
         "manual_login_required": True,
+        "profiles": persisted_profiles,
         "external_session": external_session,
     }
 

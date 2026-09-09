@@ -110,7 +110,8 @@ function ConfigPage() {
   const validate = useMutation({
     mutationFn: validateExternalSession,
     onSuccess: (result) => {
-      toast.success(result.configuration_valid ? "Acessos verificados." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
+      void queryClient.invalidateQueries({ queryKey: ["access-profiles"] });
+      toast.success(result.external_session?.microsoft_status === "available" ? "Acessos verificados. Microsoft disponível." : result.configuration_valid ? "Configuração verificada; o acesso Microsoft precisa de atenção." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
       void queryClient.invalidateQueries({ queryKey: ["external-session"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -280,7 +281,7 @@ function ConfigPage() {
               </StatusRow>
               <StatusRow label="Microsoft">
                 <BadgeStatus tone={microsoftStatus === "available" ? "success" : microsoftStatus === "reauth_required" ? "warning" : "neutral"}>
-                  {microsoftStatus === "available" ? `${external.data?.access_profile_count || 0} perfil(is) disponível(is)` : microsoftStatus === "account_picker" ? "Aguardando seleção de perfil" : microsoftStatus === "reauth_required" ? "Reautenticação necessária" : `${external.data?.access_profile_count || 0} perfil(is) não verificado(s)`}
+                  {microsoftStatus === "available" ? `${external.data?.available_profile_count ?? external.data?.access_profile_count ?? 0}${external.data?.access_profile_count && (external.data.available_profile_count ?? external.data.access_profile_count) < external.data.access_profile_count ? ` de ${external.data.access_profile_count}` : ""} perfil(is) disponível(is)` : microsoftStatus === "account_picker" ? "Aguardando seleção de perfil" : microsoftStatus === "reauth_required" ? "Reautenticação necessária" : `${external.data?.access_profile_count || 0} perfil(is) não verificado(s)`}
                 </BadgeStatus>
               </StatusRow>
               <StatusRow label="Sistema externo">

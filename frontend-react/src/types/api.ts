@@ -239,6 +239,7 @@ export type ExternalSessionStatus = {
   microsoft_status?: "available" | "account_picker" | "reauth_required" | "not_verified" | string;
   external_system_status?: "inside" | "outside" | "unknown" | string;
   access_profile_count?: number;
+  available_profile_count?: number;
   expected_system_host_configured?: boolean;
   updated_at?: string | null;
   configuration_complete?: boolean;

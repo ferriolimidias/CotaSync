@@ -25,7 +25,9 @@ function BrowserWorkspacePage() {
   const validate = useMutation({
     mutationFn: validateExternalSession,
     onSuccess: (result) => {
-      toast.success(result.configuration_valid ? "Acessos verificados." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
+      void queryClient.invalidateQueries({ queryKey: ["access-profiles"] });
+      if (result.external_session) queryClient.setQueryData(["external-session"], result.external_session);
+      toast.success(result.external_session?.microsoft_status === "available" ? "Acessos verificados. Microsoft disponível." : result.configuration_valid ? "Configuração verificada; o acesso Microsoft precisa de atenção." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
       void queryClient.invalidateQueries({ queryKey: ["external-session"] });
       void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
@@ -52,7 +54,7 @@ function BrowserWorkspacePage() {
         sessionStatus={
           <div className="flex flex-wrap items-center gap-2">
             <BadgeStatus tone={external.data?.microsoft_status === "available" ? "success" : external.data?.microsoft_status === "reauth_required" ? "warning" : "neutral"}>
-              Microsoft: {external.data?.microsoft_status === "available" ? `${external.data?.access_profile_count || 0} perfil(is) disponível(is)` : external.data?.microsoft_status === "reauth_required" ? "Reautenticação necessária" : external.data?.microsoft_status === "account_picker" ? "Aguardando seleção" : "Não verificado"}
+              Microsoft: {external.data?.microsoft_status === "available" ? `${external.data?.available_profile_count ?? external.data?.access_profile_count ?? 0}${external.data?.access_profile_count && (external.data.available_profile_count ?? external.data.access_profile_count) < external.data.access_profile_count ? ` de ${external.data.access_profile_count}` : ""} perfil(is) disponível(is)` : external.data?.microsoft_status === "reauth_required" ? "Reautenticação necessária" : external.data?.microsoft_status === "account_picker" ? "Aguardando seleção" : "Não verificado"}
             </BadgeStatus>
             <BadgeStatus tone={external.data?.external_system_status === "inside" ? "success" : "neutral"}>
               Sistema: {external.data?.external_system_status === "inside" ? "Dentro" : "Fora do sistema"}

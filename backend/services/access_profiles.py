@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from backend.db import ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
+from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 
 
 class AccessProfileError(ValueError):
@@ -95,6 +96,36 @@ def record_profile_validation(
         row.last_validation_reason = str(reason or "")[:255] or None
         system = db.get(ExternalSystem, row.external_system_id)
         return _public(row, system_name=system.name if system else "")
+
+
+def validate_profile_from_observation(profile: dict[str, Any], observation: Any, *, tenant_id: str = "default") -> dict[str, Any]:
+    """Classify and persist one profile using an already captured browser snapshot."""
+    if not observation.browser_available:
+        status, reason = "browser_offline", "browser_unavailable"
+        available = False
+        diagnostic = {"account_picker": "unknown", "matched_identifiers": [], "auth_state": "unknown"}
+    elif not observation.page_available:
+        status, reason = "unknown", "page_unavailable"
+        available = False
+        diagnostic = {"account_picker": "unknown", "matched_identifiers": [], "auth_state": "unknown"}
+    else:
+        text_content = str(observation.body_text or "")
+        picker = detect_microsoft_account_picker(text_content, [str(profile.get("login_identifier") or "")])
+        auth_state = classify_microsoft_auth_state(text_content)
+        available = bool(picker["profile_available"])
+        if auth_state in {"password_required", "mfa_required"}:
+            status, reason = "reauth_required", auth_state
+        elif picker["state"] == "account_picker" and not available:
+            status, reason = "not_found", "account_not_found"
+        else:
+            status, reason = ("available", "profile_available") if available else ("unknown", "profile_not_confirmed")
+        diagnostic = {
+            "account_picker": picker["state"],
+            "matched_identifiers": picker["available_identifiers"],
+            "auth_state": auth_state,
+        }
+    persisted = record_profile_validation(str(profile["id"]), status=status, reason=reason, tenant_id=tenant_id)
+    return {"profile": persisted, "available": available, "diagnostic": diagnostic}
 
 
 def create_access_profile(*, external_system_id: str, display_name: str, login_identifier: str, external_code: str = "", tenant_id: str = "default") -> dict[str, Any]:
