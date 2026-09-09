@@ -1657,16 +1657,15 @@ async def external_session_status(_user: AuthUser = Depends(require_user)) -> di
     external_session["configuration_complete"] = configuration["complete"]
     external_session["configuration_missing_fields"] = configuration["missing_fields"]
     external_session["session_status"] = await _external_session_status_from_browser(config)
-    external_session["microsoft_session_available"] = external_session["session_status"] == "microsoft_session_available"
-    profiles = list_access_profiles()
-    external_session["access_profile_count"] = len(profiles)
+    profiles = list_access_profiles(external_system_id=str(config.get("id") or ""))
+    profile_summary, available_count, profile_count = _microsoft_profile_summary(profiles)
+    external_session["microsoft_session_available"] = profile_summary == "available"
+    external_session["access_profile_count"] = profile_count
+    external_session["available_profile_count"] = available_count
     external_session["browser_status"] = "offline" if external_session["session_status"] == "browser_offline" else "ready"
-    external_session["microsoft_status"] = (
-        "available" if external_session["microsoft_session_available"] else
-        "reauth_required" if external_session["session_status"] == "reauth_required" else
-        "account_picker" if external_session["session_status"] == "microsoft_pick_account" else
-        "not_verified"
-    )
+    # Passive observation may be unknown because it intentionally avoids deep DOM
+    # inspection. It must not erase the last authoritative profile validation.
+    external_session["microsoft_status"] = profile_summary
     external_session["external_system_status"] = "inside" if external_session["session_status"] == "authenticated" else "outside"
     return {"status": "ok", "external_session": external_session}
 
