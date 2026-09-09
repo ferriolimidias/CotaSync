@@ -199,4 +199,11 @@ def validate_access_bootstrap(definition: dict[str, Any], *, profile_id: str | N
     ordinal = any(":nth-child(" in str(item.get("selector") or "") or ":nth-of-type(" in str(item.get("selector") or "") for item in bootstrap if isinstance(item, dict))
     if ordinal:
         return {"valid": False, "code": "access_bootstrap_ordinal_selector"}
+    if any(
+        not isinstance(item, dict)
+        or str(item.get("event_type") or "").strip().lower() not in {"click", "clicar"}
+        or not str(item.get("selector") or "").strip()
+        for item in bootstrap
+    ):
+        return {"valid": False, "code": "access_bootstrap_event_invalid"}
     return {"valid": True, "code": "ok"}

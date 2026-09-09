@@ -1386,6 +1386,56 @@ async def executar_acao_rapida(
                             continue
                 return page_to_click.locator(selector)
 
+            async def execute_external_access_bootstrap(page_to_bootstrap: Any) -> list[dict[str, Any]]:
+                """Run only the explicitly learned access events before a new external run."""
+                raw_bootstrap = action_config.get("access_bootstrap")
+                if not isinstance(raw_bootstrap, list) or not raw_bootstrap:
+                    raise SessionGuardianError(
+                        "A ação não possui bootstrap de acesso para uma nova execução.",
+                        {"reason": "access_bootstrap_missing", "execution_model": "external_entry_each_run"},
+                    )
+                events: list[dict[str, Any]] = []
+                for bootstrap_index, bootstrap_event in enumerate(raw_bootstrap):
+                    if not isinstance(bootstrap_event, dict):
+                        raise SessionGuardianError(
+                            "O bootstrap de acesso possui um evento inválido.",
+                            {"reason": "access_bootstrap_event_invalid", "bootstrap_index": bootstrap_index},
+                        )
+                    event_type = str(bootstrap_event.get("event_type") or "").strip().lower()
+                    selector = str(bootstrap_event.get("selector") or "").strip()
+                    if event_type not in {"click", "clicar"} or not selector:
+                        raise SessionGuardianError(
+                            "O bootstrap de acesso possui um evento não executável.",
+                            {
+                                "reason": "access_bootstrap_event_invalid",
+                                "bootstrap_index": bootstrap_index,
+                                "event_type": event_type,
+                            },
+                        )
+                    started_at = time.monotonic()
+                    locator = await learned_click_locator(page_to_bootstrap, {
+                        "seletor": selector,
+                        "target_text": bootstrap_event.get("target_text"),
+                    })
+                    await locator.first.wait_for(state="visible", timeout=15000)
+                    await locator.first.click(timeout=10000)
+                    try:
+                        await page_to_bootstrap.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+                    events.append(
+                        {
+                            "event": "access_bootstrap",
+                            "bootstrap_index": bootstrap_index,
+                            "event_type": event_type,
+                            "selector_present": True,
+                            "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
+                            "status": "success",
+                        }
+                    )
+                return events
+
             async def apply_reviewed_overlay_waits(page_to_wait: Any, step_index: int) -> list[dict[str, Any]]:
                 overlay = action_config.get("reviewed_overlay") if isinstance(action_config, dict) else {}
                 if not isinstance(overlay, dict):
@@ -1457,6 +1507,7 @@ async def executar_acao_rapida(
             browser = connection.browser
             context = connection.context
             run_start_strategy = str(action_config.get("run_start_strategy") or "persistent_graph_reentry").strip()
+            external_entry_started = False
             if run_start_strategy == "external_entry_each_run" and not _same_run_reentry:
                 entry_url = str(
                     action_config.get("entry_url")
@@ -1484,26 +1535,40 @@ async def executar_acao_rapida(
                 if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
                     raise
                 page = connection.page
+            if run_start_strategy == "external_entry_each_run" and not _same_run_reentry:
+                bootstrap_events = await execute_external_access_bootstrap(page)
+                step_trace.extend(bootstrap_events)
+                external_entry_started = True
+                # The external entry is the authoritative cursor for this new
+                # run. The learned graph must not match the residual browser
+                # page or plan a path from a previous client's result state.
+                graph_mode = False
             first_step = step_for_diagnostic(
                 passos_playwright[0] if passos_playwright and isinstance(passos_playwright[0], dict) else None,
                 0,
             )
-            observation = await guardian.observe_workflow_state(
-                page,
-                action_config,
-                authenticated=await is_authenticated(page),
-            )
-            workflow_state = str(observation.get("workflow_state") or "unknown")
-            initial_plan = await plan_workflow_observation(observation)
-            if workflow_state in {"auth_secret_required", "microsoft_password_required", "microsoft_mfa_required"} or workflow_state.startswith(
-                "microsoft_"
-            ):
-                await run_session_checkpoint(page, "before_action_auth_check", first_step)
-            stateful_replay = bool(observation.get("stateful", True))
-            last_session_state = workflow_state
-            initial_evidence = observation.get("evidence") or {}
-            last_page_title = str(initial_evidence.get("title") or "")
-            current_host = str(initial_evidence.get("current_host") or "")
+            if external_entry_started:
+                observation = {"workflow_state": "external_entry_bootstrapped", "stateful": False, "evidence": {}}
+                workflow_state = "external_entry_bootstrapped"
+                initial_plan = {"resume_index": 0, "reentry_strategy": "external_entry_each_run"}
+                stateful_replay = False
+            else:
+                observation = await guardian.observe_workflow_state(
+                    page,
+                    action_config,
+                    authenticated=await is_authenticated(page),
+                )
+                workflow_state = str(observation.get("workflow_state") or "unknown")
+                initial_plan = await plan_workflow_observation(observation)
+                if workflow_state in {"auth_secret_required", "microsoft_password_required", "microsoft_mfa_required"} or workflow_state.startswith(
+                    "microsoft_"
+                ):
+                    await run_session_checkpoint(page, "before_action_auth_check", first_step)
+                stateful_replay = bool(observation.get("stateful", True))
+                last_session_state = workflow_state
+                initial_evidence = observation.get("evidence") or {}
+                last_page_title = str(initial_evidence.get("title") or "")
+                current_host = str(initial_evidence.get("current_host") or "")
             if initial_plan.get("resume_index") is None and stateful_replay and not graph_mode:
                 diagnostics = dict(observation.get("evidence") or {})
                 diagnostics.update(
@@ -1576,7 +1641,7 @@ async def executar_acao_rapida(
             _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
             graph_plan: dict[str, Any] = {"execution_model": "legacy_linear"}
-            fresh_run_requires_query = False
+            fresh_run_requires_query = external_entry_started
             if graph_mode:
                 graph_states = action_config.get("learned_states") or []
                 graph_transitions = action_config.get("learned_transitions") or []

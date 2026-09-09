@@ -275,6 +275,12 @@ def _normalize_action(key: str, raw_action: Any, used_ids: set[str]) -> ActionDe
         allowed_list_ids=[str(item) for item in data.get("allowed_list_ids", []) if str(item).strip()] if isinstance(data.get("allowed_list_ids", []), list) else [],
         scope_mode=str(data.get("scope_mode") or ("selected" if data.get("allowed_list_ids") else "all")),
         required_access_profile_id=str(data.get("required_access_profile_id") or "").strip() or None,
+        required_access_profile_name=str(
+            data.get("required_access_profile_name")
+            or normalized_profile.get("access_profile_name")
+            or data.get("access_profile_name")
+            or ""
+        ).strip() or None,
         run_start_strategy=str(data.get("run_start_strategy") or "persistent_graph_reentry").strip() or "persistent_graph_reentry",
         steps_count=steps_count,
         has_url=bool(str(data.get("url_inicial") or data.get("url") or "").strip()),
