@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -17,6 +19,16 @@ from backend.services.access_profiles import active_access_profile_public
 from backend.services.browser_providers import browser_provider
 
 logger = logging.getLogger("cotasync.access_cycles")
+
+_WORKER_ACCESS_EXECUTOR: ContextVar[Any | None] = ContextVar("worker_access_executor", default=None)
+
+
+def bind_worker_access_executor(executor: Any) -> Any:
+    return _WORKER_ACCESS_EXECUTOR.set(executor)
+
+
+def reset_worker_access_executor(token: Any) -> None:
+    _WORKER_ACCESS_EXECUTOR.reset(token)
 
 
 def _safe_url(value: Any) -> str:
@@ -88,6 +100,35 @@ def get_access_cycle(cycle_id: str) -> dict[str, Any] | None:
         }
 
 
+async def start_persisted_access_cycle(
+    external_system_id: str,
+    access_profile_id: str,
+    *,
+    cancellation_probe: Any | None = None,
+) -> dict[str, Any]:
+    """Create a durable cycle and wait for the worker-owned coordinator."""
+    cycle = create_access_cycle(external_system_id, access_profile_id)
+    cycle_id = str(cycle["access_cycle_id"])
+    executor = _WORKER_ACCESS_EXECUTOR.get()
+    if executor is not None:
+        await executor(cycle_id)
+    while True:
+        if cancellation_probe is not None and await cancellation_probe():
+            raise AccessCycleError("Ciclo de acesso cancelado.", code="access_cycle_cancelled", stage="access")
+        current = get_access_cycle(cycle_id)
+        if current is None:
+            raise AccessCycleError("Ciclo de acesso não encontrado.", code="access_cycle_missing", stage="access")
+        if current.get("status") == "ready" and current.get("stage") == "external_system_ready":
+            return current
+        if current.get("status") in {"failed", "cancelled", "superseded"}:
+            raise AccessCycleError(
+                str(current.get("error_message") or "O ciclo de acesso não foi concluído."),
+                code=str(current.get("error_code") or "access_cycle_failed"),
+                stage=str(current.get("stage") or "access"),
+            )
+        await asyncio.sleep(0.5)
+
+
 def claim_next_access_cycle(worker_id: str | None = None) -> str | None:
     with SessionLocal.begin() as db:
         cycle = db.scalar(select(AccessCycle).where(AccessCycle.status == "starting").order_by(AccessCycle.created_at).with_for_update(skip_locked=True))
@@ -141,6 +182,8 @@ def finish_access_cycle(cycle_id: str, *, status: str, error_code: str | None = 
         cycle.status = status
         cycle.error_code = error_code
         cycle.error_message = error_message
+        if status == "ready":
+            cycle.stage = "external_system_ready"
         cycle.finished_at = datetime.now(UTC)
         cycle.heartbeat_at = datetime.now(UTC)
 

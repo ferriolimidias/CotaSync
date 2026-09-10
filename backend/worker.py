@@ -13,7 +13,14 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from backend.db import AccessCycle, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, WorkerInstance, engine
-from backend.services.access_cycles import claim_next_access_cycle, execute_access_cycle, recover_stale_access_cycles, touch_access_cycle
+from backend.services.access_cycles import (
+    bind_worker_access_executor,
+    claim_next_access_cycle,
+    execute_access_cycle,
+    recover_stale_access_cycles,
+    reset_worker_access_executor,
+    touch_access_cycle,
+)
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import missing_required_variables, run_action_sync
 from backend.services.actions_repository import find_action
@@ -211,7 +218,12 @@ class PersistentBatchWorker:
         if not access_cycle_id:
             return False
         logger.info("AccessCycle %s reivindicado pelo worker.", access_cycle_id)
-        await self.execute_access_cycle(access_cycle_id)
+        try:
+            await self.execute_access_cycle(access_cycle_id)
+        except Exception:
+            # A failed cycle must not terminate the sole queue consumer. The
+            # cycle service records the terminal result when possible.
+            logger.exception("Falha não tratada ao executar AccessCycle %s.", access_cycle_id)
         return True
 
     async def run(self) -> None:
@@ -243,9 +255,9 @@ class PersistentBatchWorker:
                     row.current_batch_id = None
                     row.current_batch_item_id = None
 
-    async def execute_access_cycle(self, cycle_id: str) -> None:
+    async def execute_access_cycle(self, cycle_id: str, *, lock_held: bool = False) -> None:
         lock = BrowserAdvisoryLock()
-        if not lock.acquire():
+        if not lock_held and not lock.acquire():
             logger.info("Browser ocupado; ciclo de acesso %s permanece aguardando.", cycle_id)
             with SessionLocal.begin() as session:
                 from backend.db import AccessCycle
@@ -259,7 +271,8 @@ class PersistentBatchWorker:
             await execute_access_cycle(cycle_id)
         finally:
             self.current_access_cycle_id = None
-            lock.release()
+            if not lock_held:
+                lock.release()
             self.heartbeat("idle")
 
     async def execute_batch(self, batch_id: str) -> None:
@@ -321,10 +334,14 @@ class PersistentBatchWorker:
             # O executor recebe os valores da action; a persistência também precisa
             # da identidade interna exata do cliente processado.
             execution_variables.setdefault("client_id", client_id or "")
-            run = await run_action_sync(
-                action,
-                ActionRunRequest(variables=execution_variables, mode="sync", requested_by="worker", run_origin="operational", batch_id=batch_id),
-            )
+            token = bind_worker_access_executor(lambda cycle_id: self.execute_access_cycle(cycle_id, lock_held=True))
+            try:
+                run = await run_action_sync(
+                    action,
+                    ActionRunRequest(variables=execution_variables, mode="sync", requested_by="worker", run_origin="operational", batch_id=batch_id),
+                )
+            finally:
+                reset_worker_access_executor(token)
             with SessionLocal.begin() as session:
                 db_run = session.get(DbRun, run.id)
                 if db_run is not None:

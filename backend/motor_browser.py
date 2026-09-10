@@ -47,7 +47,7 @@ from backend.services.learned_graph import (
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, classify_microsoft_auth_state, session_failure_message
-from backend.services.access_cycles import ensure_access_cycle
+from backend.services.access_cycles import start_persisted_access_cycle
 from backend.services.start_policy import needs_fresh_external_start, resolve_external_entry_url
 from backend.services.runtime_wait import RuntimeWaitCancelled, RuntimeWaitTerminal, wait_for_runtime_state
 
@@ -1535,26 +1535,12 @@ async def executar_acao_rapida(
                     raise
                 page = connection.page
             if needs_fresh_external_start(run_start_strategy, same_logical_unit=_same_run_reentry):
-                cycle = await ensure_access_cycle(
-                    page,
-                    external_system={
-                        "id": str(action_config.get("external_system_id") or ""),
-                        "entry_url": str(action_config.get("entry_url") or ""),
-                        "expected_system_host": str(action_config.get("expected_system_host") or ""),
-                        "run_start_strategy": run_start_strategy,
-                    },
-                    access_profile={
-                        "id": str(action_config.get("required_access_profile_id") or ""),
-                        "login_identifier": str(action_config.get("access_profile_email_or_identifier") or action_config.get("microsoft_saved_account_identifier") or ""),
-                    },
-                    action=action_config,
-                    timeline=timeline,
+                cycle = await start_persisted_access_cycle(
+                    str(action_config.get("external_system_id") or ""),
+                    str(action_config.get("required_access_profile_id") or ""),
                     cancellation_probe=cancellation_probe,
-                    terminal_probe=lambda: _page_terminal_state(page),
-                    same_logical_unit=_same_run_reentry,
                 )
-                page = cycle.page
-                step_trace.extend(cycle.bootstrap_events)
+                step_trace.extend([item for item in cycle.get("events", []) if isinstance(item, dict)])
                 external_entry_started = True
                 # The external entry is the authoritative cursor for this new
                 # run. The learned graph must not match the residual browser

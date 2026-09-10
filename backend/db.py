@@ -371,6 +371,7 @@ class LearningSession(Base):
     publication_status: Mapped[str] = mapped_column(String(32), nullable=False, default="not_attempted", index=True)
     external_system_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_systems.id", ondelete="SET NULL"), index=True)
     access_profile_id: Mapped[str | None] = mapped_column(String(128), ForeignKey("external_access_profiles.id", ondelete="SET NULL"), index=True)
+    access_cycle_id: Mapped[str | None] = mapped_column(String(128), index=True)
     allowed_list_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     run_start_strategy: Mapped[str] = mapped_column(String(64), nullable=False, default="persistent_graph_reentry")
     raw_events: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")

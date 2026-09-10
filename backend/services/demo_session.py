@@ -49,7 +49,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
-from backend.services.access_cycles import ensure_access_cycle
+from backend.services.access_cycles import create_access_cycle, get_access_cycle
 from backend.services.start_policy import requires_external_entry, resolve_external_entry_url
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.actions_repository import enrich_action_access_profile, save_learned_action
@@ -994,6 +994,7 @@ class DemoBrowserSession:
     auth_success_selector: str = ""
     access_profile_name: str = ""
     access_profile_id: str = ""
+    access_cycle_id: str = ""
     access_profile_email_or_identifier: str = ""
     microsoft_saved_account_identifier: str = ""
     microsoft_saved_account_selector: str = ""
@@ -1178,6 +1179,7 @@ class DemoSessionManager:
                 external_system_id=str(row.external_system_id or ""),
                 external_login_url=str(metadata.get("external_login_url") or ""),
                 access_profile_id=str(row.access_profile_id or ""),
+                access_cycle_id=str(row.access_cycle_id or ""),
                 access_profile_name=str(metadata.get("access_profile_name") or ""),
                 access_profile_email_or_identifier=str(metadata.get("access_profile_email_or_identifier") or ""),
                 expected_system_host=str(metadata.get("expected_system_host") or ""),
@@ -2232,51 +2234,6 @@ class DemoSessionManager:
             )
         return True, automatically_revalidated
 
-    async def _prepare_learning_external_entry(
-        self,
-        session: DemoBrowserSession,
-        entry_url: str,
-    ) -> None:
-        """Put a new teaching session at the external entry before recording.
-
-        The browser may be left on the result of a previous action. Teaching
-        must establish its external-entry boundary first; the recorder is
-        enabled only by the caller after this navigation completes.
-        """
-        target = str(entry_url or "").strip()
-        if not target:
-            raise DemoSessionError(
-                "O sistema externo não possui uma entrada configurada.",
-                code="LEARNING_CONTEXT_INVALID",
-            )
-        try:
-            cycle = await ensure_access_cycle(
-                session.page,
-                external_system={
-                    "id": session.external_system_id,
-                    "entry_url": target,
-                    "expected_system_host": session.expected_system_host,
-                    "run_start_strategy": "external_entry_each_run",
-                },
-                access_profile={
-                    "id": session.access_profile_id or session.guided_learning.get("required_access_profile_id"),
-                    "login_identifier": session.access_profile_email_or_identifier
-                    or session.microsoft_saved_account_identifier,
-                },
-                action=session.guided_learning,
-                guardian=SessionGuardian(),
-                require_external_system=False,
-            )
-            await self._set_active_page(session, cycle.page)
-        except Exception as exc:
-            raise DemoSessionError(
-                "Não foi possível abrir a entrada do sistema para iniciar um novo ensino.",
-                code="LEARNING_ENTRY_UNAVAILABLE",
-            ) from exc
-        session.guided_learning["entry_url"] = target
-        session.guided_learning["access_bootstrap_boundary"] = "before_main_recording"
-        session.guided_learning["main_recording_starts_after_external_entry"] = True
-
     async def create(self) -> dict[str, Any]:
         session_id = str(uuid4())
         from backend.services.external_systems import (
@@ -2421,6 +2378,7 @@ class DemoSessionManager:
             "external_login_url": session.external_login_url,
             "external_system_id": getattr(session, "external_system_id", ""),
             "access_profile_id": getattr(session, "access_profile_id", "") or session.guided_learning.get("required_access_profile_id"),
+            "access_cycle_id": getattr(session, "access_cycle_id", ""),
             "using_external_system": bool(session.external_login_url),
             "access_profile_name": session.access_profile_name,
             "microsoft_saved_account_text": session.microsoft_saved_account_text,
@@ -3151,16 +3109,6 @@ class DemoSessionManager:
             "run_start_strategy": requested_strategy,
             "allowed_list_ids": requested_lists,
         }
-        if requires_external_entry(session.guided_learning["run_start_strategy"]) and session.guided_learning.get("required_access_profile_id"):
-            with SessionLocal() as db:
-                profile = db.get(ExternalAccessProfile, session.guided_learning["required_access_profile_id"])
-                system = db.get(ExternalSystem, profile.external_system_id) if profile else None
-                entry_url = resolve_external_entry_url(system.config if system else {})
-            if profile is None or not profile.active:
-                raise DemoSessionError("Perfil de acesso não encontrado ou inativo.")
-            if not entry_url:
-                raise DemoSessionError("O sistema externo não possui entry_url configurado.")
-            await self._prepare_learning_external_entry(session, entry_url)
         session.access_profile_id = profile.id if profile is not None else ""
         if profile is not None:
             session.access_profile_name = profile.display_name
@@ -3172,6 +3120,8 @@ class DemoSessionManager:
             session.microsoft_saved_account_text = profile.display_name
         session.guided_learning["allowed_list_ids"] = requested_lists
         session.guided_learning["run_start_strategy"] = requested_strategy
+        session.guided_learning["access_bootstrap_boundary"] = "before_main_recording"
+        session.guided_learning["main_recording_starts_after_external_entry"] = True
         session.steps = []
         session.learning_events = []
         for task in list(session.observer_tasks):
@@ -3193,6 +3143,35 @@ class DemoSessionManager:
         session.result_selection = {}
         session.extraction_review = {}
         session.outputs = []
+
+        if requires_external_entry(requested_strategy):
+            if profile is None:
+                raise DemoSessionError("Selecione um perfil de acesso antes de iniciar o ensino.", code="ACCESS_PROFILE_REQUIRED")
+            try:
+                cycle = create_access_cycle(session.external_system_id, profile.id)
+            except ValueError as exc:
+                raise DemoSessionError(str(exc), code="LEARNING_CONTEXT_INVALID") from exc
+            session.access_cycle_id = str(cycle["access_cycle_id"])
+            session.recording = False
+            session.status = "aguardando_acesso"
+            persist_learning_session(session)
+            task = asyncio.create_task(self._await_learning_access_cycle(session.id, session.access_cycle_id))
+            session.observer_tasks.add(task)
+            task.add_done_callback(session.observer_tasks.discard)
+            logger.info("AccessCycle persistido para aprendizado: session=%s cycle=%s", session.id, session.access_cycle_id)
+            return await self.status(session_id)
+
+        session.recording = True
+        session.status = "gravando"
+        await self._enable_learning_recording(session)
+        return await self.status(session_id)
+
+    async def _enable_learning_recording(self, session: DemoBrowserSession) -> None:
+        """Enable the recorder only after the persisted access gate is ready."""
+        if session.access_cycle_id:
+            cycle = get_access_cycle(session.access_cycle_id)
+            if not cycle or cycle.get("status") != "ready" or cycle.get("stage") != "external_system_ready":
+                raise DemoSessionError("O acesso externo ainda não está pronto.", code="LEARNING_ACCESS_PENDING")
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -3206,8 +3185,38 @@ class DemoSessionManager:
         session.last_page_count = len([page for page in session.context.pages if not page.is_closed()])
         session.download_detected = False
         persist_learning_session(session)
-        logger.info("Gravacao iniciada na sessao %s", session_id)
-        return await self.status(session_id)
+        logger.info("Gravacao iniciada na sessao %s", session.id)
+
+    async def _await_learning_access_cycle(self, session_id: str, cycle_id: str) -> None:
+        """Bridge the worker-owned access result to the in-process recorder."""
+        try:
+            while True:
+                session = self._sessions.get(str(session_id))
+                if session is None:
+                    return
+                cycle = get_access_cycle(cycle_id)
+                if cycle is None:
+                    session.status = "acesso_falhou"
+                    persist_learning_session(session)
+                    return
+                if cycle.get("status") == "ready" and cycle.get("stage") == "external_system_ready":
+                    await self._enable_learning_recording(session)
+                    return
+                if cycle.get("status") in {"failed", "cancelled", "superseded"}:
+                    session.status = "acesso_falhou"
+                    session.recording = False
+                    persist_learning_session(session)
+                    return
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Falha ao liberar Recorder após AccessCycle: session=%s cycle=%s", session_id, cycle_id)
+            session = self._sessions.get(str(session_id))
+            if session is not None:
+                session.status = "acesso_falhou"
+                session.recording = False
+                persist_learning_session(session)
 
     async def resume_recording(self, session_id: str) -> dict[str, Any]:
         session = await self.ensure_session(session_id)

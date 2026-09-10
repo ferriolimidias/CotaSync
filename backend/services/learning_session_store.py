@@ -120,6 +120,7 @@ def session_snapshot(session: Any) -> dict[str, Any]:
         "access_profile_id": _optional_id(
             (guided or {}).get("required_access_profile_id") or getattr(session, "access_profile_id", None)
         ),
+        "access_cycle_id": _optional_id(getattr(session, "access_cycle_id", None)),
         "allowed_list_ids": sanitize_learning_value((guided or {}).get("allowed_list_ids") or []),
         "run_start_strategy": str((guided or {}).get("run_start_strategy") or "persistent_graph_reentry"),
         "raw_events": events,
@@ -167,6 +168,7 @@ def persist_learning_session(session: Any, *, publication: dict[str, Any] | None
         for field in (
             "action_name", "objective", "expected_result", "status", "recording_status", "publication_status",
             "external_system_id", "access_profile_id", "allowed_list_ids", "run_start_strategy", "raw_events",
+            "access_cycle_id",
             "recorded_steps", "bootstrap_metadata", "state_evidence", "variable_bindings", "outputs", "diagnostics",
         ):
             if field in snapshot:
