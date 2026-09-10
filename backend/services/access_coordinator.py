@@ -1,0 +1,248 @@
+"""Canonical external-access state machine.
+
+This module owns only the access boundary of a logical unit.  Main action
+steps are deliberately outside this coordinator.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable
+
+from backend.services.action_pages import url_host
+from backend.services.runtime_wait import RuntimeWaitTerminal, wait_for_runtime_state
+from backend.services.session_guardian import SessionGuardian
+from backend.services.start_policy import (
+    EXTERNAL_ENTRY_EACH_RUN,
+    resolve_external_entry_url,
+    validate_fresh_start_context,
+)
+
+
+Timeline = Callable[..., Any]
+
+
+def _emit(timeline: Timeline | None, stage: str, event: str, status: str, **context: Any) -> None:
+    if timeline is not None:
+        timeline(stage, event, status, **context)
+
+
+def _safe_page_path(page: Any) -> str:
+    try:
+        return str(getattr(page, "url", "") or "")
+    except Exception:
+        return ""
+
+
+async def _body_text(page: Any) -> str:
+    try:
+        return str(await page.locator("body").inner_text(timeout=750))[:20_000]
+    except Exception:
+        return ""
+
+
+async def _visible(page: Any, selector: str) -> bool:
+    try:
+        locator = page.locator(selector).first
+        return await locator.count() > 0 and await locator.is_visible()
+    except Exception:
+        return False
+
+
+@dataclass
+class AccessCycleResult:
+    state: str
+    page: Any
+    entry_url: str
+    bootstrap_events: list[dict[str, Any]] = field(default_factory=list)
+    profile_selected: bool = False
+
+
+class AccessCycleError(RuntimeError):
+    def __init__(self, message: str, *, code: str, stage: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.stage = stage
+
+
+class CanonicalAccessCoordinator:
+    """Run the same external-entry/account/bootstrap sequence everywhere."""
+
+    def __init__(self, guardian: SessionGuardian | None = None) -> None:
+        self.guardian = guardian or SessionGuardian()
+
+    async def start(
+        self,
+        page: Any,
+        *,
+        external_system: dict[str, Any] | None,
+        access_profile: dict[str, Any] | None,
+        action: dict[str, Any] | None = None,
+        timeline: Timeline | None = None,
+        cancellation_probe: Callable[[], Any] | None = None,
+        terminal_probe: Callable[[], Any] | None = None,
+        same_logical_unit: bool = False,
+        require_external_system: bool = True,
+    ) -> AccessCycleResult:
+        system = external_system if isinstance(external_system, dict) else {}
+        profile = access_profile if isinstance(access_profile, dict) else {}
+        config = action if isinstance(action, dict) else {}
+        strategy = str(config.get("run_start_strategy") or system.get("run_start_strategy") or EXTERNAL_ENTRY_EACH_RUN).strip()
+        profile_id = str(profile.get("id") or config.get("required_access_profile_id") or "").strip()
+        identifier = str(profile.get("login_identifier") or config.get("access_profile_email_or_identifier") or "").strip()
+        entry_url = resolve_external_entry_url(system, config)
+        context = validate_fresh_start_context(
+            strategy=strategy,
+            entry_url=entry_url,
+            access_profile_id=profile_id,
+        )
+        if not context.get("valid"):
+            raise AccessCycleError(
+                "O contexto de acesso externo não está completo.",
+                code=str(context.get("code") or "access_context_invalid"),
+                stage="access_start",
+            )
+        if same_logical_unit and strategy == EXTERNAL_ENTRY_EACH_RUN:
+            return AccessCycleResult("external_system_ready", page, entry_url, profile_selected=True)
+        if strategy != EXTERNAL_ENTRY_EACH_RUN:
+            return AccessCycleResult("external_system_ready", page, entry_url, profile_selected=bool(profile_id))
+        if not identifier:
+            raise AccessCycleError("O perfil de acesso não possui login_identifier.", code="access_identifier_missing", stage="account_picker")
+
+        _emit(timeline, "access", "ACCESS_CYCLE_STARTED", "started", access_profile_id=profile_id)
+        try:
+            _emit(timeline, "external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=entry_url)
+            try:
+                await page.goto(entry_url, wait_until="domcontentloaded", timeout=5000)
+            except Exception:
+                expected_host = url_host(entry_url)
+                await wait_for_runtime_state(
+                    lambda: bool(expected_host and url_host(_safe_page_path(page)) == expected_host),
+                    state_name="entrada externa",
+                    terminal_probe=terminal_probe,
+                    cancellation_probe=cancellation_probe,
+                    on_waiting=lambda name: _emit(timeline, "external_entry", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+                )
+            _emit(timeline, "external_entry", "EXTERNAL_ENTRY_COMPLETED", "success", host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
+
+            picker = {"observed": False}
+
+            async def observe_picker() -> bool:
+                if not hasattr(page, "locator"):
+                    picker["observed"] = "microsoft" in _safe_page_path(page).casefold()
+                    return True
+                text = await _body_text(page)
+                state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier, "microsoft_saved_account_identifier": identifier})
+                is_picker = state.state == "microsoft_pick_account" or "pick an account" in text.casefold() or "escolha uma conta" in text.casefold()
+                if is_picker:
+                    picker["observed"] = True
+                    _emit(timeline, "access", "ACCOUNT_PICKER_OBSERVED", "observed", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
+                    return True
+                # A provider may already have returned a selected profile to the
+                # external system.  It is not a residual-page start because the
+                # coordinator navigated to entry_url above.
+                return state.state == "authenticated_system"
+
+            await wait_for_runtime_state(
+                observe_picker,
+                state_name="Account Picker",
+                terminal_probe=terminal_probe,
+                cancellation_probe=cancellation_probe,
+                on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+            )
+
+            selected = False
+            if picker["observed"]:
+                _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_STARTED", "started", access_profile_id=profile_id)
+
+                async def select_profile() -> bool:
+                    nonlocal selected
+                    if selected:
+                        return True
+                    selected = await self.guardian.click_configured_saved_account(
+                        page,
+                        {
+                            "microsoft_saved_account_identifier": identifier,
+                            "access_profile_email_or_identifier": identifier,
+                            "microsoft_saved_account_text": identifier,
+                        },
+                    )
+                    return selected
+
+                await wait_for_runtime_state(
+                    select_profile,
+                    state_name="seleção do perfil de acesso",
+                    terminal_probe=terminal_probe,
+                    cancellation_probe=cancellation_probe,
+                    on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+                )
+
+                async def confirm_selection() -> bool:
+                    if not hasattr(page, "locator"):
+                        return True
+                    state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier})
+                    return state.state != "microsoft_pick_account"
+
+                await wait_for_runtime_state(
+                    confirm_selection,
+                    state_name="confirmação do perfil de acesso",
+                    terminal_probe=terminal_probe,
+                    cancellation_probe=cancellation_probe,
+                    on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+                )
+                _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_COMPLETED", "success", access_profile_id=profile_id)
+            else:
+                _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_COMPLETED", "success", access_profile_id=profile_id, detail="entry_auto_selected")
+
+            raw_bootstrap = config.get("access_bootstrap")
+            bootstrap = raw_bootstrap if isinstance(raw_bootstrap, list) else []
+            _emit(timeline, "access_bootstrap", "ACCESS_BOOTSTRAP_STARTED", "started", access_profile_id=profile_id)
+            events: list[dict[str, Any]] = []
+            for index, item in enumerate(bootstrap):
+                if not isinstance(item, dict) or str(item.get("event_type") or "").casefold() not in {"click", "clicar"}:
+                    raise AccessCycleError("Bootstrap de acesso inválido.", code="access_bootstrap_event_invalid", stage="access_bootstrap")
+                selector = str(item.get("selector") or "").strip()
+                if not selector:
+                    raise AccessCycleError("Bootstrap de acesso sem selector.", code="access_bootstrap_selector_missing", stage="access_bootstrap")
+                _emit(timeline, "access_bootstrap", "ACCESS_BOOTSTRAP_STEP_STARTED", "started", access_profile_id=profile_id, step_index=index, operation="click", selector=selector)
+                await wait_for_runtime_state(
+                    lambda selector=selector: _visible(page, selector),
+                    state_name=f"bootstrap de acesso {index}",
+                    terminal_probe=terminal_probe,
+                    cancellation_probe=cancellation_probe,
+                    on_waiting=lambda name: _emit(timeline, "access_bootstrap", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+                )
+                try:
+                    await page.locator(selector).first.click(timeout=1000)
+                except Exception as exc:
+                    raise AccessCycleError("Não foi possível executar o bootstrap de acesso.", code="access_bootstrap_click_failed", stage="access_bootstrap") from exc
+                events.append({"event": "access_bootstrap", "bootstrap_index": index, "event_type": "click", "selector_present": True, "status": "success"})
+                _emit(timeline, "access_bootstrap", "ACCESS_BOOTSTRAP_STEP_COMPLETED", "success", access_profile_id=profile_id, step_index=index, operation="click", selector=selector)
+            _emit(timeline, "access_bootstrap", "ACCESS_BOOTSTRAP_COMPLETED", "success", access_profile_id=profile_id)
+            if require_external_system:
+                expected_host = str(system.get("expected_system_host") or config.get("expected_system_host") or "").strip()
+
+                async def system_ready() -> bool:
+                    current_host = url_host(_safe_page_path(page))
+                    return bool(current_host and (not expected_host or current_host == expected_host))
+
+                await wait_for_runtime_state(
+                    system_ready,
+                    state_name="sistema externo",
+                    terminal_probe=terminal_probe,
+                    cancellation_probe=cancellation_probe,
+                    on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+                )
+            _emit(timeline, "access", "EXTERNAL_SYSTEM_READY", "success", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
+            _emit(timeline, "access", "ACCESS_CYCLE_COMPLETED", "success", access_profile_id=profile_id)
+            return AccessCycleResult("external_system_ready", page, entry_url, events, profile_selected=selected or not picker["observed"])
+        except (AccessCycleError, RuntimeWaitTerminal):
+            raise
+        except Exception as exc:
+            raise AccessCycleError("Falha no ciclo de acesso externo.", code="access_cycle_failed", stage="access") from exc
+
+
+async def start_canonical_access(*args: Any, guardian: SessionGuardian | None = None, **kwargs: Any) -> AccessCycleResult:
+    return await CanonicalAccessCoordinator(guardian=guardian).start(*args, **kwargs)

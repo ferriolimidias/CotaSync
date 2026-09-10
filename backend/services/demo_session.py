@@ -49,6 +49,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
+from backend.services.access_coordinator import start_canonical_access
 from backend.services.start_policy import requires_external_entry, resolve_external_entry_url
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.actions_repository import enrich_action_access_profile, save_learned_action
@@ -2249,45 +2250,29 @@ class DemoSessionManager:
                 code="LEARNING_CONTEXT_INVALID",
             )
         try:
-            await session.page.goto(
-                target,
-                wait_until="domcontentloaded",
-                timeout=_REPLAY_NAVIGATION_TIMEOUT_MS,
+            cycle = await start_canonical_access(
+                session.page,
+                external_system={
+                    "id": session.external_system_id,
+                    "entry_url": target,
+                    "expected_system_host": session.expected_system_host,
+                    "run_start_strategy": "external_entry_each_run",
+                },
+                access_profile={
+                    "id": session.access_profile_id or session.guided_learning.get("required_access_profile_id"),
+                    "login_identifier": session.access_profile_email_or_identifier
+                    or session.microsoft_saved_account_identifier,
+                },
+                action=session.guided_learning,
+                guardian=SessionGuardian(),
+                require_external_system=False,
             )
+            await self._set_active_page(session, cycle.page)
         except Exception as exc:
             raise DemoSessionError(
                 "Não foi possível abrir a entrada do sistema para iniciar um novo ensino.",
                 code="LEARNING_ENTRY_UNAVAILABLE",
             ) from exc
-        await self._set_active_page(session, session.page)
-        current_host = _safe_url_host(str(session.page.url or ""))
-        microsoft_hosts = (
-            session.microsoft_hosts
-            if isinstance(session.microsoft_hosts, list) and session.microsoft_hosts
-            else ["login.microsoftonline.com", "m365.cloud.microsoft"]
-        )
-        if any(_host_matches(current_host, str(host)) for host in microsoft_hosts):
-            from backend.services.session_guardian import SessionGuardian
-
-            bootstrap_action = {
-                "microsoft_saved_account_selector": session.microsoft_saved_account_selector,
-                "microsoft_saved_account_identifier": session.microsoft_saved_account_identifier
-                or session.access_profile_email_or_identifier,
-                "access_profile_email_or_identifier": session.access_profile_email_or_identifier,
-                "microsoft_saved_account_text": session.microsoft_saved_account_text,
-            }
-            account_selected = await SessionGuardian().click_configured_saved_account(
-                session.page,
-                bootstrap_action,
-            )
-            if account_selected:
-                try:
-                    await session.page.wait_for_load_state(
-                        "domcontentloaded",
-                        timeout=_REPLAY_STEP_TIMEOUT_MS,
-                    )
-                except Exception:
-                    pass
         session.guided_learning["entry_url"] = target
         session.guided_learning["access_bootstrap_boundary"] = "before_main_recording"
         session.guided_learning["main_recording_starts_after_external_entry"] = True

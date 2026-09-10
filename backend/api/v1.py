@@ -44,6 +44,7 @@ from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import browser_provider, configured_browser_mode, desktop_browser_health
 from backend.services.browser_observation import browser_observation_service
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
+from backend.services.access_coordinator import start_canonical_access, AccessCycleError
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -159,6 +160,7 @@ class AccessProfilePatchPayload(BaseModel):
 
 class ExternalSessionLoginPayload(BaseModel):
     force: bool = False
+    access_profile_id: str | None = None
 
 
 class ClientsCsvPayload(BaseModel):
@@ -543,15 +545,6 @@ def _external_system_config_payload(config: dict[str, Any]) -> dict[str, Any]:
         "expected_system_host": str(config.get("expected_system_host") or "").strip() if configured else "",
         "updated_at": config.get("updated_at"),
     }
-
-
-async def _navigate_desktop_browser(url: str) -> None:
-    playwright = await async_playwright().start()
-    try:
-        connection = await browser_provider("desktop_browser").connect(playwright, "external-login")
-        await connection.page.goto(url, wait_until="domcontentloaded", timeout=20_000)
-    finally:
-        await playwright.stop()
 
 
 async def _current_desktop_url() -> str:
@@ -1594,9 +1587,11 @@ async def access_profile_authenticate(profile_id: str, _user: AuthUser = Depends
     if not health.get("cdp_reachable"):
         raise _error(503, "BROWSER_UNAVAILABLE", "Desktop browser indisponível.")
     try:
-        await _navigate_desktop_browser(entry_url)
+        await _start_profile_access_cycle(profile, config, entry_url)
+    except AccessCycleError as exc:
+        raise _error(409, str(exc.code).upper(), str(exc)) from exc
     except Exception as exc:
-        raise _error(503, "BROWSER_NAVIGATION_FAILED", "Não foi possível abrir a entrada do sistema no navegador.") from exc
+        raise _error(503, "BROWSER_NAVIGATION_FAILED", "Não foi possível iniciar o ciclo de acesso no navegador.") from exc
     return {
         "status": "authentication_started",
         "profile": profile,
@@ -1604,6 +1599,29 @@ async def access_profile_authenticate(profile_id: str, _user: AuthUser = Depends
         "manual_login_required": True,
         "browser_opened": True,
     }
+
+
+async def _start_profile_access_cycle(profile: dict[str, Any], config: dict[str, Any], entry_url: str) -> None:
+    playwright = await async_playwright().start()
+    try:
+        connection = await browser_provider("desktop_browser").connect(
+            playwright,
+            f"access-profile-{profile.get('id') or 'selected'}",
+        )
+        await start_canonical_access(
+            connection.page,
+            external_system={
+                "id": str(config.get("id") or ""),
+                "entry_url": entry_url,
+                "expected_system_host": str(config.get("expected_system_host") or ""),
+                "run_start_strategy": str(config.get("run_start_strategy") or "external_entry_each_run"),
+            },
+            access_profile=profile,
+            action={},
+            require_external_system=False,
+        )
+    finally:
+        await playwright.stop()
 
 
 @router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")
@@ -1703,28 +1721,36 @@ async def external_session_open_login(
     _user: AuthUser = Depends(require_user),
 ) -> dict[str, Any]:
     config = load_current_external_system()
+    profile_id = str(payload.access_profile_id if payload else "").strip()
+    if not profile_id:
+        profiles = list_access_profiles(external_system_id=str(config.get("id") or ""))
+        active_profiles = [item for item in profiles if item.get("active")]
+        if len(active_profiles) == 1:
+            profile_id = str(active_profiles[0].get("id") or "")
+        else:
+            raise _error(409, "ACCESS_PROFILE_REQUIRED", "Selecione um perfil de acesso antes de abrir o login.")
+    try:
+        profile = active_access_profile_public(profile_id)
+    except AccessProfileError as exc:
+        raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
+    if str(profile.get("external_system_id") or "") != str(config.get("id") or ""):
+        raise _error(409, "ACCESS_PROFILE_SYSTEM_MISMATCH", "O perfil de acesso não pertence ao sistema externo configurado.")
     login_url = str(config.get("external_login_url") or "")
     if not login_url:
         raise _error(422, "EXTERNAL_LOGIN_URL_MISSING", "URL de login externa nao configurada.")
     health = await desktop_browser_health()
     if not health.get("cdp_reachable"):
         raise _error(503, "BROWSER_UNAVAILABLE", "Desktop browser indisponivel.")
-    force = bool(payload and payload.force)
-    if not force and await _external_session_status_from_browser(config) == "authenticated":
-        current_url = await _current_desktop_url()
-        return {
-            "status": "already_connected",
-            "current_url": current_url,
-            "manual_login_required": True,
-            "browser_opened": False,
-        }
     try:
-        await _navigate_desktop_browser(login_url)
+        await _start_profile_access_cycle(profile, config, login_url)
+    except AccessCycleError as exc:
+        raise _error(409, str(exc.code).upper(), str(exc)) from exc
     except Exception as exc:
-        raise _error(503, "BROWSER_NAVIGATION_FAILED", "Nao foi possivel abrir a URL de login no navegador.") from exc
+        raise _error(503, "BROWSER_NAVIGATION_FAILED", "Nao foi possivel iniciar o ciclo de acesso no navegador.") from exc
     return {
         "status": "login_started",
         "login_url": login_url,
+        "access_profile_id": profile_id,
         "manual_login_required": True,
         "browser_opened": True,
     }

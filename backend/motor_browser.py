@@ -47,6 +47,7 @@ from backend.services.learned_graph import (
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, classify_microsoft_auth_state, session_failure_message
+from backend.services.access_coordinator import start_canonical_access
 from backend.services.start_policy import needs_fresh_external_start, resolve_external_entry_url
 from backend.services.runtime_wait import RuntimeWaitCancelled, RuntimeWaitTerminal, wait_for_runtime_state
 
@@ -1450,88 +1451,6 @@ async def executar_acao_rapida(
                             continue
                 return page_to_click.locator(selector)
 
-            async def execute_external_access_bootstrap(page_to_bootstrap: Any) -> list[dict[str, Any]]:
-                """Run only the explicitly learned access events before a new external run."""
-                raw_bootstrap = action_config.get("access_bootstrap")
-                if not isinstance(raw_bootstrap, list) or not raw_bootstrap:
-                    raise SessionGuardianError(
-                        "A ação não possui bootstrap de acesso para uma nova execução.",
-                        {"reason": "access_bootstrap_missing", "execution_model": "external_entry_each_run"},
-                    )
-                events: list[dict[str, Any]] = []
-                timeline("access_bootstrap", "BOOTSTRAP_STARTED", "started")
-                for bootstrap_index, bootstrap_event in enumerate(raw_bootstrap):
-                    if not isinstance(bootstrap_event, dict):
-                        raise SessionGuardianError(
-                            "O bootstrap de acesso possui um evento inválido.",
-                            {"reason": "access_bootstrap_event_invalid", "bootstrap_index": bootstrap_index},
-                        )
-                    event_type = str(bootstrap_event.get("event_type") or "").strip().lower()
-                    selector = str(bootstrap_event.get("selector") or "").strip()
-                    if event_type not in {"click", "clicar"} or not selector:
-                        raise SessionGuardianError(
-                            "O bootstrap de acesso possui um evento não executável.",
-                            {
-                                "reason": "access_bootstrap_event_invalid",
-                                "bootstrap_index": bootstrap_index,
-                                "event_type": event_type,
-                            },
-                        )
-                    started_at = time.monotonic()
-                    timeline(
-                        "access_bootstrap",
-                        "BOOTSTRAP_STEP_STARTED",
-                        "started",
-                        step_id=str(bootstrap_event.get("step_id") or "") or None,
-                        step_index=bootstrap_index,
-                        operation=event_type,
-                        selector=selector,
-                    )
-                    state_before_bootstrap = await current_browser_state(page_to_bootstrap)
-                    if bootstrap_index == 0 and ("microsoft" in state_before_bootstrap["current_host"] or "login." in state_before_bootstrap["current_host"]):
-                        timeline("access_bootstrap", "ACCOUNT_PICKER_OBSERVED", "observed", host=state_before_bootstrap["current_host"], path=state_before_bootstrap["current_url"])
-                    if bootstrap_index == 0:
-                        timeline("access_bootstrap", "ACCESS_PROFILE_SELECTION_STARTED", "started")
-                    locator = await learned_click_locator(page_to_bootstrap, {
-                        "seletor": selector,
-                        "target_text": bootstrap_event.get("target_text"),
-                    })
-                    await runtime_wait(
-                        lambda: _visible_locator(page_to_bootstrap, selector),
-                        state_name=f"bootstrap de acesso {bootstrap_index}",
-                        terminal_probe=lambda: _page_terminal_state(page_to_bootstrap),
-                    )
-                    await locator.first.click(timeout=1000)
-                    try:
-                        await page_to_bootstrap.wait_for_load_state("domcontentloaded", timeout=10000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(0.5)
-                    events.append(
-                        {
-                            "event": "access_bootstrap",
-                            "bootstrap_index": bootstrap_index,
-                            "event_type": event_type,
-                            "selector_present": True,
-                            "elapsed_ms": max(0, int((time.monotonic() - started_at) * 1000)),
-                            "status": "success",
-                        }
-                    )
-                    timeline(
-                        "access_bootstrap",
-                        "BOOTSTRAP_STEP_COMPLETED",
-                        "success",
-                        step_id=str(bootstrap_event.get("step_id") or "") or None,
-                        step_index=bootstrap_index,
-                        operation=event_type,
-                        selector=selector,
-                    )
-                    if bootstrap_index == 0:
-                        timeline("access_bootstrap", "ACCESS_PROFILE_SELECTION_COMPLETED", "success")
-                state = await current_browser_state(page_to_bootstrap)
-                timeline("access_bootstrap", "BOOTSTRAP_COMPLETED", "success", host=state["current_host"], path=state["current_url"])
-                return events
-
             async def apply_reviewed_overlay_waits(page_to_wait: Any, step_index: int) -> list[dict[str, Any]]:
                 overlay = action_config.get("reviewed_overlay") if isinstance(action_config, dict) else {}
                 if not isinstance(overlay, dict):
@@ -1609,33 +1528,6 @@ async def executar_acao_rapida(
             context = connection.context
             run_start_strategy = str(action_config.get("run_start_strategy") or "persistent_graph_reentry").strip()
             external_entry_started = False
-            if needs_fresh_external_start(run_start_strategy, same_logical_unit=_same_run_reentry):
-                entry_url = resolve_external_entry_url({}, action_config) or str(action_config.get("url_inicial") or "").strip()
-                if not entry_url:
-                    raise SessionGuardianError(
-                        "A execução exige uma entrada externa configurada.",
-                        {"reason": "external_entry_url_missing", "execution_model": "external_entry_each_run"},
-                    )
-                timeline("external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=entry_url)
-                try:
-                    await connection.page.goto(entry_url, wait_until="domcontentloaded", timeout=5000)
-                except PlaywrightTimeoutError:
-                    expected_host = url_host(entry_url)
-                    await runtime_wait(
-                        lambda: bool(expected_host and url_host(str(connection.page.url or "")) == expected_host),
-                        state_name="entrada externa",
-                        terminal_probe=lambda: _page_terminal_state(connection.page),
-                    )
-                step_trace.append(
-                    {
-                        "event": "entry_navigation",
-                        "run_start_strategy": run_start_strategy,
-                        "entry_url": _safe_result_url(entry_url),
-                        "access_profile_id": str(action_config.get("required_access_profile_id") or "") or None,
-                    }
-                )
-                entry_state = await current_browser_state(connection.page)
-                timeline("external_entry", "EXTERNAL_ENTRY_COMPLETED", "success", host=entry_state["current_host"], path=entry_state["current_url"])
             try:
                 page = await select_desktop_page_for_action(action_config, context, connection.page)
             except ActionPageError as exc:
@@ -1643,11 +1535,27 @@ async def executar_acao_rapida(
                     raise
                 page = connection.page
             if needs_fresh_external_start(run_start_strategy, same_logical_unit=_same_run_reentry):
-                bootstrap_events = await execute_external_access_bootstrap(page)
-                step_trace.extend(bootstrap_events)
+                cycle = await start_canonical_access(
+                    page,
+                    external_system={
+                        "id": str(action_config.get("external_system_id") or ""),
+                        "entry_url": str(action_config.get("entry_url") or action_config.get("url_inicial") or ""),
+                        "expected_system_host": str(action_config.get("expected_system_host") or ""),
+                        "run_start_strategy": run_start_strategy,
+                    },
+                    access_profile={
+                        "id": str(action_config.get("required_access_profile_id") or ""),
+                        "login_identifier": str(action_config.get("access_profile_email_or_identifier") or action_config.get("microsoft_saved_account_identifier") or ""),
+                    },
+                    action=action_config,
+                    timeline=timeline,
+                    cancellation_probe=cancellation_probe,
+                    terminal_probe=lambda: _page_terminal_state(page),
+                    same_logical_unit=_same_run_reentry,
+                )
+                page = cycle.page
+                step_trace.extend(cycle.bootstrap_events)
                 external_entry_started = True
-                system_state = await current_browser_state(page)
-                timeline("access_bootstrap", "EXTERNAL_SYSTEM_REACHED", "success", host=system_state["current_host"], path=system_state["current_url"])
                 # The external entry is the authoritative cursor for this new
                 # run. The learned graph must not match the residual browser
                 # page or plan a path from a previous client's result state.

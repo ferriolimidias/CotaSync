@@ -32,3 +32,18 @@ Every Run must emit a structured, secret-safe timeline sufficient to identify
 whether it reached external entry, access bootstrap, main action, output, or a
 terminal result. Do not remove the ordering events or log credentials, tokens,
 cookies, OAuth query strings, or secret field values.
+
+## Canonical Access Flow
+
+Authentication, learning, individual execution, and every batch client must
+share one external access state machine:
+
+`ACCESS_START -> EXTERNAL_ENTRY -> ACCOUNT_PICKER -> PROFILE_SELECTED -> LEARNED_ACCESS_BOOTSTRAP -> EXTERNAL_SYSTEM_READY`
+
+For Microsoft account-picker flows, `ExternalAccessProfile.login_identifier`
+must be selected before any learned post-selection bootstrap event. No
+subsystem may start from a residual browser page, use an ordinal account-picker
+position, or implement a competing identity/authentication order. Access
+bootstrap is not part of the main Action graph. Any future change that
+violates these rules is a product regression even if unrelated local tests
+pass. See `docs/PRODUCT_INVARIANTS.md` for the permanent specification.

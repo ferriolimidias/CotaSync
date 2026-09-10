@@ -48,6 +48,33 @@ Configuration, browser authentication, validation, learning, and execution
 must resolve the same `access_profile_id`. A global username, environment
 default, or account-picker ordinal is never a fallback.
 
+## INVARIANT: CANONICAL_ACCESS_FLOW
+
+Authentication, learning, individual execution, and each batch client share
+one canonical external-access state machine:
+
+```text
+ACCESS_START
+-> EXTERNAL_ENTRY
+-> ACCOUNT_PICKER
+-> PROFILE_SELECTED
+-> LEARNED_ACCESS_BOOTSTRAP
+-> EXTERNAL_SYSTEM_READY
+```
+
+No subsystem may implement a separate ordering for external entry, account
+selection, or learned access bootstrap. The coordinator receives an explicit
+`ExternalSystem`, `ExternalAccessProfile`, `login_identifier`, and
+`run_start_strategy`. A residual browser page and account-picker ordinal are
+never valid identity or start-state sources.
+
+## INVARIANT: PROFILE_SELECTION_FIRST
+
+For Microsoft account-picker flows, the selected
+`ExternalAccessProfile.login_identifier` is explicitly selected and confirmed
+before any learned post-selection bootstrap event such as Accept or consent.
+The access bootstrap remains separate from the main Action graph.
+
 ## INVARIANT: STATE_DRIVEN_WAITING
 
 External system latency must not determine execution failure. CotaSync waits
