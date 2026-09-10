@@ -347,6 +347,7 @@ class AccessCycle(Base):
     external_system_id: Mapped[str] = mapped_column(ForeignKey("external_systems.id", ondelete="CASCADE"), index=True)
     access_profile_id: Mapped[str] = mapped_column(ForeignKey("external_access_profiles.id", ondelete="CASCADE"), index=True)
     entry_url: Mapped[str] = mapped_column(Text, nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(128), index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="starting", index=True)
     stage: Mapped[str] = mapped_column(String(64), nullable=False, default="access_start")
     error_code: Mapped[str | None] = mapped_column(String(128))

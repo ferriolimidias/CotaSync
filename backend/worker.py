@@ -12,8 +12,8 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
-from backend.db import Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, WorkerInstance, engine
-from backend.services.access_cycles import claim_next_access_cycle, execute_access_cycle
+from backend.db import AccessCycle, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, WorkerInstance, engine
+from backend.services.access_cycles import claim_next_access_cycle, execute_access_cycle, recover_stale_access_cycles, touch_access_cycle
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import missing_required_variables, run_action_sync
 from backend.services.actions_repository import find_action
@@ -172,6 +172,8 @@ class PersistentBatchWorker:
             row.heartbeat_at = utc_now()
             row.current_batch_id = self.current_batch_id
             row.current_batch_item_id = self.current_item_id
+            if self.current_access_cycle_id:
+                touch_access_cycle(self.current_access_cycle_id, status="waiting" if status == "access_cycle_waiting" else "running")
             if self.current_batch_id:
                 batch = session.get(DbBatch, self.current_batch_id)
                 if batch is not None and batch.status in {BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED}:
@@ -196,7 +198,21 @@ class PersistentBatchWorker:
                 worker.status = "offline"
                 worker.stopped_at = now
         recovered = recover_stale_batches(stale_seconds())
-        logger.info("Startup recovery concluido worker=%s stale_items=%s", self.instance_id, recovered)
+        recovered_access = recover_stale_access_cycles(now - timedelta(seconds=stale_seconds()))
+        logger.info("Startup recovery concluido worker=%s stale_items=%s stale_access_cycles=%s", self.instance_id, recovered, recovered_access)
+
+    async def poll_access_cycle_once(self) -> bool:
+        """Claim and execute at most one cycle; failures stay visible in logs."""
+        try:
+            access_cycle_id = claim_next_access_cycle(self.instance_id)
+        except Exception:
+            logger.exception("Falha ao consultar a fila de AccessCycle.")
+            return False
+        if not access_cycle_id:
+            return False
+        logger.info("AccessCycle %s reivindicado pelo worker.", access_cycle_id)
+        await self.execute_access_cycle(access_cycle_id)
+        return True
 
     async def run(self) -> None:
         self.install_signal_handlers()
@@ -205,10 +221,8 @@ class PersistentBatchWorker:
         self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         try:
             while not self.stop_event.is_set():
-                self.heartbeat("idle")
-                access_cycle_id = claim_next_access_cycle()
-                if access_cycle_id:
-                    await self.execute_access_cycle(access_cycle_id)
+                self.heartbeat("access_cycle_waiting" if self.current_access_cycle_id else "idle")
+                if await self.poll_access_cycle_once():
                     continue
                 batch_id = claim_next_batch(self.instance_id)
                 if not batch_id:

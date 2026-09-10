@@ -88,17 +88,49 @@ def get_access_cycle(cycle_id: str) -> dict[str, Any] | None:
         }
 
 
-def claim_next_access_cycle() -> str | None:
+def claim_next_access_cycle(worker_id: str | None = None) -> str | None:
     with SessionLocal.begin() as db:
         cycle = db.scalar(select(AccessCycle).where(AccessCycle.status == "starting").order_by(AccessCycle.created_at).with_for_update(skip_locked=True))
         if cycle is None:
             return None
         cycle.status = "running"
+        cycle.worker_id = worker_id
         cycle.started_at = datetime.now(UTC)
         cycle.heartbeat_at = datetime.now(UTC)
         cycle_id = cycle.id
     _append_event(cycle_id, "access", "ACCESS_CYCLE_STARTED", "started")
     return cycle_id
+
+
+def recover_stale_access_cycles(stale_before: datetime) -> int:
+    """Return abandoned cycles to the pending state without touching active waits."""
+    recovered = 0
+    with SessionLocal.begin() as db:
+        cycles = (
+            db.query(AccessCycle)
+            .filter(AccessCycle.status.in_(["running", "waiting"]))
+            .filter(AccessCycle.worker_id.is_not(None))
+            .filter(AccessCycle.heartbeat_at.is_not(None), AccessCycle.heartbeat_at < stale_before)
+            .with_for_update(skip_locked=True)
+            .all()
+        )
+        for cycle in cycles:
+            cycle.status = "starting"
+            cycle.stage = "access_start"
+            cycle.started_at = None
+            cycle.heartbeat_at = datetime.now(UTC)
+            cycle.worker_id = None
+            recovered += 1
+    return recovered
+
+
+def touch_access_cycle(cycle_id: str, *, status: str | None = None) -> None:
+    with SessionLocal.begin() as db:
+        cycle = db.get(AccessCycle, cycle_id)
+        if cycle is not None:
+            cycle.heartbeat_at = datetime.now(UTC)
+            if status:
+                cycle.status = status
 
 
 def finish_access_cycle(cycle_id: str, *, status: str, error_code: str | None = None, error_message: str | None = None) -> None:
