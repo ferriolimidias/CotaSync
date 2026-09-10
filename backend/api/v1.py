@@ -44,7 +44,7 @@ from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
 from backend.services.browser_observation import browser_observation_service
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
-from backend.services.access_cycles import create_access_cycle, get_access_cycle
+from backend.services.access_cycles import AccessCycleError, create_access_cycle, get_access_cycle, validate_manual_access_cycle
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -622,7 +622,7 @@ async def _external_session_status_from_browser(config: dict[str, Any], *, deep:
 
 def _microsoft_profile_summary(profiles: list[dict[str, Any]]) -> tuple[str, int, int]:
     active = [profile for profile in profiles if profile.get("active")]
-    available_count = sum(profile.get("validation_status") == "available" for profile in active)
+    available_count = sum(profile.get("validation_status") in {"available", "verified"} for profile in active)
     if not active:
         return "not_verified", 0, 0
     if available_count == len(active):
@@ -1618,6 +1618,15 @@ async def access_cycle_status(cycle_id: str, _user: AuthUser = Depends(require_u
     if cycle is None:
         raise _error(404, "ACCESS_CYCLE_NOT_FOUND", "Ciclo de acesso não encontrado.")
     return {"status": "ok", "access_cycle": cycle}
+
+
+@router.post("/access-cycles/{cycle_id}/validate-manual", summary="Conclui a autenticação manual do perfil")
+async def access_cycle_validate_manual(cycle_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        result = await validate_manual_access_cycle(cycle_id)
+    except AccessCycleError as exc:
+        raise _error(409, exc.code.upper(), str(exc)) from exc
+    return {"status": "ok", **result}
 
 
 @router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")

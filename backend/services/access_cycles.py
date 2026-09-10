@@ -15,9 +15,11 @@ from sqlalchemy import select
 from playwright.async_api import async_playwright
 
 from backend.db import AccessCycle, ExternalAccessProfile, ExternalSystem, SessionLocal
-from backend.services.access_coordinator import AccessCycleError, start_canonical_access
+from backend.services.access_coordinator import AccessCycleError, _body_text, _identity_evidence, start_canonical_access
 from backend.services.access_profiles import active_access_profile_public
 from backend.services.browser_providers import BrowserIdentitySession, BrowserProviderError, browser_provider, desktop_cdp_url
+from backend.services.session_guardian import classify_microsoft_auth_state
+from backend.services.action_pages import url_host
 
 logger = logging.getLogger("cotasync.access_cycles")
 
@@ -187,6 +189,105 @@ def finish_access_cycle(cycle_id: str, *, status: str, error_code: str | None = 
             cycle.stage = "external_system_ready"
         cycle.finished_at = datetime.now(UTC)
         cycle.heartbeat_at = datetime.now(UTC)
+
+
+def _mark_manual_validation_waiting(cycle_id: str, *, stage: str, code: str, message: str) -> None:
+    with SessionLocal.begin() as db:
+        cycle = db.get(AccessCycle, cycle_id)
+        if cycle is None:
+            return
+        cycle.status = "waiting"
+        cycle.stage = stage
+        cycle.error_code = code
+        cycle.error_message = message
+        cycle.finished_at = None
+        cycle.heartbeat_at = datetime.now(UTC)
+
+
+async def validate_manual_access_cycle(cycle_id: str) -> dict[str, Any]:
+    """Validate the current profile-scoped page after human authentication.
+
+    This operation deliberately never navigates, clicks, or restarts the
+    access cycle. It only observes the current isolated profile context.
+    """
+    with SessionLocal() as db:
+        cycle = db.get(AccessCycle, str(cycle_id))
+        if cycle is None:
+            raise AccessCycleError("Ciclo de acesso não encontrado.", code="access_cycle_missing", stage="access")
+        if cycle.status == "ready" and cycle.stage == "external_system_ready":
+            return {"status": "ready", "validated": True, "access_cycle": get_access_cycle(cycle_id)}
+        allowed_failed = {
+            "reauthentication_required",
+            "account_picker_skipped",
+            "access_authentication_not_completed",
+            "access_identity_mismatch",
+        }
+        if cycle.status not in {"starting", "running", "waiting"} and cycle.error_code not in allowed_failed:
+            raise AccessCycleError(
+                "Este ciclo não está aguardando validação manual.",
+                code="access_cycle_not_waiting_manual_validation",
+                stage=str(cycle.stage or "access"),
+            )
+        system = db.get(ExternalSystem, cycle.external_system_id)
+        profile = db.get(ExternalAccessProfile, cycle.access_profile_id)
+        config = dict(system.config or {}) if system else {}
+        profile_id = cycle.access_profile_id
+    if system is None or profile is None or not profile_id:
+        raise AccessCycleError("Contexto de acesso não encontrado.", code="access_context_invalid", stage="access")
+    profile_data = active_access_profile_public(profile_id)
+    expected_host = str(config.get("expected_system_host") or "").strip().lower().rstrip(".")
+    _append_event(cycle_id, "manual_access_validation", "MANUAL_ACCESS_VALIDATION_STARTED", "started", access_profile_id=profile_id)
+    playwright = await async_playwright().start()
+    identity_session: BrowserIdentitySession | None = None
+    try:
+        connection = await browser_provider("desktop_browser").connect(playwright, f"manual-access-validation-{cycle_id}")
+        identity_session = BrowserIdentitySession(
+            connection.context,
+            profile_id,
+            browser=getattr(connection, "browser", None),
+            scope=desktop_cdp_url(),
+        )
+        await identity_session.activate()
+        page = await identity_session.page()
+        current_host = url_host(str(getattr(page, "url", "") or "")).lower().rstrip(".")
+        if not expected_host or current_host != expected_host:
+            body = await _body_text(page)
+            auth_state = classify_microsoft_auth_state(body)
+            message = "Finalize a autenticação no navegador antes de validar o acesso."
+            _append_event(
+                cycle_id,
+                "manual_access_validation",
+                "ACCESS_AUTHENTICATION_NOT_COMPLETED",
+                "waiting",
+                access_profile_id=profile_id,
+                host=current_host,
+                path=str(getattr(page, "url", "") or ""),
+                auth_state=auth_state,
+            )
+            _mark_manual_validation_waiting(cycle_id, stage="manual_authentication", code="ACCESS_AUTHENTICATION_NOT_COMPLETED", message=message)
+            return {"status": "waiting", "validated": False, "code": "ACCESS_AUTHENTICATION_NOT_COMPLETED", "message": message, "access_cycle": get_access_cycle(cycle_id)}
+
+        _append_event(cycle_id, "access_identity", "ACCESS_IDENTITY_VERIFICATION_STARTED", "started", access_profile_id=profile_id)
+        if not await _identity_evidence(page, profile_data, {"identity_selector": str(config.get("identity_selector") or "")}):
+            message = "A identidade exibida não corresponde ao perfil de acesso selecionado."
+            _append_event(cycle_id, "access_identity", "ACCESS_IDENTITY_MISMATCH", "failed", access_profile_id=profile_id, host=current_host)
+            _mark_manual_validation_waiting(cycle_id, stage="access_identity", code="ACCESS_IDENTITY_MISMATCH", message=message)
+            return {"status": "waiting", "validated": False, "code": "ACCESS_IDENTITY_MISMATCH", "message": message, "access_cycle": get_access_cycle(cycle_id)}
+
+        _append_event(cycle_id, "access_identity", "ACCESS_IDENTITY_VERIFIED", "success", access_profile_id=profile_id, host=current_host)
+        await identity_session.persist()
+        _append_event(cycle_id, "manual_access_validation", "ACCESS_SESSION_PERSISTED", "success", access_profile_id=profile_id)
+        from backend.services.access_profiles import record_profile_validation
+
+        validated_profile = record_profile_validation(profile_id, status="verified", reason="manual_access_validated")
+        _append_event(cycle_id, "manual_access_validation", "MANUAL_ACCESS_VALIDATION_COMPLETED", "success", access_profile_id=profile_id)
+        finish_access_cycle(cycle_id, status="ready")
+        return {"status": "ready", "validated": True, "profile": validated_profile, "access_cycle": get_access_cycle(cycle_id)}
+    finally:
+        if identity_session is not None:
+            with suppress(Exception):
+                await identity_session.persist()
+        await playwright.stop()
 
 
 async def execute_access_cycle(cycle_id: str) -> None:

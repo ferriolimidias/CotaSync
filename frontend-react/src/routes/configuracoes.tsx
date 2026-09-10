@@ -287,7 +287,7 @@ function ConfigPage() {
                 <div className="space-y-2">
                   {(profiles.data || []).map((profile) => {
                     const status = profile.validation_status || "unverified";
-                    const statusLabel = status === "available" ? "Disponível" : status === "reauth_required" ? "Reautenticação necessária" : status === "not_found" ? "Conta não encontrada nesta sessão" : status === "browser_offline" ? "Browser indisponível" : "Não verificado";
+                    const statusLabel = status === "verified" ? "Verificado" : status === "available" ? "Disponível" : status === "reauth_required" ? "Reautenticação necessária" : status === "not_found" ? "Conta não encontrada nesta sessão" : status === "browser_offline" ? "Browser indisponível" : "Não verificado";
                     const validatedLabel = profile.last_validated_at ? ` · última verificação ${new Date(profile.last_validated_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
                     return (
                     <div key={profile.id} className="flex flex-col gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">

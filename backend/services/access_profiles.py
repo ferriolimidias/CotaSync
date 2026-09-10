@@ -193,7 +193,7 @@ def record_profile_validation(
     reason: str = "",
     tenant_id: str = "default",
 ) -> dict[str, Any]:
-    allowed = {"available", "reauth_required", "not_found", "unknown", "browser_offline"}
+    allowed = {"available", "verified", "reauth_required", "not_found", "unknown", "browser_offline"}
     normalized = str(status or "unknown").strip()
     if normalized not in allowed:
         normalized = "unknown"

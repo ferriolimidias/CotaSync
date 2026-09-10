@@ -1,11 +1,12 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
+import { toast } from "sonner";
 
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
 import { Button } from "@/components/ui/button";
-import { getAccessCycle, getExternalSessionStatus, listAccessProfiles } from "@/services/api";
+import { getAccessCycle, getExternalSessionStatus, listAccessProfiles, validateAccessCycleManually } from "@/services/api";
 
 export const Route = createFileRoute("/configuracoes/navegador")({
   head: () => ({ meta: [{ title: "Navegador — CotaSync" }] }),
@@ -17,6 +18,7 @@ export const Route = createFileRoute("/configuracoes/navegador")({
 });
 
 function BrowserWorkspacePage() {
+  const queryClient = useQueryClient();
   const { access_profile_id: accessProfileId, access_cycle_id: accessCycleId } = Route.useSearch();
   const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, retry: 1 });
   const external = useQuery({
@@ -36,6 +38,22 @@ function BrowserWorkspacePage() {
   });
   const profile = profiles.data?.find((item) => item.id === accessProfileId && item.active);
   const systemName = external.data?.external_system_name || "Navegador externo";
+  const manualValidation = useMutation({
+    mutationFn: () => validateAccessCycleManually(accessCycleId),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["access-cycle", accessCycleId] });
+      void queryClient.invalidateQueries({ queryKey: ["access-profiles"] });
+      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
+      if (result.validated) toast.success("Usuário autenticado e acesso validado.");
+      else toast.warning(result.message || "Finalize a autenticação no navegador antes de validar o acesso.");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível validar o acesso."),
+  });
+  const canValidateManually = Boolean(
+    accessCycleId && cycle.data && cycle.data.status !== "ready" &&
+      (["starting", "running", "waiting"].includes(cycle.data.status) ||
+        ["reauthentication_required", "account_picker_skipped", "access_authentication_not_completed", "access_identity_mismatch"].includes(cycle.data.error_code || "")),
+  );
 
   if (!accessProfileId || profiles.isLoading || !profile) {
     return (
@@ -69,14 +87,19 @@ function BrowserWorkspacePage() {
             <BadgeStatus tone={cycle.data?.status === "ready" || external.data?.microsoft_status === "available" ? "success" : cycle.data?.status === "failed" ? "warning" : "neutral"}>
               Acesso: {cycle.data?.status === "starting" || cycle.data?.status === "running" || cycle.data?.status === "waiting" ? "Iniciando" : cycle.data?.status === "ready" ? "Pronto" : cycle.data?.status === "failed" ? "Falhou" : "Aguardando"}
             </BadgeStatus>
-            <BadgeStatus tone={external.data?.microsoft_status === "available" ? "success" : external.data?.microsoft_status === "reauth_required" ? "warning" : "neutral"}>
-              Microsoft: {external.data?.microsoft_status === "available" ? `${external.data?.available_profile_count ?? external.data?.access_profile_count ?? 0}${external.data?.access_profile_count && (external.data.available_profile_count ?? external.data.access_profile_count) < external.data.access_profile_count ? ` de ${external.data.access_profile_count}` : ""} perfil(is) disponível(is)` : external.data?.microsoft_status === "reauth_required" ? "Reautenticação necessária" : external.data?.microsoft_status === "account_picker" ? "Aguardando seleção" : "Não verificado"}
+            <BadgeStatus tone={cycle.data?.status === "ready" ? "success" : external.data?.microsoft_status === "available" ? "success" : external.data?.microsoft_status === "reauth_required" ? "warning" : "neutral"}>
+              Microsoft: {cycle.data?.status === "ready" ? "Verificado" : external.data?.microsoft_status === "available" ? `${external.data?.available_profile_count ?? external.data?.access_profile_count ?? 0}${external.data?.access_profile_count && (external.data.available_profile_count ?? external.data.access_profile_count) < external.data.access_profile_count ? ` de ${external.data.access_profile_count}` : ""} perfil(is) disponível(is)` : external.data?.microsoft_status === "reauth_required" ? "Reautenticação necessária" : external.data?.microsoft_status === "account_picker" ? "Aguardando seleção" : "Não verificado"}
             </BadgeStatus>
-            <BadgeStatus tone={external.data?.external_system_status === "inside" ? "success" : "neutral"}>
-              Sistema: {external.data?.external_system_status === "inside" ? "Dentro" : "Fora do sistema"}
+            <BadgeStatus tone={cycle.data?.status === "ready" || external.data?.external_system_status === "inside" ? "success" : "neutral"}>
+              Sistema: {cycle.data?.status === "ready" || external.data?.external_system_status === "inside" ? "Dentro do sistema" : "Fora do sistema"}
             </BadgeStatus>
           </div>
         }
+        actions={canValidateManually ? (
+          <Button size="sm" onClick={() => manualValidation.mutate()} disabled={manualValidation.isPending}>
+            {manualValidation.isPending ? "Validando..." : "Validar acesso"}
+          </Button>
+        ) : undefined}
       />
     </main>
   );

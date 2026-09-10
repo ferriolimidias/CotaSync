@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Check, CircleDot, Crosshair, Play, Save, Square, Trash2, X } from "lucide-react";
@@ -20,10 +20,12 @@ import {
   captureLearningResultSelection,
   confirmLearningResultSelection,
   getLearningSession,
+  getAccessCycle,
   getLearningDrafts,
   resumeLearningRecording,
   resolveTeachingContext,
   validateAccessProfile,
+  validateAccessCycleManually,
   authenticateAccessProfile,
   getSystemSpreadsheets,
   getClientLists,
@@ -46,6 +48,7 @@ export const Route = createFileRoute("/ensinar-acao")({
 });
 
 function EnsinarPage() {
+  const queryClient = useQueryClient();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [objective, setObjective] = useState("");
@@ -91,6 +94,29 @@ function EnsinarPage() {
     refetchInterval: () =>
       stopped || document.visibilityState !== "visible" ? false : 2500,
   });
+  const learningCycleId = String(session.data?.access_cycle_id || "");
+  const accessCycle = useQuery({
+    queryKey: ["learning-access-cycle", learningCycleId],
+    queryFn: () => getAccessCycle(learningCycleId),
+    enabled: Boolean(learningCycleId),
+    refetchInterval: () => (document.visibilityState === "visible" ? 2000 : false),
+    refetchOnWindowFocus: true,
+  });
+  const manualAccessValidation = useMutation({
+    mutationFn: () => validateAccessCycleManually(learningCycleId),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["learning-access-cycle", learningCycleId] });
+      void queryClient.invalidateQueries({ queryKey: ["learning-session", sessionId] });
+      if (result.validated) toast.success("Usuário autenticado e acesso validado. O ensino será liberado.");
+      else toast.warning(result.message || "Finalize a autenticação no navegador antes de validar o acesso.");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível validar o acesso."),
+  });
+  const canValidateLearningAccess = Boolean(
+    learningCycleId && accessCycle.data && accessCycle.data.status !== "ready" &&
+      (["starting", "running", "waiting"].includes(accessCycle.data.status) ||
+        ["reauthentication_required", "account_picker_skipped", "access_authentication_not_completed", "access_identity_mismatch"].includes(accessCycle.data.error_code || "")),
+  );
 
   useEffect(() => {
     if (!sessionId || !session.data || hydratedSessionId.current === sessionId) return;
@@ -475,24 +501,35 @@ function EnsinarPage() {
 
         <BrowserWorkspace
           actions={
-            selectionMode === "selecting" ? (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={cancelSelection.isPending}
-                onClick={() => cancelSelection.mutate()}
-              >
-                <X className="h-4 w-4" /> Cancelar seleção
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                disabled={!sessionId || startSelection.isPending || stopped}
-                onClick={() => startSelection.mutate()}
-              >
-                <Crosshair className="h-4 w-4" /> {outputs.length > 0 ? "+ Selecionar outro resultado" : "Selecionar resultado"}
-              </Button>
-            )
+            <>
+              {canValidateLearningAccess && (
+                <Button
+                  size="sm"
+                  onClick={() => manualAccessValidation.mutate()}
+                  disabled={manualAccessValidation.isPending}
+                >
+                  {manualAccessValidation.isPending ? "Validando..." : "Validar acesso"}
+                </Button>
+              )}
+              {selectionMode === "selecting" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={cancelSelection.isPending}
+                  onClick={() => cancelSelection.mutate()}
+                >
+                  <X className="h-4 w-4" /> Cancelar seleção
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  disabled={!sessionId || startSelection.isPending || stopped}
+                  onClick={() => startSelection.mutate()}
+                >
+                  <Crosshair className="h-4 w-4" /> {outputs.length > 0 ? "+ Selecionar outro resultado" : "Selecionar resultado"}
+                </Button>
+              )}
+            </>
           }
           footer={
             <OperatorAssistant

@@ -662,6 +662,17 @@ export async function getAccessCycle(id: string) {
   return payload.access_cycle;
 }
 
+export async function validateAccessCycleManually(id: string) {
+  return apiFetch<{
+    status: string;
+    validated: boolean;
+    code?: string;
+    message?: string;
+    profile?: AccessProfile;
+    access_cycle?: Awaited<ReturnType<typeof getAccessCycle>>;
+  }>(`/api/v1/access-cycles/${id}/validate-manual`, { method: "POST" });
+}
+
 export async function createLearningSession() {
   const payload = await apiFetch<{ session: LearningSession }>("/api/v1/learning/sessions", {
     method: "POST",
