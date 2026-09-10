@@ -141,13 +141,17 @@ Do not weaken or remove tests for these invariants to accommodate another
 implementation. Any violation is a product regression, even when tests for
 an unrelated feature pass.
 
-## INVARIANT: ACCESS_PROFILE_DELETION_PRESERVES_REFERENTIAL_INTEGRITY
+## INVARIANT: ACCESS_PROFILE_DELETE_UNLINKS_DEPENDENCIES
 
-Deleting an `ExternalAccessProfile` must never silently rebind or destroy
-published `ActionVersion` records. Referenced profiles are retired from
-operational use while historical references remain intact. Usable profile
-credentials and profile-owned browser storage are removed. Executions that
-require an unavailable profile fail closed with
-`REQUIRED_ACCESS_PROFILE_UNAVAILABLE`; no other profile or current browser
-identity may be substituted. An unreferenced profile may be physically
-deleted only after all historical references are checked.
+Deleting an `ExternalAccessProfile` permanently removes its authentication
+identity and browser session. Operational dependencies remain as historical
+records but are left unassigned (`NULL`) and must be explicitly rebound by
+the user. Deleted profiles never block recreation of the same login
+identifier. Executions without an assigned profile fail closed with
+`REQUIRED_ACCESS_PROFILE_NOT_ASSIGNED`.
+
+## INVARIANT: NO_AUTOMATIC_ACCESS_PROFILE_REBIND
+
+Deleting and recreating a profile with the same login identifier never
+automatically rebinds Actions, ActionVersions, lists, or cycles. Rebinding
+requires an explicit authorized operation and is auditable.

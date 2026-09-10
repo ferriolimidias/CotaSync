@@ -404,6 +404,11 @@ export async function updateActionScope(id: string, allowedListIds: string[]) {
   return payload.action;
 }
 
+export async function assignActionAccessProfile(id: string, accessProfileId: string) {
+  const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/actions/${id}/access-profile`, { method: "PATCH", body: JSON.stringify({ access_profile_id: accessProfileId }) });
+  return payload.action;
+}
+
 export async function getAction(id: string) {
   const payload = await apiFetch<{ action: ApiAction }>(`/api/v1/actions/${id}`);
   return payload.action;
@@ -649,7 +654,7 @@ export async function authenticateAccessProfile(id: string) {
 }
 
 export async function deleteAccessProfile(id: string) {
-  return apiFetch<{ status: "deleted" | "retired"; profile_id?: string; profile?: AccessProfile }>(`/api/v1/access-profiles/${id}`, { method: "DELETE" });
+  return apiFetch<{ status: "deleted"; profile_id?: string }>(`/api/v1/access-profiles/${id}`, { method: "DELETE" });
 }
 
 export async function getAccessCycle(id: string) {

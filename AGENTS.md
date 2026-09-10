@@ -35,14 +35,13 @@ cookies, OAuth query strings, or secret field values.
 
 ## Profile Deletion Rule
 
-`ACCESS_PROFILE_DELETION_PRESERVES_REFERENTIAL_INTEGRITY` is permanent:
-deleting an `ExternalAccessProfile` must never silently rebind or destroy
-published `ActionVersion` records. A referenced profile is retired from
-operational use while historical references remain intact, its usable
-credentials and profile-owned browser storage are removed, and executions
-requiring it fail closed with `REQUIRED_ACCESS_PROFILE_UNAVAILABLE`.
-An unreferenced profile may be physically deleted only after all historical
-references are checked. Storage cleanup must remain scoped to that profile.
+`ACCESS_PROFILE_DELETE_UNLINKS_DEPENDENCIES` is permanent: deleting an
+`ExternalAccessProfile` permanently removes its identity and profile-owned
+browser storage. Operational dependencies remain as records but their
+profile IDs become unassigned; no Action, list, or cycle is rebound to
+another profile. Execution fails closed with
+`REQUIRED_ACCESS_PROFILE_NOT_ASSIGNED` until an authorized user explicitly
+rebinds a profile. The same login identifier may be registered again.
 
 ## Canonical Access Flow
 

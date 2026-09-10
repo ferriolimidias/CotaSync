@@ -72,6 +72,7 @@ export function actionIsExecutable(action: {
   steps_count?: number;
   has_url?: boolean;
   legacy_unconfigured?: boolean;
+  required_access_profile_id?: string | null;
 }) {
-  return Boolean((action.steps_count ?? 0) > 0 && action.has_url && !action.legacy_unconfigured);
+  return Boolean((action.steps_count ?? 0) > 0 && action.has_url && !action.legacy_unconfigured && action.required_access_profile_id);
 }

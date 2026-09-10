@@ -641,8 +641,9 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
         version_id = f"{action.id}-v1"
         version = session.get(ActionVersion, version_id)
         if version is not None and str(version.status or "").casefold() in {"published", "active"}:
-            # Published versions are immutable. A new learning publication
-            # gets a new version and the Action pointer moves atomically.
+            # Published graph definitions remain immutable across new learning
+            # publications; the access identity binding may be explicitly
+            # cleared or reassigned after a profile is deleted.
             version_number = int(latest_version_number) + 1
             version_id = f"{action.id}-v{version_number}"
             version = None

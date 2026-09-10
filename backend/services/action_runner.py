@@ -568,9 +568,9 @@ def start_action_run(
                     raise RuntimeError("A Action e a Lista usam perfis de acesso diferentes.")
         profile = session.get(ExternalAccessProfile, profile_id) if profile_id else None
         if version and version.run_start_strategy == "external_entry_each_run" and not version.required_access_profile_id:
-            raise RuntimeError("REQUIRED_ACCESS_PROFILE_UNAVAILABLE: a versão publicada não possui perfil vinculado.")
+            raise RuntimeError("REQUIRED_ACCESS_PROFILE_NOT_ASSIGNED: a versão publicada não possui perfil vinculado.")
         if version and version.required_access_profile_id and (profile is None or not profile.active):
-            raise RuntimeError("REQUIRED_ACCESS_PROFILE_UNAVAILABLE: o perfil de acesso exigido pela Action não está disponível.")
+            raise RuntimeError("REQUIRED_ACCESS_PROFILE_NOT_ASSIGNED: a Action precisa de uma reassociação explícita de perfil.")
         external_system = session.get(ExternalSystem, profile.external_system_id) if profile else None
         run.access_profile_id = profile.id if profile else None
         run.external_system_id = external_system.id if external_system else None

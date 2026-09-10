@@ -17,7 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { ApiError, deleteAction, getActions, getActionVersions, getClientLists, updateActionScope } from "@/services/api";
+import { ApiError, assignActionAccessProfile, deleteAction, getActions, getActionVersions, getClientLists, listAccessProfiles, updateActionScope } from "@/services/api";
 import type { ApiAction } from "@/types/api";
 import { actionIsExecutable, runStatusLabel } from "@/lib/status-labels";
 
@@ -76,6 +76,9 @@ function ActionCard({ action }: { action: ApiAction }) {
   });
   const lists = useQuery({ queryKey: ["client-lists"], queryFn: getClientLists, enabled: scopeOpen });
   const scope = useMutation({ mutationFn: (ids: string[]) => updateActionScope(action.id, ids), onSuccess: () => { setScopeOpen(false); void queryClient.invalidateQueries({ queryKey: ["actions"] }); toast.success("Escopo da ação atualizado."); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível atualizar o escopo.") });
+  const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, enabled: !action.required_access_profile_id });
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const bindProfile = useMutation({ mutationFn: () => assignActionAccessProfile(action.id, selectedProfileId), onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["actions"] }); toast.success("Usuário de acesso vinculado."); setSelectedProfileId(""); }, onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível vincular o usuário de acesso.") });
   const executable = actionIsExecutable(action);
   const versionLabel = executable ? "Publicada" : "Não executável";
   return (
@@ -131,7 +134,14 @@ function ActionCard({ action }: { action: ApiAction }) {
         )}
         {!action.required_access_profile_id && !action.legacy_unconfigured && (
           <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
-            Perfil de acesso não definido. A ação não pode ser usada em lote até ser ensinada ou configurada com um perfil.
+            <p>Usuário de acesso não vinculado. A ação está bloqueada até uma associação explícita.</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <select aria-label={`Usuário de acesso para ${action.name}`} className="h-8 rounded-md border border-input bg-background px-2 text-xs" value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}>
+                <option value="">Selecionar usuário</option>
+                {(profiles.data ?? []).map((profile) => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}
+              </select>
+              <Button size="sm" variant="outline" disabled={!selectedProfileId || bindProfile.isPending} onClick={() => bindProfile.mutate()}>Vincular usuário</Button>
+            </div>
           </div>
         )}
         <div className="flex flex-wrap gap-2">

@@ -51,8 +51,8 @@ def preflight_action_execution(
         if not profile_id and str(version.run_start_strategy or "").strip() == "external_entry_each_run":
             return {
                 "ok": False,
-                "code": "required_access_profile_unavailable",
-                "message": "A versão publicada não possui o perfil de acesso obrigatório.",
+                "code": "required_access_profile_not_assigned",
+                "message": "A ação não possui usuário de acesso vinculado. Vincule um perfil antes de executar.",
             }
         if list_row and profile_id != str(list_row.access_profile_id or "").strip():
             return {
@@ -68,8 +68,8 @@ def preflight_action_execution(
         if profile_id and (profile is None or not profile.active):
             return {
                 "ok": False,
-                "code": "required_access_profile_unavailable",
-                "message": "Esta ação foi aprendida com um usuário de acesso que não está mais disponível.",
+                "code": "required_access_profile_not_assigned",
+                "message": "A ação não possui usuário de acesso vinculado. Vincule um perfil antes de executar.",
             }
         if not profile_id:
             return {"ok": False, "code": "access_profile_required", "message": "A ação precisa de um acesso ativo."}

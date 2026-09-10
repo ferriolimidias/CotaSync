@@ -88,6 +88,7 @@ from backend.services.access_profiles import (
     AccessProfileError,
     active_access_profile_public,
     access_profile_public,
+    assign_action_access_profile,
     create_access_profile,
     current_external_system_id,
     delete_access_profile,
@@ -219,6 +220,10 @@ class AISettingsPayload(BaseModel):
 
 class ActionScopePayload(BaseModel):
     allowed_list_ids: list[str] = Field(default_factory=list)
+
+
+class ActionAccessProfilePayload(BaseModel):
+    access_profile_id: str
 
 
 class BulkDeletePayload(BaseModel):
@@ -1095,6 +1100,16 @@ async def action_scope_update(action_id: str, payload: ActionScopePayload, _user
         action.scope_mode = "selected" if requested else "all"
     result = find_action(action_id)
     return {"status": "ok", "action": result.model_dump() if result else {}}
+
+
+@router.patch("/actions/{action_id}/access-profile", summary="Vincula explicitamente o perfil de uma ação")
+async def action_access_profile_update(action_id: str, payload: ActionAccessProfilePayload, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        result = assign_action_access_profile(action_id, payload.access_profile_id)
+    except AccessProfileError as exc:
+        raise _error(422, "ACTION_ACCESS_PROFILE_BINDING_INVALID", str(exc)) from exc
+    action = find_action(action_id)
+    return {"status": "ok", "binding": result, "action": action.model_dump() if action else {}}
 
 
 @router.delete("/actions/{action_id}", summary="Exclui ação definitivamente")

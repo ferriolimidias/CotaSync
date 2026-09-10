@@ -565,7 +565,7 @@ def create_batch(
         if required_profile_id and external_system is None:
             raise BatchRunnerError("Sistema externo do perfil não está configurado.")
         if required_profile_id and (profile is None or not profile.active or profile.external_system_id != external_system.id):
-            raise BatchRunnerError("Perfil de acesso inexistente, inativo ou incompatível com o sistema externo.")
+            raise BatchRunnerError("REQUIRED_ACCESS_PROFILE_NOT_ASSIGNED: vincule explicitamente um perfil de acesso antes do lote.")
     if published_version_id:
         definition = dict(version.definition or {}) if version is not None else {}
         if requires_external_entry(run_start_strategy):

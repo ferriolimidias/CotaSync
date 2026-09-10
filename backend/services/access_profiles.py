@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from backend.db import (
     AccessCycle,
@@ -29,7 +29,7 @@ class AccessProfileError(ValueError):
 
 
 def delete_access_profile(profile_id: str, *, tenant_id: str = "default") -> dict[str, Any]:
-    """Delete an unused profile or retire it while preserving history."""
+    """Delete a profile and leave operational dependencies explicitly unassigned."""
     profile_id = str(profile_id or "").strip()
     if not profile_id:
         raise AccessProfileError("Perfil de acesso não encontrado.")
@@ -56,18 +56,61 @@ def delete_access_profile(profile_id: str, *, tenant_id: str = "default") -> dic
         for name, model, criterion in checks:
             references[name] = db.scalar(select(model.id).where(criterion).limit(1)) is not None
         referenced = any(references.values())
-        if referenced:
-            profile.active = False
-            profile.validation_status = "retired"
-            profile.last_validated_at = datetime.now(UTC)
-            profile.last_validation_reason = "profile_retired"
-            result = {"status": "retired", "profile": _public(profile), "referenced": references}
-        else:
-            db.delete(profile)
-            result = {"status": "deleted", "profile_id": profile_id, "referenced": references}
+        # Preserve historical rows, but remove the identity from every
+        # operational context before deleting the profile itself.
+        for model, column in (
+            (ClientList, ClientList.access_profile_id),
+            (Action, Action.required_access_profile_id),
+            (ActionVersion, ActionVersion.required_access_profile_id),
+            (Run, Run.access_profile_id),
+            (Batch, Batch.access_profile_id),
+            (LearningSession, LearningSession.access_profile_id),
+        ):
+            db.execute(update(model).where(column == profile_id).values({column.key: None}))
+        cycles = list(db.scalars(select(AccessCycle).where(AccessCycle.access_profile_id == profile_id)))
+        for cycle in cycles:
+            cycle.access_profile_id = None
+            if cycle.status not in {"succeeded", "failed", "cancelled"}:
+                cycle.status = "cancelled"
+                cycle.stage = "access_profile_deleted"
+                cycle.error_code = "ACCESS_PROFILE_DELETED"
+                cycle.error_message = "O perfil de acesso foi excluído antes da conclusão do ciclo."
+                cycle.finished_at = datetime.now(UTC)
+        db.delete(profile)
+        result = {"status": "deleted", "profile_id": profile_id, "referenced": references}
     # Storage is independent of the database transaction and is always scoped by hash.
     remove_browser_identity_storage(profile_id)
     return result
+
+
+def assign_action_access_profile(action_id: str, profile_id: str, *, tenant_id: str = "default") -> dict[str, Any]:
+    """Explicitly bind an existing published Action to an active profile."""
+    action_id = str(action_id or "").strip()
+    profile_id = str(profile_id or "").strip()
+    if not action_id or not profile_id:
+        raise AccessProfileError("Action e perfil de acesso são obrigatórios.")
+    with SessionLocal.begin() as db:
+        action = db.get(Action, action_id)
+        version = db.get(ActionVersion, action.published_version_id) if action and action.published_version_id else None
+        profile = db.scalar(select(ExternalAccessProfile).where(ExternalAccessProfile.id == profile_id, ExternalAccessProfile.tenant_id == tenant_id, ExternalAccessProfile.active.is_(True)))
+        if action is None or version is None:
+            raise AccessProfileError("Action publicada não encontrada.")
+        if profile is None:
+            raise AccessProfileError("Perfil de acesso não encontrado ou inativo.")
+        definition = dict(version.definition or {})
+        expected_system_id = str(definition.get("external_system_id") or "").strip()
+        if expected_system_id and expected_system_id != profile.external_system_id:
+            raise AccessProfileError("O perfil não pertence ao sistema externo da Action.")
+        list_ids = [str(item) for item in (action.allowed_list_ids or []) if str(item).strip()]
+        if list_ids:
+            lists = list(db.scalars(select(ClientList).where(ClientList.id.in_(list_ids), ClientList.tenant_id == tenant_id, ClientList.active.is_(True))))
+            if len(lists) != len(list_ids) or any(row.access_profile_id not in {None, profile_id} for row in lists):
+                raise AccessProfileError("O perfil não é compatível com as listas da Action.")
+        action.required_access_profile_id = profile_id
+        version.required_access_profile_id = profile_id
+        definition["required_access_profile_id"] = profile_id
+        version.definition = definition
+        return {"action_id": action.id, "action_version_id": version.id, "access_profile_id": profile_id}
 
 
 def current_external_system_id() -> str | None:
