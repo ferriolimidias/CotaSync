@@ -23,6 +23,7 @@ class RunRecord(BaseModel):
     id: str
     action_id: str
     action_key: str
+    action_version_id: str | None = None
     status: RunStatus
     mode: RunMode = "sync"
     run_type: str = "action_run"

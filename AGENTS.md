@@ -27,3 +27,8 @@ initial state of a new logical unit.
 External-system latency must be handled by state-driven waiting. A wall-clock
 locator/navigation probe timeout is not a logical Run failure. Runtime waits
 must continue polling with cancellation and terminal browser/auth checks.
+
+Every Run must emit a structured, secret-safe timeline sufficient to identify
+whether it reached external entry, access bootstrap, main action, output, or a
+terminal result. Do not remove the ordering events or log credentials, tokens,
+cookies, OAuth query strings, or secret field values.

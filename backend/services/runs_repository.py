@@ -95,6 +95,7 @@ def _db_run_to_record(row: DbRun) -> RunRecord:
     record.update({
         "id": row.id,
         "action_id": row.action_id or record.get("action_id") or "",
+        "action_version_id": row.action_version_id or record.get("action_version_id"),
         "action_key": record.get("action_key") or row.action_id or "",
         "status": row.status if row.status in {"pending", "running", "success", "error", "cancelled"} else "error",
         "run_origin": row.run_origin if row.run_origin in {"operational", "smoke", "validation", "automated_test", "migration"} else "operational",

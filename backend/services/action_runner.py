@@ -19,6 +19,7 @@ from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.learned_graph import canonicalize_graph_metadata
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
 from backend.services.runtime_wait import RuntimeWaitCancelled
+from backend.services.run_timeline import RunTimeline
 from backend.services.runs_repository import (
     append_run,
     persist_terminal_run_fallback,
@@ -309,6 +310,7 @@ def _load_action_config(action: ActionDetail) -> dict[str, Any]:
                 version = session.get(ActionVersion, db_action.published_version_id)
                 if version is not None:
                     raw = dict(version.definition or {})
+                    raw.setdefault("action_version_id", version.id)
                     raw.setdefault("nome_amigavel", db_action.name)
                     raw.setdefault("descricao", db_action.description)
                     raw.setdefault("required_access_profile_id", version.required_access_profile_id or db_action.required_access_profile_id)
@@ -348,6 +350,7 @@ async def _run_desktop_browser_replay(
     *,
     batch_id: str | None = None,
     progress_callback: Any | None = None,
+    timeline_callback: Any | None = None,
 ) -> dict[str, Any]:
     from backend.motor_browser import executar_acao_rapida
 
@@ -366,6 +369,7 @@ async def _run_desktop_browser_replay(
         run_id=run_id,
         cancellation_probe=_runtime_cancellation_probe(run_id, batch_id),
         progress_callback=progress_callback,
+        timeline_callback=timeline_callback,
     )
     result["runner"] = "desktop_browser_replay"
     result["browser_mode"] = "desktop_browser"
@@ -531,6 +535,7 @@ def start_action_run(
         id=str(uuid4()),
         action_id=action.id,
         action_key=action.key,
+        action_version_id=None,
         status="pending",
         mode=request.mode,
         run_type=str(run_type or "action_run"),
@@ -548,6 +553,7 @@ def start_action_run(
     with SessionLocal() as session:
         db_action = session.get(DbAction, action.id)
         version = session.get(ActionVersion, db_action.published_version_id) if db_action and db_action.published_version_id else None
+        run.action_version_id = version.id if version else None
         client_id = str(request.variables.get("client_id") or "").strip()
         client = session.get(Client, client_id) if client_id else None
         profile_id = str((version.required_access_profile_id if version else None) or (db_action.required_access_profile_id if db_action else None) or "").strip() or None
@@ -565,6 +571,18 @@ def start_action_run(
         run.external_system_id = external_system.id if external_system else None
         run.run_start_strategy = version.run_start_strategy if version else None
     append_run(run)
+
+    RunTimeline(
+        run_id=run.id,
+        context={
+            "action_id": run.action_id,
+            "action_version_id": run.action_version_id,
+            "client_id": run.client_id,
+            "access_profile_id": run.access_profile_id,
+            "external_system_id": run.external_system_id,
+            "run_start_strategy": run.run_start_strategy,
+        },
+    ).emit("run", "RUN_CREATED", "success")
 
     run.status = "running"
     run.started_at = utc_now_iso()
@@ -609,6 +627,19 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
     runner_used = "local_fixture" if _is_local_fixture(action) else "action_runner"
     browser_mode_used = str(action.browser_mode or "desktop_browser").strip() or "desktop_browser"
     whether_desktop_browser_used = browser_mode_used == "desktop_browser"
+    timeline = RunTimeline(
+        run_id=run.id,
+        context={
+            "action_id": run.action_id,
+            "action_version_id": run.action_version_id,
+            "client_id": run.client_id,
+            "access_profile_id": run.access_profile_id,
+            "external_system_id": run.external_system_id,
+            "run_start_strategy": run.run_start_strategy,
+        },
+    )
+    timeline.emit("run", "RUN_STARTED", "success")
+    terminal_exception: Exception | None = None
     try:
         if _is_local_fixture(action):
             run.status = "success"
@@ -641,6 +672,7 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             browser_mode_used = "desktop_browser"
             whether_desktop_browser_used = True
             async def report_waiting(status: str) -> None:
+                timeline.waiting(status)
                 run.result_payload = {
                     "wait_status": "waiting_external_system",
                     "wait_target": status,
@@ -654,6 +686,7 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 run.id,
                 batch_id=request.batch_id,
                 progress_callback=report_waiting,
+                timeline_callback=timeline.emit,
             )
             text = str(result.get("texto") or result.get("motivo") or "").strip()
             execution_status = str(result.get("status") or "").strip().lower()
@@ -685,6 +718,7 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
         else:
             raise RuntimeError("Acao antiga sem replay desktop_browser nao e suportada nesta arquitetura.")
     except Exception as exc:
+        terminal_exception = exc
         safe_error = _safe_error_message(exc)
         logger.info("Run %s finalizada com erro do tipo %s", run.id, type(exc).__name__)
         run.status = "cancelled" if isinstance(exc, RuntimeWaitCancelled) else "error"
@@ -735,6 +769,17 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             )
             run.finished_at = utc_now_iso()
             update_run(run)
+            timeline.emit(
+                "run",
+                "RUN_SUCCEEDED" if run.status == "success" else ("RUN_CANCELLED" if run.status == "cancelled" else "RUN_FAILED"),
+                run.status,
+                error_code=(getattr(terminal_exception, "code", None) if terminal_exception else None)
+                or (type(terminal_exception).__name__ if terminal_exception else None),
+                error_stage=(getattr(terminal_exception, "diagnostics", {}) or {}).get("error_stage")
+                or (getattr(terminal_exception, "diagnostics", {}) or {}).get("stage")
+                or ("runtime" if run.status in {"error", "cancelled"} else None),
+                exception_class=type(terminal_exception).__name__ if terminal_exception else None,
+            )
         except Exception as persistence_error:
             logger.exception("Run %s falhou no fechamento/persistencia", run.id)
             run.status = "error"
@@ -778,4 +823,5 @@ async def run_action_sync(action: ActionDetail, request: ActionRunRequest) -> Ru
             outputs=[dict(item) for item in (action.outputs or []) if isinstance(item, dict)],
             batch_id=request.batch_id,
         )
+        RunTimeline(run_id=run.id).emit("output", "OUTPUT_PERSISTED", "success")
     return run

@@ -1014,6 +1014,7 @@ async def executar_acao_rapida(
     _same_run_reentry: bool = False,
     cancellation_probe: Any | None = None,
     progress_callback: Any | None = None,
+    timeline_callback: Any | None = None,
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Desktop replay), repetindo os passos técnicos.
@@ -1058,6 +1059,14 @@ async def executar_acao_rapida(
             cancellation_probe=cancellation_probe,
             on_waiting=progress_callback,
         )
+
+    def timeline(stage: str, event: str, status: str, **details: Any) -> None:
+        if timeline_callback is None:
+            return
+        try:
+            timeline_callback(stage, event, status, **details)
+        except Exception:
+            logging.debug("Falha ao registrar timeline da Run", exc_info=True)
 
     browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "desktop_browser")
     graph_mode = graph_metadata_available(action_config)
@@ -1450,6 +1459,7 @@ async def executar_acao_rapida(
                         {"reason": "access_bootstrap_missing", "execution_model": "external_entry_each_run"},
                     )
                 events: list[dict[str, Any]] = []
+                timeline("access_bootstrap", "BOOTSTRAP_STARTED", "started")
                 for bootstrap_index, bootstrap_event in enumerate(raw_bootstrap):
                     if not isinstance(bootstrap_event, dict):
                         raise SessionGuardianError(
@@ -1468,6 +1478,20 @@ async def executar_acao_rapida(
                             },
                         )
                     started_at = time.monotonic()
+                    timeline(
+                        "access_bootstrap",
+                        "BOOTSTRAP_STEP_STARTED",
+                        "started",
+                        step_id=str(bootstrap_event.get("step_id") or "") or None,
+                        step_index=bootstrap_index,
+                        operation=event_type,
+                        selector=selector,
+                    )
+                    state_before_bootstrap = await current_browser_state(page_to_bootstrap)
+                    if bootstrap_index == 0 and ("microsoft" in state_before_bootstrap["current_host"] or "login." in state_before_bootstrap["current_host"]):
+                        timeline("access_bootstrap", "ACCOUNT_PICKER_OBSERVED", "observed", host=state_before_bootstrap["current_host"], path=state_before_bootstrap["current_url"])
+                    if bootstrap_index == 0:
+                        timeline("access_bootstrap", "ACCESS_PROFILE_SELECTION_STARTED", "started")
                     locator = await learned_click_locator(page_to_bootstrap, {
                         "seletor": selector,
                         "target_text": bootstrap_event.get("target_text"),
@@ -1493,6 +1517,19 @@ async def executar_acao_rapida(
                             "status": "success",
                         }
                     )
+                    timeline(
+                        "access_bootstrap",
+                        "BOOTSTRAP_STEP_COMPLETED",
+                        "success",
+                        step_id=str(bootstrap_event.get("step_id") or "") or None,
+                        step_index=bootstrap_index,
+                        operation=event_type,
+                        selector=selector,
+                    )
+                    if bootstrap_index == 0:
+                        timeline("access_bootstrap", "ACCESS_PROFILE_SELECTION_COMPLETED", "success")
+                state = await current_browser_state(page_to_bootstrap)
+                timeline("access_bootstrap", "BOOTSTRAP_COMPLETED", "success", host=state["current_host"], path=state["current_url"])
                 return events
 
             async def apply_reviewed_overlay_waits(page_to_wait: Any, step_index: int) -> list[dict[str, Any]]:
@@ -1579,6 +1616,7 @@ async def executar_acao_rapida(
                         "A execução exige uma entrada externa configurada.",
                         {"reason": "external_entry_url_missing", "execution_model": "external_entry_each_run"},
                     )
+                timeline("external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=entry_url)
                 try:
                     await connection.page.goto(entry_url, wait_until="domcontentloaded", timeout=5000)
                 except PlaywrightTimeoutError:
@@ -1596,6 +1634,8 @@ async def executar_acao_rapida(
                         "access_profile_id": str(action_config.get("required_access_profile_id") or "") or None,
                     }
                 )
+                entry_state = await current_browser_state(connection.page)
+                timeline("external_entry", "EXTERNAL_ENTRY_COMPLETED", "success", host=entry_state["current_host"], path=entry_state["current_url"])
             try:
                 page = await select_desktop_page_for_action(action_config, context, connection.page)
             except ActionPageError as exc:
@@ -1606,6 +1646,8 @@ async def executar_acao_rapida(
                 bootstrap_events = await execute_external_access_bootstrap(page)
                 step_trace.extend(bootstrap_events)
                 external_entry_started = True
+                system_state = await current_browser_state(page)
+                timeline("access_bootstrap", "EXTERNAL_SYSTEM_REACHED", "success", host=system_state["current_host"], path=system_state["current_url"])
                 # The external entry is the authoritative cursor for this new
                 # run. The learned graph must not match the residual browser
                 # page or plan a path from a previous client's result state.
@@ -1706,6 +1748,13 @@ async def executar_acao_rapida(
                 }
             )
             _LOGGER.info("[DESKTOP-REPLAY] Pagina desktop do sistema alvo selecionada.")
+            timeline(
+                "main_graph",
+                "MAIN_GRAPH_STARTED",
+                "started",
+                first_step_id=str((first_step or {}).get("step_id") or "") or None,
+                state_id=(first_step or {}).get("before_state_id") or (first_step or {}).get("graph_from_state_id"),
+            )
             dados_variaveis = dados_variaveis if isinstance(dados_variaveis, dict) else {}
             graph_plan: dict[str, Any] = {"execution_model": "legacy_linear"}
             fresh_run_requires_query = external_entry_started
@@ -2013,6 +2062,7 @@ async def executar_acao_rapida(
                     except Exception:
                         pass
                 before_state = await current_browser_state(page)
+                timeline("state", "STATE_OBSERVED", "observed", host=before_state["current_host"], path=before_state["current_url"], state_id=passo.get("before_state_id") or passo.get("graph_from_state_id"))
                 trace_item: dict[str, Any] = {
                     "step_index": step_index,
                     "step_type": tipo_acao,
@@ -2026,6 +2076,19 @@ async def executar_acao_rapida(
                     "status": "running",
                 }
                 step_trace.append(trace_item)
+
+                timeline(
+                    "main_graph",
+                    "MAIN_STEP_STARTED",
+                    "started",
+                    step_id=str(passo.get("step_id") or "") or None,
+                    step_index=step_index,
+                    operation=tipo_acao,
+                    selector=seletor,
+                    state_id=passo.get("before_state_id") or passo.get("graph_from_state_id"),
+                    host=before_state["current_host"],
+                    path=before_state["current_url"],
+                )
 
                 logging.info(f"[DESKTOP-REPLAY] Executando passo: {tipo_acao} em {seletor}")
                 await replan_before_step(page, step_index, passo)
@@ -2162,6 +2225,13 @@ async def executar_acao_rapida(
                             else:
                                 texto = await elemento.inner_text(timeout=5000)
                         dados_extraidos[extraction_name] = texto.strip()
+                        timeline(
+                            "output",
+                            "OUTPUT_READ",
+                            "success",
+                            output_label=extraction_name,
+                            step_id=str(passo.get("step_id") or "") or None,
+                        )
 
                     elif tipo_acao == "download_pdf":
                         caminho_arquivo = runtime_download_path(nome_acao, run_id, ".pdf")
@@ -2211,6 +2281,7 @@ async def executar_acao_rapida(
                         query_transition_confirmed = True
                         query_transition_step_index = step_index
                     after_state = await current_browser_state(page)
+                    timeline("state", "STATE_OBSERVED", "observed", host=after_state["current_host"], path=after_state["current_url"], state_id=passo.get("after_state_id") or passo.get("graph_to_state_id"))
                     overlay_waits_applied = await apply_reviewed_overlay_waits(page, step_index)
                     trace_item.update(
                         {
@@ -2224,6 +2295,17 @@ async def executar_acao_rapida(
                     if overlay_waits_applied:
                         trace_item["reviewed_overlay_waits"] = overlay_waits_applied
                     last_successful_step_index = step_index
+                    timeline(
+                        "main_graph",
+                        "MAIN_STEP_COMPLETED",
+                        "success",
+                        step_id=str(passo.get("step_id") or "") or None,
+                        step_index=step_index,
+                        operation=tipo_acao,
+                        state_id=passo.get("after_state_id") or passo.get("graph_to_state_id"),
+                        host=after_state["current_host"],
+                        path=after_state["current_url"],
+                    )
 
                 except ActionPageError as e:
                     screenshot_path = await capture_error_screenshot(page, step_index, tipo_acao)

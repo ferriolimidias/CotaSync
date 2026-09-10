@@ -57,6 +57,15 @@ failures. Execution ends only on success, explicit cancellation, or a
 recognized terminal condition such as an unavailable browser or required
 reauthentication.
 
+## INVARIANT: RUN_EXECUTION_OBSERVABILITY
+
+Every Run must have a structured, chronological, secret-safe timeline that is
+queryable by `run_id` and identifies external entry, access bootstrap, main
+graph, outputs, waits, and terminal status. The timeline must never include
+credentials, cookies, tokens, OAuth query strings, or secret field values.
+For `external_entry_each_run`, `MAIN_GRAPH_STARTED` must follow
+`BOOTSTRAP_COMPLETED`.
+
 ## Regression Rule
 
 Do not weaken or remove tests for these invariants to accommodate another
