@@ -18,6 +18,62 @@ def test_auto_consume_calls_access_cycle_executor():
     worker.execute_access_cycle.assert_awaited_once_with("cycle-a")
 
 
+def test_waiting_access_cycle_does_not_starve_queue():
+    async def scenario() -> None:
+        worker = PersistentBatchWorker("worker-waiting")
+        calls: list[str] = []
+        waiting = asyncio.Event()
+
+        async def fake_execute(cycle_id: str, **_kwargs):
+            calls.append(cycle_id)
+            if cycle_id == "cycle-a":
+                await waiting.wait()
+
+        async def fake_heartbeat_loop():
+            await worker.stop_event.wait()
+
+        claims = iter(["cycle-a", "cycle-b"])
+
+        def fake_claim(_worker_id: str):
+            try:
+                return next(claims)
+            except StopIteration:
+                worker.stop_event.set()
+                return None
+
+        worker.execute_access_cycle = fake_execute  # type: ignore[method-assign]
+        worker.heartbeat_loop = fake_heartbeat_loop  # type: ignore[method-assign]
+        with (
+            patch.object(worker, "install_signal_handlers"),
+            patch.object(worker, "register"),
+            patch.object(worker, "startup_recovery"),
+            patch.object(worker, "heartbeat"),
+            patch("backend.worker.claim_next_access_cycle", side_effect=fake_claim),
+            patch("backend.worker.claim_next_batch", return_value=None),
+            patch("backend.worker.poll_seconds", return_value=0.01),
+        ):
+            await asyncio.wait_for(worker.run(), timeout=1)
+        assert calls == ["cycle-a", "cycle-b"]
+
+    asyncio.run(scenario())
+
+
+def test_waiting_access_cycle_with_heartbeat_is_not_stale():
+    ids = _cycle()
+    try:
+        assert ids
+        with SessionLocal() as db:
+            cycle = db.get(AccessCycle, ids[2])
+            assert cycle is not None
+            cycle.status = "waiting"
+            cycle.worker_id = "worker-live"
+            cycle.heartbeat_at = datetime.now(UTC)
+            db.commit()
+        assert recover_stale_access_cycles(datetime.now(UTC) - timedelta(seconds=60)) == 0
+    finally:
+        _remove_cycle(ids)
+
+
 def test_empty_access_cycle_queue_does_not_execute_browser_work():
     worker = PersistentBatchWorker("access-cycle-empty-test")
     worker.execute_access_cycle = AsyncMock()  # type: ignore[method-assign]

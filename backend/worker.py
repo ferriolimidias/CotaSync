@@ -136,6 +136,7 @@ class PersistentBatchWorker:
         self.current_item_id: str | None = None
         self.current_access_cycle_id: str | None = None
         self.heartbeat_task: asyncio.Task[None] | None = None
+        self.access_tasks: dict[str, asyncio.Task[None]] = {}
 
     def install_signal_handlers(self) -> None:
         loop = asyncio.get_running_loop()
@@ -226,6 +227,32 @@ class PersistentBatchWorker:
             logger.exception("Falha não tratada ao executar AccessCycle %s.", access_cycle_id)
         return True
 
+    def _reap_access_tasks(self) -> None:
+        for cycle_id, task in list(self.access_tasks.items()):
+            if not task.done():
+                continue
+            self.access_tasks.pop(cycle_id, None)
+            with suppress(asyncio.CancelledError):
+                try:
+                    task.result()
+                except Exception:
+                    logger.exception("Falha não tratada no ciclo de acesso %s.", cycle_id)
+
+    async def schedule_access_cycle_once(self) -> bool:
+        """Claim one cycle without tying the worker loop to its wait."""
+        try:
+            access_cycle_id = claim_next_access_cycle(self.instance_id)
+        except Exception:
+            logger.exception("Falha ao consultar a fila de AccessCycle.")
+            return False
+        if not access_cycle_id:
+            return False
+        logger.info("AccessCycle %s agendado pelo worker.", access_cycle_id)
+        self.access_tasks[access_cycle_id] = asyncio.create_task(
+            self.execute_access_cycle(access_cycle_id, wait_for_lock=True)
+        )
+        return True
+
     async def run(self) -> None:
         self.install_signal_handlers()
         self.register()
@@ -233,8 +260,14 @@ class PersistentBatchWorker:
         self.heartbeat_task = asyncio.create_task(self.heartbeat_loop())
         try:
             while not self.stop_event.is_set():
+                self._reap_access_tasks()
                 self.heartbeat("access_cycle_waiting" if self.current_access_cycle_id else "idle")
-                if await self.poll_access_cycle_once():
+                await self.schedule_access_cycle_once()
+                if self.access_tasks:
+                    # Access cycles share one browser. They may wait in their
+                    # own tasks, but no batch item starts concurrently with
+                    # those browser-bound cycles.
+                    await asyncio.sleep(poll_seconds())
                     continue
                 batch_id = claim_next_batch(self.instance_id)
                 if not batch_id:
@@ -246,6 +279,12 @@ class PersistentBatchWorker:
                 self.heartbeat_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await self.heartbeat_task
+            for task in self.access_tasks.values():
+                task.cancel()
+            for task in self.access_tasks.values():
+                with suppress(asyncio.CancelledError):
+                    await task
+            self.access_tasks.clear()
             with SessionLocal.begin() as session:
                 row = session.get(WorkerInstance, self.worker_row_id)
                 if row is not None:
@@ -255,16 +294,27 @@ class PersistentBatchWorker:
                     row.current_batch_id = None
                     row.current_batch_item_id = None
 
-    async def execute_access_cycle(self, cycle_id: str, *, lock_held: bool = False) -> None:
+    async def execute_access_cycle(
+        self,
+        cycle_id: str,
+        *,
+        lock_held: bool = False,
+        wait_for_lock: bool = False,
+    ) -> None:
         lock = BrowserAdvisoryLock()
-        if not lock_held and not lock.acquire():
-            logger.info("Browser ocupado; ciclo de acesso %s permanece aguardando.", cycle_id)
-            with SessionLocal.begin() as session:
-                from backend.db import AccessCycle
-                cycle = session.get(AccessCycle, cycle_id)
-                if cycle is not None and cycle.status == "running":
-                    cycle.status = "starting"
-            return
+        if not lock_held:
+            while not lock.acquire():
+                if not wait_for_lock or self.stop_event.is_set():
+                    logger.info("Browser ocupado; ciclo de acesso %s permanece aguardando.", cycle_id)
+                    with SessionLocal.begin() as session:
+                        from backend.db import AccessCycle
+                        cycle = session.get(AccessCycle, cycle_id)
+                        if cycle is not None and cycle.status == "running":
+                            cycle.status = "starting"
+                            cycle.worker_id = None
+                    return
+                touch_access_cycle(cycle_id, status="waiting")
+                await asyncio.sleep(poll_seconds())
         self.current_access_cycle_id = cycle_id
         self.heartbeat("access_cycle")
         try:
