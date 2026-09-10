@@ -7,14 +7,14 @@ test("Autenticar navega para o workspace com o perfil antes da autenticação", 
   await openAccessProfileWorkspace(
     "profile-x",
     (options) => {
-      calls.push(`${options.to}?access_profile_id=${options.search.access_profile_id}`);
+      calls.push(`${options.to}?access_profile_id=${options.search.access_profile_id}&access_cycle_id=${options.search.access_cycle_id}`);
     },
     async (profileId) => {
-      calls.push(`authenticate:${profileId}`);
+      void profileId;
+      return { access_cycle_id: "cycle-x" };
     },
   );
   assert.deepEqual(calls, [
-    "/configuracoes/navegador?access_profile_id=profile-x",
-    "authenticate:profile-x",
+    "/configuracoes/navegador?access_profile_id=profile-x&access_cycle_id=cycle-x",
   ]);
 });

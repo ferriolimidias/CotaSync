@@ -341,6 +341,22 @@ class ExternalAccessProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class AccessCycle(Base):
+    __tablename__ = "access_cycles"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    external_system_id: Mapped[str] = mapped_column(ForeignKey("external_systems.id", ondelete="CASCADE"), index=True)
+    access_profile_id: Mapped[str] = mapped_column(ForeignKey("external_access_profiles.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="starting", index=True)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False, default="access_start")
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    events: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class LearningSession(Base):
     __tablename__ = "learning_sessions"
     id: Mapped[str] = mapped_column(String(128), primary_key=True)

@@ -49,7 +49,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
-from backend.services.access_coordinator import start_canonical_access
+from backend.services.access_cycles import ensure_access_cycle
 from backend.services.start_policy import requires_external_entry, resolve_external_entry_url
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.actions_repository import enrich_action_access_profile, save_learned_action
@@ -2250,7 +2250,7 @@ class DemoSessionManager:
                 code="LEARNING_CONTEXT_INVALID",
             )
         try:
-            cycle = await start_canonical_access(
+            cycle = await ensure_access_cycle(
                 session.page,
                 external_system={
                     "id": session.external_system_id,

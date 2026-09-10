@@ -5,23 +5,32 @@ import { ArrowLeft } from "lucide-react";
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
 import { Button } from "@/components/ui/button";
-import { getExternalSessionStatus, listAccessProfiles } from "@/services/api";
+import { getAccessCycle, getExternalSessionStatus, listAccessProfiles } from "@/services/api";
 
 export const Route = createFileRoute("/configuracoes/navegador")({
   head: () => ({ meta: [{ title: "Navegador — CotaSync" }] }),
   validateSearch: (search) => ({
     access_profile_id: typeof search.access_profile_id === "string" ? search.access_profile_id : "",
+    access_cycle_id: typeof search.access_cycle_id === "string" ? search.access_cycle_id : "",
   }),
   component: BrowserWorkspacePage,
 });
 
 function BrowserWorkspacePage() {
-  const { access_profile_id: accessProfileId } = Route.useSearch();
+  const { access_profile_id: accessProfileId, access_cycle_id: accessCycleId } = Route.useSearch();
   const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, retry: 1 });
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
     refetchInterval: () => (document.visibilityState === "visible" ? 10000 : false),
+    refetchOnWindowFocus: true,
+    retry: 1,
+  });
+  const cycle = useQuery({
+    queryKey: ["access-cycle", accessCycleId],
+    queryFn: () => getAccessCycle(accessCycleId),
+    enabled: Boolean(accessCycleId),
+    refetchInterval: () => (document.visibilityState === "visible" ? 2000 : false),
     refetchOnWindowFocus: true,
     retry: 1,
   });
@@ -57,6 +66,9 @@ function BrowserWorkspacePage() {
         }
         sessionStatus={
           <div className="flex flex-wrap items-center gap-2">
+            <BadgeStatus tone={cycle.data?.status === "ready" || external.data?.microsoft_status === "available" ? "success" : cycle.data?.status === "failed" ? "warning" : "neutral"}>
+              Acesso: {cycle.data?.status === "starting" || cycle.data?.status === "running" || cycle.data?.status === "waiting" ? "Iniciando" : cycle.data?.status === "ready" ? "Pronto" : cycle.data?.status === "failed" ? "Falhou" : "Aguardando"}
+            </BadgeStatus>
             <BadgeStatus tone={external.data?.microsoft_status === "available" ? "success" : external.data?.microsoft_status === "reauth_required" ? "warning" : "neutral"}>
               Microsoft: {external.data?.microsoft_status === "available" ? `${external.data?.available_profile_count ?? external.data?.access_profile_count ?? 0}${external.data?.access_profile_count && (external.data.available_profile_count ?? external.data.access_profile_count) < external.data.access_profile_count ? ` de ${external.data.access_profile_count}` : ""} perfil(is) disponível(is)` : external.data?.microsoft_status === "reauth_required" ? "Reautenticação necessária" : external.data?.microsoft_status === "account_picker" ? "Aguardando seleção" : "Não verificado"}
             </BadgeStatus>

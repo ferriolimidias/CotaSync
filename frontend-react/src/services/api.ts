@@ -645,7 +645,12 @@ export async function validateAccessProfile(id: string) {
 }
 
 export async function authenticateAccessProfile(id: string) {
-  return apiFetch<{ browser_opened: boolean; entry_url: string; profile: AccessProfile }>(`/api/v1/access-profiles/${id}/authenticate`, { method: "POST" });
+  return apiFetch<{ access_cycle_id: string; status: string; access_profile_id: string; profile: AccessProfile }>(`/api/v1/access-profiles/${id}/authenticate`, { method: "POST" });
+}
+
+export async function getAccessCycle(id: string) {
+  const payload = await apiFetch<{ access_cycle: { access_cycle_id: string; access_profile_id: string; status: string; stage: string; error_code?: string | null; error_message?: string | null; events: Array<Record<string, unknown>> } }>(`/api/v1/access-cycles/${id}`);
+  return payload.access_cycle;
 }
 
 export async function createLearningSession() {

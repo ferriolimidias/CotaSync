@@ -13,6 +13,7 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from backend.db import Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, WorkerInstance, engine
+from backend.services.access_cycles import claim_next_access_cycle, execute_access_cycle
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import missing_required_variables, run_action_sync
 from backend.services.actions_repository import find_action
@@ -126,6 +127,7 @@ class PersistentBatchWorker:
         self.stop_event = asyncio.Event()
         self.current_batch_id: str | None = None
         self.current_item_id: str | None = None
+        self.current_access_cycle_id: str | None = None
         self.heartbeat_task: asyncio.Task[None] | None = None
 
     def install_signal_handlers(self) -> None:
@@ -204,6 +206,10 @@ class PersistentBatchWorker:
         try:
             while not self.stop_event.is_set():
                 self.heartbeat("idle")
+                access_cycle_id = claim_next_access_cycle()
+                if access_cycle_id:
+                    await self.execute_access_cycle(access_cycle_id)
+                    continue
                 batch_id = claim_next_batch(self.instance_id)
                 if not batch_id:
                     await asyncio.sleep(poll_seconds())
@@ -222,6 +228,25 @@ class PersistentBatchWorker:
                     row.heartbeat_at = utc_now()
                     row.current_batch_id = None
                     row.current_batch_item_id = None
+
+    async def execute_access_cycle(self, cycle_id: str) -> None:
+        lock = BrowserAdvisoryLock()
+        if not lock.acquire():
+            logger.info("Browser ocupado; ciclo de acesso %s permanece aguardando.", cycle_id)
+            with SessionLocal.begin() as session:
+                from backend.db import AccessCycle
+                cycle = session.get(AccessCycle, cycle_id)
+                if cycle is not None and cycle.status == "running":
+                    cycle.status = "starting"
+            return
+        self.current_access_cycle_id = cycle_id
+        self.heartbeat("access_cycle")
+        try:
+            await execute_access_cycle(cycle_id)
+        finally:
+            self.current_access_cycle_id = None
+            lock.release()
+            self.heartbeat("idle")
 
     async def execute_batch(self, batch_id: str) -> None:
         lock = BrowserAdvisoryLock()

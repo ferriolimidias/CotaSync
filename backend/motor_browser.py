@@ -47,7 +47,7 @@ from backend.services.learned_graph import (
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, classify_microsoft_auth_state, session_failure_message
-from backend.services.access_coordinator import start_canonical_access
+from backend.services.access_cycles import ensure_access_cycle
 from backend.services.start_policy import needs_fresh_external_start, resolve_external_entry_url
 from backend.services.runtime_wait import RuntimeWaitCancelled, RuntimeWaitTerminal, wait_for_runtime_state
 
@@ -1535,7 +1535,7 @@ async def executar_acao_rapida(
                     raise
                 page = connection.page
             if needs_fresh_external_start(run_start_strategy, same_logical_unit=_same_run_reentry):
-                cycle = await start_canonical_access(
+                cycle = await ensure_access_cycle(
                     page,
                     external_system={
                         "id": str(action_config.get("external_system_id") or ""),
