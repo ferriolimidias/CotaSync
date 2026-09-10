@@ -2343,20 +2343,14 @@ class DemoSessionManager:
                 auth_validation_mode=str(external_config.get("validation") or "").strip(),
                 auth_success_text=str(external_config.get("auth_success_text") or "").strip(),
                 auth_success_selector=str(external_config.get("auth_success_selector") or "").strip(),
-                access_profile_name=str(external_config.get("access_profile_name") or "").strip(),
-                access_profile_id=str(external_config.get("access_profile_id") or "").strip(),
-                access_profile_email_or_identifier=str(
-                    external_config.get("access_profile_email_or_identifier") or ""
-                ).strip(),
-                microsoft_saved_account_identifier=str(
-                    external_config.get("microsoft_saved_account_identifier")
-                    or external_config.get("access_profile_email_or_identifier")
-                    or ""
-                ).strip(),
-                microsoft_saved_account_selector=str(
-                    external_config.get("microsoft_saved_account_selector") or ""
-                ).strip(),
-                microsoft_saved_account_text=str(external_config.get("microsoft_saved_account_text") or "").strip(),
+                # Identity is selected by access_profile_id at recording start;
+                # never seed a new session from the legacy global system config.
+                access_profile_name="",
+                access_profile_id="",
+                access_profile_email_or_identifier="",
+                microsoft_saved_account_identifier="",
+                microsoft_saved_account_selector="",
+                microsoft_saved_account_text="",
                 expected_system_host=str(external_config.get("expected_system_host") or "").strip(),
                 microsoft_hosts=(
                     external_config.get("microsoft_hosts")
@@ -3186,6 +3180,11 @@ class DemoSessionManager:
         if profile is not None:
             session.access_profile_name = profile.display_name
             session.access_profile_email_or_identifier = profile.login_identifier
+            # The selected profile is the only account identity used by the
+            # bootstrap. Legacy session fields are derived, never authoritative.
+            session.microsoft_saved_account_identifier = profile.login_identifier
+            session.microsoft_saved_account_selector = ""
+            session.microsoft_saved_account_text = profile.display_name
         session.guided_learning["allowed_list_ids"] = requested_lists
         session.guided_learning["run_start_strategy"] = requested_strategy
         session.steps = []

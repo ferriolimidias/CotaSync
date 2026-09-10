@@ -225,16 +225,12 @@ def _expected_host_matches_current(expected: str, current_host: str) -> bool:
 
 def configured_saved_account_texts(action: Any) -> list[str]:
     configured = [
+        # These fields are Action/session metadata derived from the selected
+        # ExternalAccessProfile. Do not consult process-wide account defaults.
         _metadata(action, "microsoft_saved_account_text", ""),
         _metadata(action, "microsoft_saved_account_identifier", ""),
         _metadata(action, "access_profile_email_or_identifier", ""),
     ]
-    default_text = os.getenv("COTASYNC_MICROSOFT_SAVED_ACCOUNT_TEXT", "").strip()
-    default_email = os.getenv("COTASYNC_MICROSOFT_SAVED_ACCOUNT_EMAIL", "").strip()
-    if default_text:
-        configured.append(default_text)
-    if default_email:
-        configured.append(default_email)
     seen: set[str] = set()
     result: list[str] = []
     for raw in configured:

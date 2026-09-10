@@ -85,6 +85,7 @@ from backend.services.client_lists import ClientListError, create_client_list, l
 from backend.services.client_lists import rename_client_list, set_client_list_access_profile
 from backend.services.access_profiles import (
     AccessProfileError,
+    active_access_profile_public,
     access_profile_public,
     create_access_profile,
     current_external_system_id,
@@ -1555,7 +1556,7 @@ async def access_profile_update(profile_id: str, payload: AccessProfilePatchPayl
 @router.post("/access-profiles/{profile_id}/validate", summary="Valida disponibilidade do perfil no navegador")
 async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        profile = access_profile_public(profile_id)
+        profile = active_access_profile_public(profile_id)
     except AccessProfileError as exc:
         raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
     observation = await browser_observation_service.observe_deep(source="access_profile_validate")
@@ -1571,7 +1572,7 @@ async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(req
 @router.post("/access-profiles/{profile_id}/authenticate", summary="Abre a entrada para autenticação manual do perfil")
 async def access_profile_authenticate(profile_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        profile = access_profile_public(profile_id)
+        profile = active_access_profile_public(profile_id)
     except AccessProfileError as exc:
         raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
     config = load_current_external_system()

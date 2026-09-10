@@ -9,6 +9,15 @@ Violating these invariants is a product regression even when unrelated local
 tests pass. Do not remove or weaken their tests to accommodate a new
 implementation.
 
+## Access Identity Rule
+
+`ExternalSystem -> ExternalAccessProfile -> login_identifier` is the only
+operational source of external identity. There is no operational global
+Microsoft user, login, account-picker position, or process-wide account
+fallback. Configuration and browser actions must use the same selected
+`access_profile_id`; legacy fields may remain only as stored compatibility
+metadata and must not become runtime authority.
+
 ## Required Review Rule
 
 Before changing a logical start, verify the shared start policy and the

@@ -71,6 +71,22 @@ def access_profile_public(profile_id: str, *, tenant_id: str = "default") -> dic
         return _public(row, system_name=system.name if system else "")
 
 
+def active_access_profile_public(profile_id: str, *, tenant_id: str = "default") -> dict[str, Any]:
+    """Return the sole identity context accepted by operational access flows."""
+    with SessionLocal() as db:
+        row = db.scalar(
+            select(ExternalAccessProfile).where(
+                ExternalAccessProfile.id == str(profile_id),
+                ExternalAccessProfile.tenant_id == tenant_id,
+                ExternalAccessProfile.active.is_(True),
+            )
+        )
+        if row is None:
+            raise AccessProfileError("Perfil de acesso não encontrado ou inativo.")
+        system = db.get(ExternalSystem, row.external_system_id)
+        return _public(row, system_name=system.name if system else "")
+
+
 def record_profile_validation(
     profile_id: str,
     *,

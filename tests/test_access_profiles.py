@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import unittest
 from uuid import uuid4
+from unittest.mock import patch
 
 import tests  # noqa: F401
 from backend.db import Action, ActionVersion, ClientList, ExternalSystem, SessionLocal
 from backend.api.v1 import _external_system_config_payload
-from backend.services.access_profiles import AccessProfileError, create_access_profile, list_access_profiles, record_profile_validation, update_access_profile, validate_access_bootstrap
+from backend.services.access_profiles import AccessProfileError, active_access_profile_public, create_access_profile, list_access_profiles, record_profile_validation, update_access_profile, validate_access_bootstrap
 from backend.services.external_systems import load_current_external_system
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 
@@ -82,6 +83,25 @@ class AccessProfileTests(unittest.TestCase):
             db.add(ClientList(id=f"list-{uuid4()}", tenant_id="default", name=f"Lista {uuid4()}", access_profile_id=profile["id"], active=True))
         with self.assertRaises(AccessProfileError):
             update_access_profile(profile["id"], active=False)
+
+    def test_operational_profile_context_rejects_inactive_profile(self) -> None:
+        profile = create_access_profile(external_system_id=self.system_id, display_name="Inactive", login_identifier=f"inactive-{uuid4()}@example.test")
+        update_access_profile(profile["id"], active=False)
+        with self.assertRaises(AccessProfileError):
+            active_access_profile_public(profile["id"])
+
+    def test_account_picker_does_not_use_process_global_identity(self) -> None:
+        from backend.services.session_guardian import configured_saved_account_texts
+
+        with patch.dict("os.environ", {
+            "COTASYNC_MICROSOFT_SAVED_ACCOUNT_EMAIL": "global@example.test",
+            "COTASYNC_MICROSOFT_SAVED_ACCOUNT_TEXT": "Global User",
+        }, clear=False):
+            self.assertEqual(configured_saved_account_texts({}), [])
+            self.assertEqual(
+                configured_saved_account_texts({"access_profile_email_or_identifier": "profile@example.test"}),
+                ["profile@example.test"],
+            )
 
     def test_legacy_global_identifier_is_not_returned_by_new_system_payload(self) -> None:
         config = load_current_external_system()
