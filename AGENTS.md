@@ -60,3 +60,16 @@ client must navigate to that configured URL before access bootstrap. Action
 metadata, legacy login URLs, redirects, residual browser pages, and global
 URLs must never replace it. Entry reset happens once per client/logical unit,
 never between steps or outputs of the same Action.
+
+## Profile Session Isolation
+
+`AUTH_SESSION_ISOLATED_PER_ACCESS_PROFILE` is permanent: authentication
+storage belongs to `ExternalAccessProfile`, never to a global browser
+identity. The same profile may reuse its session; switching profiles must
+activate an isolated session or the provider's controlled storage-clearing
+boundary before access begins.
+
+`VERIFY_EXTERNAL_IDENTITY_BEFORE_ACTION` is also permanent: being inside the
+external system does not prove the correct identity. The access coordinator
+must verify the requested profile before releasing an Action. These rules and
+their tests must not be weakened to accommodate future implementations.

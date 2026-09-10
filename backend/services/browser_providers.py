@@ -35,6 +35,52 @@ class BrowserConnection:
     page: Page
 
 
+class BrowserIdentitySession:
+    """Bind the shared desktop browser to one explicit access profile.
+
+    CDP attaches to the browser's persistent context. Until the provider can
+    expose durable per-profile contexts, switching profiles uses the narrow
+    fallback of clearing authentication storage at that boundary only.
+    """
+
+    _active_profile_by_scope: dict[str, str] = {}
+
+    def __init__(self, context: BrowserContext, access_profile_id: str, *, scope: str = "desktop_browser") -> None:
+        self.context = context
+        self.access_profile_id = str(access_profile_id or "").strip()
+        self.scope = str(scope or "desktop_browser")
+
+    async def activate(self) -> bool:
+        if not self.access_profile_id:
+            raise BrowserProviderError("Access profile obrigatório para sessão de identidade.")
+        previous = self._active_profile_by_scope.get(self.scope)
+        switched = previous is not None and previous != self.access_profile_id
+        if switched:
+            await self._clear_authentication_storage()
+        self._active_profile_by_scope[self.scope] = self.access_profile_id
+        return switched
+
+    async def _clear_authentication_storage(self) -> None:
+        await self.context.clear_cookies()
+        for page in list(getattr(self.context, "pages", [])):
+            if page.is_closed():
+                continue
+            try:
+                await page.evaluate(
+                    """() => {
+                        try { window.localStorage.clear(); } catch (_) {}
+                        try { window.sessionStorage.clear(); } catch (_) {}
+                    }"""
+                )
+            except Exception:
+                continue
+
+
+def reset_browser_identity_sessions() -> None:
+    """Reset the in-process binding marker for isolated test processes."""
+    BrowserIdentitySession._active_profile_by_scope.clear()
+
+
 def normalize_browser_mode(value: Any) -> BrowserMode:
     mode = str(value or "").strip().lower()
     if mode in {"", "desktop_browser"}:

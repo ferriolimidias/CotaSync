@@ -16,7 +16,7 @@ from playwright.async_api import async_playwright
 from backend.db import AccessCycle, ExternalAccessProfile, ExternalSystem, SessionLocal
 from backend.services.access_coordinator import AccessCycleError, start_canonical_access
 from backend.services.access_profiles import active_access_profile_public
-from backend.services.browser_providers import browser_provider
+from backend.services.browser_providers import BrowserIdentitySession, browser_provider, desktop_cdp_url
 
 logger = logging.getLogger("cotasync.access_cycles")
 
@@ -203,6 +203,8 @@ async def execute_access_cycle(cycle_id: str) -> None:
     playwright = await async_playwright().start()
     try:
         connection = await browser_provider("desktop_browser").connect(playwright, f"access-cycle-{cycle_id}")
+        identity_session = BrowserIdentitySession(connection.context, profile.id, scope=desktop_cdp_url())
+        await identity_session.activate()
         timeline = lambda stage, event, status, **context: _append_event(cycle_id, stage, event, status, **context)
         await ensure_access_cycle(
             connection.page,
@@ -210,6 +212,7 @@ async def execute_access_cycle(cycle_id: str) -> None:
                 "id": system.id,
                 "entry_url": cycle.entry_url,
                 "expected_system_host": str(config.get("expected_system_host") or ""),
+                "identity_selector": str(config.get("identity_selector") or ""),
                 "run_start_strategy": str(config.get("run_start_strategy") or "external_entry_each_run"),
             },
             access_profile=profile_data,

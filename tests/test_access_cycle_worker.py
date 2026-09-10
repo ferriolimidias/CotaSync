@@ -140,7 +140,7 @@ def test_first_coordinator_event_is_canonical_entry_navigation():
         stop = AsyncMock()
 
     class _Provider:
-        connect = AsyncMock(return_value=type("Connection", (), {"page": object()})())
+        connect = AsyncMock(return_value=type("Connection", (), {"page": object(), "context": object()})())
 
     async def coordinator(*_args, **kwargs):
         kwargs["timeline"]("external_entry", "CANONICAL_ENTRY_NAVIGATION_STARTED", "started", entry_url="https://entry.example.test")

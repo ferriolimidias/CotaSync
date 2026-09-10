@@ -63,6 +63,20 @@ Configuration, browser authentication, validation, learning, and execution
 must resolve the same `access_profile_id`. A global username, environment
 default, or account-picker ordinal is never a fallback.
 
+## INVARIANT: AUTH_SESSION_ISOLATED_PER_ACCESS_PROFILE
+
+Authentication and session state belong to an `ExternalAccessProfile`, not
+to a global browser identity. The same profile may reuse its session. When
+the desktop CDP provider must switch profiles in its shared persistent
+context, it clears authentication cookies and web storage at that boundary
+before the new access cycle proceeds.
+
+## INVARIANT: VERIFY_EXTERNAL_IDENTITY_BEFORE_ACTION
+
+Being inside the external system is insufficient. The access coordinator
+must verify deterministic identity evidence for the requested profile before
+it reports the system ready and releases an Action.
+
 ## INVARIANT: CANONICAL_ACCESS_FLOW
 
 Authentication, learning, individual execution, and each batch client share

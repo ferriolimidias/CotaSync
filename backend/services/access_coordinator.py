@@ -73,6 +73,24 @@ async def _visible(page: Any, selector: str) -> bool:
         return False
 
 
+async def _identity_evidence(page: Any, profile: dict[str, Any], system: dict[str, Any]) -> bool:
+    """Verify deterministic identity evidence without treating host as identity."""
+    expected = [
+        str(profile.get("login_identifier") or "").strip(),
+        str(profile.get("display_name") or "").strip(),
+    ]
+    expected = [item.casefold() for item in expected if item]
+    selector = str(system.get("identity_selector") or "").strip()
+    if selector:
+        try:
+            observed = str(await page.locator(selector).first.inner_text(timeout=1000)).casefold()
+        except Exception:
+            return False
+        return bool(expected and any(item in observed for item in expected))
+    body = (await _body_text(page)).casefold()
+    return bool(expected and any(item in body for item in expected))
+
+
 @dataclass
 class AccessCycleResult:
     state: str
@@ -296,6 +314,18 @@ class CanonicalAccessCoordinator:
                     cancellation_probe=cancellation_probe,
                     on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
                 )
+            _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFICATION_STARTED", "started", access_profile_id=profile_id)
+            identity_verified = await _identity_evidence(page, profile, system)
+            if not identity_verified and picker["observed"] and selected:
+                identity_verified = True
+            if not identity_verified:
+                _emit(timeline, "access_identity", "ACCESS_IDENTITY_MISMATCH", "failed", access_profile_id=profile_id)
+                raise AccessCycleError(
+                    "A identidade externa ativa não corresponde ao perfil de acesso.",
+                    code="access_identity_mismatch",
+                    stage="access_identity",
+                )
+            _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFIED", "success", access_profile_id=profile_id)
             _emit(timeline, "access", "EXTERNAL_SYSTEM_READY", "success", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
             _emit(timeline, "access", "ACCESS_CYCLE_COMPLETED", "success", access_profile_id=profile_id)
             return AccessCycleResult("external_system_ready", page, effective_entry_url, events, profile_selected=selected)
