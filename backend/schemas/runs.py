@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-RunStatus = Literal["pending", "running", "success", "error"]
+RunStatus = Literal["pending", "running", "success", "error", "cancelled"]
 RunMode = Literal["sync", "async"]
 RunOrigin = Literal["operational", "smoke", "validation", "automated_test", "migration"]
 

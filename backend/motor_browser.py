@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import pandas as pd
 from pydantic import BaseModel, Field
-from playwright.async_api import Browser, async_playwright
+from playwright.async_api import Browser, TimeoutError as PlaywrightTimeoutError, async_playwright
 import requests
 
 from backend.services.action_pages import (
@@ -46,8 +46,9 @@ from backend.services.learned_graph import (
 )
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
-from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
+from backend.services.session_guardian import SessionGuardian, SessionGuardianError, classify_microsoft_auth_state, session_failure_message
 from backend.services.start_policy import needs_fresh_external_start, resolve_external_entry_url
+from backend.services.runtime_wait import RuntimeWaitCancelled, RuntimeWaitTerminal, wait_for_runtime_state
 
 load_dotenv()
 os.makedirs("data", exist_ok=True)
@@ -841,16 +842,54 @@ async def acionar_ia_cartografa(
     }
 
 
-async def verify_postcondition(page: Any, selector: str, step_index: int, *, timeout_ms: int = 15000) -> None:
+async def verify_postcondition(
+    page: Any,
+    selector: str,
+    step_index: int,
+    *,
+    timeout_ms: int = 15000,
+    cancellation_probe: Any | None = None,
+    progress_callback: Any | None = None,
+    terminal_probe: Any | None = None,
+) -> None:
     expected_selector = str(selector or "").strip()
     if not expected_selector:
         return
+    await wait_for_runtime_state(
+        lambda: _visible_locator(page, expected_selector),
+        state_name=f"pós-condição do passo {step_index}",
+        terminal_probe=terminal_probe or (lambda: _page_terminal_state(page)),
+        cancellation_probe=cancellation_probe,
+        on_waiting=progress_callback,
+        probe_timeout_seconds=min(1.0, max(0.1, timeout_ms / 1000)),
+    )
+
+
+async def _visible_locator(page: Any, selector: str) -> Any:
+    locator = page.locator(selector).first
+    if await locator.count() > 0 and await locator.is_visible():
+        return locator
+    return None
+
+
+async def _visible_text(page: Any, text: str) -> Any:
+    locator = page.get_by_text(text, exact=False).first
+    if await locator.count() > 0 and await locator.is_visible():
+        return locator
+    return None
+
+
+async def _page_terminal_state(page: Any) -> Any:
+    if page is None or (hasattr(page, "is_closed") and page.is_closed()):
+        return RuntimeWaitTerminal("browser_unavailable", "O browser deixou de estar disponível durante a espera.")
     try:
-        await page.locator(expected_selector).first.wait_for(state="visible", timeout=timeout_ms)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Pós-condição não alcançada após o passo {step_index}: {expected_selector}"
-        ) from exc
+        body = str(await page.locator("body").inner_text(timeout=500)).casefold()
+    except Exception:
+        return None
+    auth_state = classify_microsoft_auth_state(body)
+    if auth_state in {"password_required", "mfa_required"}:
+        return RuntimeWaitTerminal("reauth_required", "A sessão externa exige reautenticação.")
+    return None
 
 
 async def verify_query_result_refresh(
@@ -862,27 +901,30 @@ async def verify_query_result_refresh(
     before_html: str,
     navigation_observed: bool,
     timeout_ms: int = 15000,
+    cancellation_probe: Any | None = None,
+    progress_callback: Any | None = None,
 ) -> None:
     """Confirma que o resultado pertence a uma atualização posterior ao submit."""
     expected_selector = str(selector or "").strip()
-    deadline = time.monotonic() + (timeout_ms / 1000)
-    while time.monotonic() < deadline:
+    async def probe() -> bool:
+        locator = page.locator(expected_selector).first
+        if await locator.count() <= 0 or not await locator.is_visible():
+            return False
+        current_url = _safe_result_url(str(getattr(page, "url", "") or ""))
+        current_html = ""
         try:
-            locator = page.locator(expected_selector).first
-            if await locator.count() > 0 and await locator.is_visible():
-                current_url = _safe_result_url(str(getattr(page, "url", "") or ""))
-                current_html = ""
-                try:
-                    current_html = str(await locator.evaluate("element => element.outerHTML"))
-                except Exception:
-                    pass
-                if navigation_observed or current_url != before_url or not before_html or current_html != before_html:
-                    return
+            current_html = str(await locator.evaluate("element => element.outerHTML"))
         except Exception:
             pass
-        await asyncio.sleep(0.1)
-    raise RuntimeError(
-        f"Resultado da consulta não foi confirmado após o passo {step_index}: {expected_selector}"
+        return bool(navigation_observed or current_url != before_url or not before_html or current_html != before_html)
+
+    await wait_for_runtime_state(
+        probe,
+        state_name=f"resultado da consulta do passo {step_index}",
+        terminal_probe=lambda: _page_terminal_state(page),
+        cancellation_probe=cancellation_probe,
+        on_waiting=progress_callback,
+        probe_timeout_seconds=min(1.0, max(0.1, timeout_ms / 1000)),
     )
 
 
@@ -970,6 +1012,8 @@ async def executar_acao_rapida(
     *,
     _replan_attempts: int = 0,
     _same_run_reentry: bool = False,
+    cancellation_probe: Any | None = None,
+    progress_callback: Any | None = None,
 ) -> dict:
     """
     Executa uma rotina aprendida sem uso de LLM (Desktop replay), repetindo os passos técnicos.
@@ -1005,6 +1049,16 @@ async def executar_acao_rapida(
         }
 
     action_config = action_config if isinstance(action_config, dict) else {}
+
+    async def runtime_wait(probe: Any, *, state_name: str, terminal_probe: Any | None = None) -> Any:
+        return await wait_for_runtime_state(
+            probe,
+            state_name=state_name,
+            terminal_probe=terminal_probe,
+            cancellation_probe=cancellation_probe,
+            on_waiting=progress_callback,
+        )
+
     browser_mode = normalize_browser_mode(action_config.get("browser_mode") or "desktop_browser")
     graph_mode = graph_metadata_available(action_config)
     provider = browser_provider(browser_mode)
@@ -1418,8 +1472,12 @@ async def executar_acao_rapida(
                         "seletor": selector,
                         "target_text": bootstrap_event.get("target_text"),
                     })
-                    await locator.first.wait_for(state="visible", timeout=15000)
-                    await locator.first.click(timeout=10000)
+                    await runtime_wait(
+                        lambda: _visible_locator(page_to_bootstrap, selector),
+                        state_name=f"bootstrap de acesso {bootstrap_index}",
+                        terminal_probe=lambda: _page_terminal_state(page_to_bootstrap),
+                    )
+                    await locator.first.click(timeout=1000)
                     try:
                         await page_to_bootstrap.wait_for_load_state("domcontentloaded", timeout=10000)
                     except Exception:
@@ -1460,12 +1518,17 @@ async def executar_acao_rapida(
                     status = "success"
                     try:
                         if strategy in {"wait_for_text", "text"} and target:
-                            await page_to_wait.get_by_text(target, exact=False).first.wait_for(
-                                state="visible",
-                                timeout=15000,
+                            await runtime_wait(
+                                lambda: _visible_text(page_to_wait, target),
+                                state_name=f"texto esperado após o passo {step_index}",
+                                terminal_probe=lambda: _page_terminal_state(page_to_wait),
                             )
                         elif strategy in {"wait_for_selector", "selector"} and target:
-                            await page_to_wait.locator(target).first.wait_for(state="visible", timeout=15000)
+                            await runtime_wait(
+                                lambda: _visible_locator(page_to_wait, target),
+                                state_name=f"seletor esperado após o passo {step_index}",
+                                terminal_probe=lambda: _page_terminal_state(page_to_wait),
+                            )
                         elif strategy in {"networkidle", "load_state"}:
                             await page_to_wait.wait_for_load_state("networkidle", timeout=15000)
                         elif strategy in {"delay", "sleep"}:
@@ -1516,7 +1579,15 @@ async def executar_acao_rapida(
                         "A execução exige uma entrada externa configurada.",
                         {"reason": "external_entry_url_missing", "execution_model": "external_entry_each_run"},
                     )
-                await connection.page.goto(entry_url, wait_until="domcontentloaded", timeout=30000)
+                try:
+                    await connection.page.goto(entry_url, wait_until="domcontentloaded", timeout=5000)
+                except PlaywrightTimeoutError:
+                    expected_host = url_host(entry_url)
+                    await runtime_wait(
+                        lambda: bool(expected_host and url_host(str(connection.page.url or "")) == expected_host),
+                        state_name="entrada externa",
+                        terminal_probe=lambda: _page_terminal_state(connection.page),
+                    )
                 step_trace.append(
                     {
                         "event": "entry_navigation",
@@ -1961,10 +2032,11 @@ async def executar_acao_rapida(
                 await run_session_checkpoint(page, "before_step_auth_check", current_step_diagnostic)
 
                 if tipo_acao in ["clicar", "preencher", "extrair_texto", "download_pdf"] and seletor:
-                    try:
-                        await page.locator(seletor).first.wait_for(state="visible", timeout=15000)
-                    except Exception:
-                        logging.debug(f"[DESKTOP-REPLAY] Timeout de visibilidade para {seletor}. Tentando fallback...")
+                    await runtime_wait(
+                        lambda: _visible_locator(page, seletor),
+                        state_name=f"seletor do passo {step_index}",
+                        terminal_probe=lambda: _page_terminal_state(page),
+                    )
 
                 try:
                     if tipo_acao == "clicar":
@@ -2114,12 +2186,20 @@ async def executar_acao_rapida(
                             before_url=query_before_url,
                             before_html=query_before_html,
                             navigation_observed=navigation_observed,
+                            cancellation_probe=cancellation_probe,
+                            progress_callback=progress_callback,
                         )
                         if client_field_keys and client_field_keys.issubset(filled_client_field_keys):
                             query_transition_confirmed = True
                             query_transition_step_index = step_index
                     elif expected_selector and tipo_acao != "extrair_texto":
-                        await verify_postcondition(page, expected_selector, step_index)
+                        await verify_postcondition(
+                            page,
+                            expected_selector,
+                            step_index,
+                            cancellation_probe=cancellation_probe,
+                            progress_callback=progress_callback,
+                        )
                     if is_client_query_transition:
                         # The learned next-step postcondition (or a navigation)
                         # proves that the query transition happened. Intermediate

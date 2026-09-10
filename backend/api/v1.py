@@ -1187,6 +1187,17 @@ async def runs_get(run_id: str, _user: AuthUser = Depends(require_user)) -> dict
     return {"status": "ok", "run": run.model_dump()}
 
 
+@router.post("/runs/{run_id}/cancel", summary="Cancela uma execução em andamento")
+async def runs_cancel(run_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    with SessionLocal.begin() as session:
+        row = session.get(DbRun, str(run_id))
+        if row is None:
+            raise _error(404, "RUN_NOT_FOUND", "Execucao nao encontrada.")
+        if row.status in {"pending", "running"}:
+            row.status = "cancelled"
+    return {"status": "cancelled", "run_id": str(run_id)}
+
+
 @router.get("/learning/capabilities", summary="Capacidades de aprendizado")
 async def learning_capabilities(_user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     return {

@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -502,9 +502,6 @@ function ExecucaoPage() {
                   )}
                   {batch.status === "interrupted" && attentionItem && (
                     <>
-                      <Button asChild variant="outline" size="sm">
-                        <Link to="/configuracoes/navegador">Abrir navegador</Link>
-                      </Button>
                       <Button
                         size="sm"
                         disabled={!batchId || resume.isPending}
@@ -587,9 +584,11 @@ function RunProgress({ run, loading }: { run: ApiRun; loading: boolean }) {
       </div>
       <p className="mt-2 text-xs text-muted-foreground">
         {run.status === "pending" && "A execução entrou na fila."}
-        {run.status === "running" && "O sistema está operando no navegador."}
+        {run.status === "running" && (run.result_payload?.wait_status === "waiting_external_system" ? `Aguardando o sistema${run.result_payload.wait_target ? `: ${run.result_payload.wait_target}` : "..."}` : "O sistema está operando no navegador.")}
         {run.status === "success" && "Execução concluída."}
         {run.status === "error" && (run.error_message || "Execução finalizada com erro.")}
+        {run.status === "cancel_requested" && "Cancelamento solicitado."}
+        {run.status === "cancelled" && "Execução cancelada."}
       </p>
     </div>
   );

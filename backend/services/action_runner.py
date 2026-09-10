@@ -13,11 +13,12 @@ from uuid import uuid4
 
 from backend.schemas.actions import ActionDetail
 from backend.schemas.runs import ActionRunRequest, RunRecord
-from backend.db import Action as DbAction, ActionVersion, Client, ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
+from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, Client, ClientList, ExternalAccessProfile, ExternalSystem, Run as DbRun, SessionLocal
 from backend.services.action_pages import expected_action_hosts, validate_action_page_url
 from backend.services.actions_repository import enrich_action_access_profile
 from backend.services.learned_graph import canonicalize_graph_metadata
 from backend.services.operational_summary import build_operational_summary_result, build_technical_summary
+from backend.services.runtime_wait import RuntimeWaitCancelled
 from backend.services.runs_repository import (
     append_run,
     persist_terminal_run_fallback,
@@ -285,6 +286,21 @@ def _is_desktop_learned_action(action: ActionDetail) -> bool:
     )
 
 
+def _runtime_cancellation_probe(run_id: str, batch_id: str | None) -> Any:
+    async def probe() -> bool:
+        with SessionLocal() as session:
+            if session.get(DbRun, str(run_id)) is not None:
+                run_row = session.get(DbRun, str(run_id))
+                if run_row and run_row.status in {"cancel_requested", "cancelled"}:
+                    return True
+            if batch_id:
+                batch = session.get(DbBatch, str(batch_id))
+                return bool(batch and (batch.cancel_requested or batch.status in {"cancel_requested", "cancelled"}))
+            return False
+
+    return probe
+
+
 def _load_action_config(action: ActionDetail) -> dict[str, Any]:
     try:
         with SessionLocal() as session:
@@ -329,6 +345,9 @@ async def _run_desktop_browser_replay(
     action: ActionDetail,
     variables: dict[str, Any],
     run_id: str,
+    *,
+    batch_id: str | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     from backend.motor_browser import executar_acao_rapida
 
@@ -345,6 +364,8 @@ async def _run_desktop_browser_replay(
         variables,
         action_config=action_config,
         run_id=run_id,
+        cancellation_probe=_runtime_cancellation_probe(run_id, batch_id),
+        progress_callback=progress_callback,
     )
     result["runner"] = "desktop_browser_replay"
     result["browser_mode"] = "desktop_browser"
@@ -619,7 +640,21 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             runner_used = "desktop_browser_replay"
             browser_mode_used = "desktop_browser"
             whether_desktop_browser_used = True
-            result = await _run_desktop_browser_replay(action, request.variables, run.id)
+            async def report_waiting(status: str) -> None:
+                run.result_payload = {
+                    "wait_status": "waiting_external_system",
+                    "wait_target": status,
+                    "run_id": run.id,
+                }
+                update_run(run)
+
+            result = await _run_desktop_browser_replay(
+                action,
+                request.variables,
+                run.id,
+                batch_id=request.batch_id,
+                progress_callback=report_waiting,
+            )
             text = str(result.get("texto") or result.get("motivo") or "").strip()
             execution_status = str(result.get("status") or "").strip().lower()
             if execution_status in {"erro", "error"} or text.startswith("❌") or "Falha" in text or "falha" in text:
@@ -652,7 +687,7 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
     except Exception as exc:
         safe_error = _safe_error_message(exc)
         logger.info("Run %s finalizada com erro do tipo %s", run.id, type(exc).__name__)
-        run.status = "error"
+        run.status = "cancelled" if isinstance(exc, RuntimeWaitCancelled) else "error"
         run.error_message = safe_error
         diagnostics = getattr(exc, "diagnostics", None)
         if isinstance(diagnostics, dict):

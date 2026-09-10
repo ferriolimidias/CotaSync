@@ -131,7 +131,7 @@ export type ApiRun = {
   id: string;
   action_id: string;
   action_key: string;
-  status: "pending" | "running" | "success" | "error";
+  status: "pending" | "running" | "success" | "error" | "cancelled" | "cancel_requested";
   mode: "sync" | "async";
   run_origin: string;
   requested_by: string;
@@ -142,6 +142,7 @@ export type ApiRun = {
   result_summary?: string | null;
   operational_summary?: string | null;
   error_message?: string | null;
+  result_payload?: { wait_status?: string; wait_target?: string } | null;
 };
 
 export type WorkerStatus = {

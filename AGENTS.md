@@ -23,3 +23,7 @@ metadata and must not become runtime authority.
 Before changing a logical start, verify the shared start policy and the
 invariant tests. A residual Chromium page is never valid evidence for the
 initial state of a new logical unit.
+
+External-system latency must be handled by state-driven waiting. A wall-clock
+locator/navigation probe timeout is not a logical Run failure. Runtime waits
+must continue polling with cancellation and terminal browser/auth checks.

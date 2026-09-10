@@ -1,7 +1,7 @@
 export function runStatusLabel(status: string) {
   return (
     (
-      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila", needs_attention: "Aguardando atenção" } as Record<
+      { success: "Concluído", error: "Erro", running: "Executando", pending: "Na fila", cancelled: "Cancelado", cancel_requested: "Cancelamento solicitado", needs_attention: "Aguardando atenção" } as Record<
         string,
         string
       >

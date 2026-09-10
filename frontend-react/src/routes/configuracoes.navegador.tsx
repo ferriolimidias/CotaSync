@@ -28,7 +28,7 @@ function BrowserWorkspacePage() {
   const profile = profiles.data?.find((item) => item.id === accessProfileId && item.active);
   const systemName = external.data?.external_system_name || "Navegador externo";
 
-  if (!accessProfileId || (profiles.isFetched && !profile)) {
+  if (!accessProfileId || profiles.isLoading || !profile) {
     return (
       <main className="grid min-h-dvh place-items-center bg-muted/30 p-6">
         <section className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-sm">
@@ -46,7 +46,7 @@ function BrowserWorkspacePage() {
         accessButtonLabel="Renovar acesso"
         autoOpen
         resizeMode="scale"
-        title={`${systemName} · ${profile.display_name}`}
+        title={`${systemName} · ${profile!.display_name}`}
         variant="workspace"
         leading={
           <Button size="sm" variant="ghost" asChild>

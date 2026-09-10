@@ -565,10 +565,18 @@ class SessionGuardianTests(unittest.TestCase):
         self.assertEqual(unknown_observation["workflow_state"], "unknown")
         self.assertEqual(unknown_observation["reason"], "unknown_browser_state")
 
-    def test_postcondition_failure_stops_transition(self) -> None:
+    def test_postcondition_terminal_state_stops_transition(self) -> None:
         page = FakeGuardianPage(TARGET_URL, "Consulta", visible_selectors=set())
-        with self.assertRaisesRegex(RuntimeError, "Pós-condição não alcançada"):
-            asyncio.run(verify_postcondition(page, "#next", 3, timeout_ms=1))
+        with self.assertRaisesRegex(RuntimeError, "browser indisponível"):
+            asyncio.run(
+                verify_postcondition(
+                    page,
+                    "#next",
+                    3,
+                    timeout_ms=1,
+                    terminal_probe=lambda: ("browser_unavailable", "browser indisponível"),
+                )
+            )
 
     def test_m365_host_classifies_as_unknown_microsoft_auth_not_empty(self) -> None:
         page = FakeGuardianPage("https://m365.cloud.microsoft/", "", title="Microsoft 365")

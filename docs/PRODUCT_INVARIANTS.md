@@ -48,6 +48,15 @@ Configuration, browser authentication, validation, learning, and execution
 must resolve the same `access_profile_id`. A global username, environment
 default, or account-picker ordinal is never a fallback.
 
+## INVARIANT: STATE_DRIVEN_WAITING
+
+External system latency must not determine execution failure. CotaSync waits
+for learned or expected state transitions continuously. Wall-clock locator or
+navigation probe timeouts are technical probe expirations, not logical Run
+failures. Execution ends only on success, explicit cancellation, or a
+recognized terminal condition such as an unavailable browser or required
+reauthentication.
+
 ## Regression Rule
 
 Do not weaken or remove tests for these invariants to accommodate another
