@@ -569,7 +569,7 @@ def start_action_run(
         profile = session.get(ExternalAccessProfile, profile_id) if profile_id else None
         if version and version.run_start_strategy == "external_entry_each_run" and not version.required_access_profile_id:
             raise RuntimeError("REQUIRED_ACCESS_PROFILE_UNAVAILABLE: a versão publicada não possui perfil vinculado.")
-        if version and version.required_access_profile_id and profile is None:
+        if version and version.required_access_profile_id and (profile is None or not profile.active):
             raise RuntimeError("REQUIRED_ACCESS_PROFILE_UNAVAILABLE: o perfil de acesso exigido pela Action não está disponível.")
         external_system = session.get(ExternalSystem, profile.external_system_id) if profile else None
         run.access_profile_id = profile.id if profile else None

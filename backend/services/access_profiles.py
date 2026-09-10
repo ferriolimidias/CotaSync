@@ -8,12 +8,66 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from backend.db import ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
+from backend.db import (
+    AccessCycle,
+    Action,
+    ActionVersion,
+    Batch,
+    ClientList,
+    ExternalAccessProfile,
+    ExternalSystem,
+    LearningSession,
+    Run,
+    SessionLocal,
+)
+from backend.services.browser_providers import remove_browser_identity_storage
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
 
 
 class AccessProfileError(ValueError):
     pass
+
+
+def delete_access_profile(profile_id: str, *, tenant_id: str = "default") -> dict[str, Any]:
+    """Delete an unused profile or retire it while preserving history."""
+    profile_id = str(profile_id or "").strip()
+    if not profile_id:
+        raise AccessProfileError("Perfil de acesso não encontrado.")
+    references: dict[str, bool] = {}
+    with SessionLocal.begin() as db:
+        profile = db.scalar(
+            select(ExternalAccessProfile).where(
+                ExternalAccessProfile.id == profile_id,
+                ExternalAccessProfile.tenant_id == tenant_id,
+            )
+        )
+        if profile is None:
+            raise AccessProfileError("Perfil de acesso não encontrado.")
+
+        checks = (
+            ("client_lists", ClientList, ClientList.access_profile_id == profile_id),
+            ("actions", Action, Action.required_access_profile_id == profile_id),
+            ("action_versions", ActionVersion, ActionVersion.required_access_profile_id == profile_id),
+            ("runs", Run, Run.access_profile_id == profile_id),
+            ("batches", Batch, Batch.access_profile_id == profile_id),
+            ("learning_sessions", LearningSession, LearningSession.access_profile_id == profile_id),
+            ("access_cycles", AccessCycle, AccessCycle.access_profile_id == profile_id),
+        )
+        for name, model, criterion in checks:
+            references[name] = db.scalar(select(model.id).where(criterion).limit(1)) is not None
+        referenced = any(references.values())
+        if referenced:
+            profile.active = False
+            profile.validation_status = "retired"
+            profile.last_validated_at = datetime.now(UTC)
+            profile.last_validation_reason = "profile_retired"
+            result = {"status": "retired", "profile": _public(profile), "referenced": references}
+        else:
+            db.delete(profile)
+            result = {"status": "deleted", "profile_id": profile_id, "referenced": references}
+    # Storage is independent of the database transaction and is always scoped by hash.
+    remove_browser_identity_storage(profile_id)
+    return result
 
 
 def current_external_system_id() -> str | None:

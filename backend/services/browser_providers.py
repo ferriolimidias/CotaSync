@@ -25,6 +25,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 _CONFIG_PATH = _ROOT / "data" / "browser_config.json"
 
 
+def _profile_storage_path(access_profile_id: str, storage_root: str | Path) -> Path:
+    digest = hashlib.sha256(access_profile_id.encode("utf-8")).hexdigest()[:32]
+    return Path(storage_root) / f"{digest}.json"
+
+
 class BrowserProviderError(RuntimeError):
     """Falha operacional segura ao selecionar ou conectar um provider."""
 
@@ -58,8 +63,7 @@ class BrowserIdentitySession:
 
     @property
     def storage_path(self) -> Path:
-        digest = hashlib.sha256(self.access_profile_id.encode("utf-8")).hexdigest()[:32]
-        return self.storage_root / f"{digest}.json"
+        return _profile_storage_path(self.access_profile_id, self.storage_root)
 
     async def activate(self) -> bool:
         if not self.access_profile_id:
@@ -92,6 +96,28 @@ class BrowserIdentitySession:
             return
         self.storage_root.mkdir(parents=True, exist_ok=True)
         await self.profile_context.storage_state(path=str(self.storage_path))
+
+
+def remove_browser_identity_storage(access_profile_id: str, *, storage_root: str | Path | None = None) -> bool:
+    """Remove only the storage-state file owned by one profile.
+
+    The filename is derived from the profile id, never accepted as a path.
+    This keeps deletion scoped even when the caller receives user input.
+    """
+    profile_id = str(access_profile_id or "").strip()
+    if not profile_id:
+        return False
+    root = Path(storage_root or os.getenv("COTASYNC_ACCESS_PROFILE_STORAGE_DIR", "/data/access_profiles"))
+    path = _profile_storage_path(profile_id, root)
+    resolved_root = root.resolve()
+    resolved_path = path.resolve()
+    if resolved_path.parent != resolved_root:
+        raise BrowserProviderError("Storage de perfil inválido.")
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 def supports_isolated_browser_contexts(browser: Any) -> bool:
     return browser is not None and callable(getattr(browser, "new_context", None))

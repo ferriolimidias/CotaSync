@@ -648,6 +648,10 @@ export async function authenticateAccessProfile(id: string) {
   return apiFetch<{ access_cycle_id: string; status: string; access_profile_id: string; profile: AccessProfile }>(`/api/v1/access-profiles/${id}/authenticate`, { method: "POST" });
 }
 
+export async function deleteAccessProfile(id: string) {
+  return apiFetch<{ status: "deleted" | "retired"; profile_id?: string; profile?: AccessProfile }>(`/api/v1/access-profiles/${id}`, { method: "DELETE" });
+}
+
 export async function getAccessCycle(id: string) {
   const payload = await apiFetch<{ access_cycle: { access_cycle_id: string; access_profile_id: string; status: string; stage: string; error_code?: string | null; error_message?: string | null; events: Array<Record<string, unknown>> } }>(`/api/v1/access-cycles/${id}`);
   return payload.access_cycle;

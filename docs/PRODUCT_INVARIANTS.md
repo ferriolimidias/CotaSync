@@ -140,3 +140,14 @@ For `external_entry_each_run`, `MAIN_GRAPH_STARTED` must follow
 Do not weaken or remove tests for these invariants to accommodate another
 implementation. Any violation is a product regression, even when tests for
 an unrelated feature pass.
+
+## INVARIANT: ACCESS_PROFILE_DELETION_PRESERVES_REFERENTIAL_INTEGRITY
+
+Deleting an `ExternalAccessProfile` must never silently rebind or destroy
+published `ActionVersion` records. Referenced profiles are retired from
+operational use while historical references remain intact. Usable profile
+credentials and profile-owned browser storage are removed. Executions that
+require an unavailable profile fail closed with
+`REQUIRED_ACCESS_PROFILE_UNAVAILABLE`; no other profile or current browser
+identity may be substituted. An unreferenced profile may be physically
+deleted only after all historical references are checked.

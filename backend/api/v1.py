@@ -90,6 +90,7 @@ from backend.services.access_profiles import (
     access_profile_public,
     create_access_profile,
     current_external_system_id,
+    delete_access_profile,
     list_access_profiles,
     record_profile_validation,
     update_access_profile,
@@ -1554,6 +1555,14 @@ async def access_profile_update(profile_id: str, payload: AccessProfilePatchPayl
     except AccessProfileError as exc:
         raise _error(409, "ACCESS_PROFILE_UPDATE_BLOCKED", str(exc)) from exc
     return {"status": "ok", "profile": profile}
+
+
+@router.delete("/access-profiles/{profile_id}", summary="Exclui ou retira um perfil de acesso externo")
+async def access_profile_delete(profile_id: str, _admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        return delete_access_profile(profile_id)
+    except AccessProfileError as exc:
+        raise _error(409, "ACCESS_PROFILE_DELETE_BLOCKED", str(exc)) from exc
 
 
 @router.post("/access-profiles/{profile_id}/validate", summary="Valida disponibilidade do perfil no navegador")

@@ -65,7 +65,13 @@ def preflight_action_execution(
         if client is not None and not list_row:
             return {"ok": False, "code": "client_context_missing", "message": "Este cliente ainda não possui uma lista configurada."}
         profile = db.get(ExternalAccessProfile, profile_id) if profile_id else None
-        if not profile_id or profile is None or not profile.active:
+        if profile_id and (profile is None or not profile.active):
+            return {
+                "ok": False,
+                "code": "required_access_profile_unavailable",
+                "message": "Esta ação foi aprendida com um usuário de acesso que não está mais disponível.",
+            }
+        if not profile_id:
             return {"ok": False, "code": "access_profile_required", "message": "A ação precisa de um acesso ativo."}
         system = db.get(ExternalSystem, profile.external_system_id)
         if system is None:

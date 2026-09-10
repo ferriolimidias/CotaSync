@@ -33,6 +33,17 @@ whether it reached external entry, access bootstrap, main action, output, or a
 terminal result. Do not remove the ordering events or log credentials, tokens,
 cookies, OAuth query strings, or secret field values.
 
+## Profile Deletion Rule
+
+`ACCESS_PROFILE_DELETION_PRESERVES_REFERENTIAL_INTEGRITY` is permanent:
+deleting an `ExternalAccessProfile` must never silently rebind or destroy
+published `ActionVersion` records. A referenced profile is retired from
+operational use while historical references remain intact, its usable
+credentials and profile-owned browser storage are removed, and executions
+requiring it fail closed with `REQUIRED_ACCESS_PROFILE_UNAVAILABLE`.
+An unreferenced profile may be physically deleted only after all historical
+references are checked. Storage cleanup must remain scoped to that profile.
+
 ## Canonical Access Flow
 
 Authentication, learning, individual execution, and every batch client must
