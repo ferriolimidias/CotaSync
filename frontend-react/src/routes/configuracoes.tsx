@@ -1,4 +1,4 @@
-import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
+import { Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -15,7 +15,6 @@ import {
   getExternalSessionStatus,
   getExternalSystemConfig,
   saveExternalSystemConfig,
-  validateExternalSession,
   getLearningAISettings,
   removeLearningAIKey,
   saveLearningAISettings,
@@ -107,18 +106,6 @@ function ConfigPage() {
         error instanceof Error ? error.message : "Não foi possível salvar a configuração.",
       ),
   });
-  const validate = useMutation({
-    mutationFn: validateExternalSession,
-    onSuccess: (result) => {
-      void queryClient.invalidateQueries({ queryKey: ["access-profiles"] });
-      toast.success(result.external_session?.microsoft_status === "available" ? "Acessos verificados. Microsoft disponível." : result.configuration_valid ? "Configuração verificada; o acesso Microsoft precisa de atenção." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
-      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    },
-    onError: (error) =>
-      toast.error(error instanceof Error ? error.message : "Não foi possível validar a sessão."),
-  });
-
   useEffect(() => {
     if (externalConfig.data) {
       setForm({
@@ -304,7 +291,7 @@ function ConfigPage() {
                       <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div><div className="mt-1 text-xs text-muted-foreground">Microsoft: {statusLabel}{validatedLabel}</div></div>
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => { queryClient.setQueryData<AccessProfile[]>(["access-profiles"], (current) => (current || []).map((item) => item.id === result.profile.id ? result.profile : item)); result.available ? toast.success("Conta disponível no navegador.") : result.profile.validation_status === "reauth_required" ? toast.warning("Faça a autenticação manual no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual."); }).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
-                        <Button type="button" size="sm" onClick={() => authenticateAccessProfile(profile.id).then(() => { toast.success(`Entrada aberta para ${profile.display_name}. Conclua a autenticação manual no navegador.`); void navigate({ to: "/configuracoes/navegador" }); }).catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível abrir a autenticação do perfil."))} disabled={!loginConfigured}><ExternalLink className="h-4 w-4" /> Autenticar</Button>
+                        <Button type="button" size="sm" onClick={() => authenticateAccessProfile(profile.id).then(() => { toast.success(`Entrada aberta para ${profile.display_name}. Conclua a autenticação manual no navegador.`); void navigate({ to: "/configuracoes/navegador", search: { access_profile_id: profile.id } }); }).catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível abrir a autenticação do perfil."))} disabled={!loginConfigured}><ExternalLink className="h-4 w-4" /> Autenticar</Button>
                       </div>
                     </div>
                     );
@@ -318,21 +305,6 @@ function ConfigPage() {
               </div>
             )}
 
-            <div className="flex flex-col gap-2 border-t border-border pt-4 sm:flex-row sm:flex-wrap">
-              <Button className="w-full sm:w-auto" asChild>
-                <Link to="/configuracoes/navegador">
-                  <ExternalLink className="h-4 w-4" /> Abrir navegador
-                </Link>
-              </Button>
-              <Button
-                className="w-full sm:w-auto"
-                variant="outline"
-                onClick={() => validate.mutate()}
-                disabled={validate.isPending}
-              >
-                <ShieldCheck className="h-4 w-4" /> Verificar acessos
-              </Button>
-            </div>
           </CardContent>
         </Card>
 

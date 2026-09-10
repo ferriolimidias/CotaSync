@@ -1,20 +1,23 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ShieldCheck } from "lucide-react";
-import { toast } from "sonner";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowLeft } from "lucide-react";
 
 import { BadgeStatus } from "@/components/cotasync/BadgeStatus";
 import { BrowserWorkspace } from "@/components/cotasync/BrowserWorkspace";
 import { Button } from "@/components/ui/button";
-import { getExternalSessionStatus, validateExternalSession } from "@/services/api";
+import { getExternalSessionStatus, listAccessProfiles } from "@/services/api";
 
 export const Route = createFileRoute("/configuracoes/navegador")({
   head: () => ({ meta: [{ title: "Navegador — CotaSync" }] }),
+  validateSearch: (search) => ({
+    access_profile_id: typeof search.access_profile_id === "string" ? search.access_profile_id : "",
+  }),
   component: BrowserWorkspacePage,
 });
 
 function BrowserWorkspacePage() {
-  const queryClient = useQueryClient();
+  const { access_profile_id: accessProfileId } = Route.useSearch();
+  const profiles = useQuery({ queryKey: ["access-profiles"], queryFn: listAccessProfiles, retry: 1 });
   const external = useQuery({
     queryKey: ["external-session"],
     queryFn: getExternalSessionStatus,
@@ -22,19 +25,20 @@ function BrowserWorkspacePage() {
     refetchOnWindowFocus: true,
     retry: 1,
   });
-  const validate = useMutation({
-    mutationFn: validateExternalSession,
-    onSuccess: (result) => {
-      void queryClient.invalidateQueries({ queryKey: ["access-profiles"] });
-      if (result.external_session) queryClient.setQueryData(["external-session"], result.external_session);
-      toast.success(result.external_session?.microsoft_status === "available" ? "Acessos verificados. Microsoft disponível." : result.configuration_valid ? "Configuração verificada; o acesso Microsoft precisa de atenção." : `Configuração incompleta: ${(result.configuration?.missing_fields || []).join(", ") || "verifique os campos técnicos."}.`);
-      void queryClient.invalidateQueries({ queryKey: ["external-session"] });
-      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-    },
-    onError: (error) =>
-      toast.error(error instanceof Error ? error.message : "Não foi possível validar a sessão."),
-  });
+  const profile = profiles.data?.find((item) => item.id === accessProfileId && item.active);
   const systemName = external.data?.external_system_name || "Navegador externo";
+
+  if (!accessProfileId || (profiles.isFetched && !profile)) {
+    return (
+      <main className="grid min-h-dvh place-items-center bg-muted/30 p-6">
+        <section className="w-full max-w-md rounded-lg border border-border bg-card p-6 shadow-sm">
+          <h1 className="text-base font-semibold">Selecione um perfil de acesso</h1>
+          <p className="mt-2 text-sm text-muted-foreground">Abra o navegador pelo botão Autenticar de um perfil ativo em Configurações.</p>
+          <Button className="mt-4" asChild><Link to="/configuracoes"><ArrowLeft className="h-4 w-4" /> Voltar para Configurações</Link></Button>
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-muted/30">
@@ -42,7 +46,7 @@ function BrowserWorkspacePage() {
         accessButtonLabel="Renovar acesso"
         autoOpen
         resizeMode="scale"
-        title={systemName}
+        title={`${systemName} · ${profile.display_name}`}
         variant="workspace"
         leading={
           <Button size="sm" variant="ghost" asChild>
@@ -60,16 +64,6 @@ function BrowserWorkspacePage() {
               Sistema: {external.data?.external_system_status === "inside" ? "Dentro" : "Fora do sistema"}
             </BadgeStatus>
           </div>
-        }
-        actions={
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => validate.mutate()}
-            disabled={validate.isPending}
-          >
-            <ShieldCheck className="h-4 w-4" /> Verificar acessos
-          </Button>
         }
       />
     </main>
