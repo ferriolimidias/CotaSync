@@ -1539,7 +1539,7 @@ async def executar_acao_rapida(
                     page,
                     external_system={
                         "id": str(action_config.get("external_system_id") or ""),
-                        "entry_url": str(action_config.get("entry_url") or action_config.get("url_inicial") or ""),
+                        "entry_url": str(action_config.get("entry_url") or ""),
                         "expected_system_host": str(action_config.get("expected_system_host") or ""),
                         "run_start_strategy": run_start_strategy,
                     },

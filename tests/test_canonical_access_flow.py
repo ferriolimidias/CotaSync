@@ -47,8 +47,10 @@ class _Page:
         self.url = "https://external.example.test/old-result"
         self.body = "old result"
         self.visible_selectors = set()
+        self.goto_urls = []
 
     async def goto(self, url, **_kwargs):
+        self.goto_urls.append(url)
         self.url = url
         self.body = "Pick an account\nworker@example.test\nSigned in"
         self.visible_selectors = set()
@@ -154,6 +156,72 @@ def test_microsoft_entry_forces_picker_without_dropping_oauth_parameters():
     assert "login_hint" not in result
     for required in ("client_id=c", "redirect_uri=https%3A%2F%2Fapp.test%2Fcb", "scope=a", "response_type=code", "state=s"):
         assert required in result
+
+
+def test_canonical_entry_ignores_action_navigation_metadata():
+    page = _Page()
+    events = []
+    asyncio.run(
+        start_canonical_access(
+            page,
+            external_system={
+                "entry_url": "https://configured.example.test/entry",
+                "expected_system_host": "external.example.test",
+                "run_start_strategy": "external_entry_each_run",
+            },
+            access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+            action={"entry_url": "https://m365.cloud.microsoft/residual", "url_inicial": "https://wrong.example.test"},
+            timeline=lambda _stage, event, _status, **context: events.append((event, context)),
+            require_external_system=False,
+        )
+    )
+    assert page.goto_urls[0] == "https://configured.example.test/entry"
+    started = next(context for event, context in events if event == "CANONICAL_ENTRY_NAVIGATION_STARTED")
+    assert started["canonical_entry_url_source"] == "ExternalSystem.entry_url"
+
+
+def test_missing_configured_entry_does_not_fallback_to_action_url():
+    page = _Page()
+    try:
+        asyncio.run(
+            start_canonical_access(
+                page,
+                external_system={"run_start_strategy": "external_entry_each_run"},
+                access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+                action={"entry_url": "https://m365.cloud.microsoft/residual"},
+            )
+        )
+    except Exception as exc:
+        assert getattr(exc, "code", "") == "entry_url_missing"
+    else:
+        raise AssertionError("A ação não pode fornecer a entry URL do sistema")
+
+
+def test_batch_clients_each_get_one_entry_and_outputs_do_not_restart_entry():
+    pages = [_Page(), _Page(), _Page()]
+    for page in pages:
+        asyncio.run(
+            start_canonical_access(
+                page,
+                external_system={"entry_url": "https://configured.example.test/entry", "run_start_strategy": "external_entry_each_run"},
+                access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+                action={},
+                require_external_system=False,
+            )
+        )
+    assert [len(page.goto_urls) for page in pages] == [1, 1, 1]
+
+    same_client = _Page()
+    asyncio.run(
+        start_canonical_access(
+            same_client,
+            external_system={"entry_url": "https://configured.example.test/entry", "run_start_strategy": "external_entry_each_run"},
+            access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+            action={},
+            require_external_system=False,
+        )
+    )
+    assert len(same_client.goto_urls) == 1
 
 
 def test_direct_consent_is_restarted_until_picker_is_observed():

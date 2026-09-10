@@ -29,6 +29,21 @@ The authoritative code policy is
 `backend/services/start_policy.py`. The `external_entry_each_run` strategy
 requires an active access profile and a configured entry URL.
 
+## INVARIANT: CANONICAL_EXTERNAL_ENTRY_URL
+
+`ExternalSystem.entry_url` is the single source of truth for the beginning
+of every new logical unit. Learning, individual Runs, and each new batch
+client must begin by navigating to that configured URL. Browser residual
+state, action `url_inicial`, legacy login metadata, redirect URLs, and global
+authentication URLs must not replace it.
+
+## INVARIANT: ENTRY_RESET_PER_CLIENT_NOT_PER_OUTPUT
+
+Entry reset occurs once per new client or logical unit, never between steps
+or multiple outputs belonging to the same Action and client. A batch with N
+clients performs N entry navigations, independently of the number of outputs
+per client.
+
 ## INVARIANT: ACCESS_BOOTSTRAP_SEPARATION
 
 Access bootstrap and the main Action graph are different contexts.

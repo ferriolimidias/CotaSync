@@ -51,3 +51,12 @@ pass. See `docs/PRODUCT_INVARIANTS.md` for the permanent specification.
 A new Microsoft access cycle is not valid unless the Account Picker is
 actually presented and the configured `ExternalAccessProfile` is explicitly
 selected during that cycle.
+
+## Canonical Entry URL Rule
+
+`ExternalSystem.entry_url` is the only navigation source for the beginning
+of every new logical unit. Learning, individual Runs, and each new batch
+client must navigate to that configured URL before access bootstrap. Action
+metadata, legacy login URLs, redirects, residual browser pages, and global
+URLs must never replace it. Entry reset happens once per client/logical unit,
+never between steps or outputs of the same Action.

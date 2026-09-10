@@ -114,7 +114,7 @@ class CanonicalAccessCoordinator:
         strategy = str(config.get("run_start_strategy") or system.get("run_start_strategy") or EXTERNAL_ENTRY_EACH_RUN).strip()
         profile_id = str(profile.get("id") or config.get("required_access_profile_id") or "").strip()
         identifier = str(profile.get("login_identifier") or config.get("access_profile_email_or_identifier") or "").strip()
-        entry_url = resolve_external_entry_url(system, config)
+        entry_url = resolve_external_entry_url(system)
         effective_entry_url = build_microsoft_entry_url(entry_url)
         context = validate_fresh_start_context(
             strategy=strategy,
@@ -136,7 +136,15 @@ class CanonicalAccessCoordinator:
 
         _emit(timeline, "access", "ACCESS_CYCLE_STARTED", "started", access_profile_id=profile_id)
         try:
-            _emit(timeline, "external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=effective_entry_url)
+            _emit(
+                timeline,
+                "external_entry",
+                "CANONICAL_ENTRY_NAVIGATION_STARTED",
+                "started",
+                canonical_entry_url_source="ExternalSystem.entry_url",
+                entry_url=entry_url,
+            )
+            _emit(timeline, "external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=entry_url)
             try:
                 await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
             except Exception:
@@ -148,6 +156,16 @@ class CanonicalAccessCoordinator:
                     cancellation_probe=cancellation_probe,
                     on_waiting=lambda name: _emit(timeline, "external_entry", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
                 )
+            _emit(
+                timeline,
+                "external_entry",
+                "CANONICAL_ENTRY_NAVIGATION_COMPLETED",
+                "success",
+                canonical_entry_url_source="ExternalSystem.entry_url",
+                entry_url=entry_url,
+                host=url_host(_safe_page_path(page)),
+                path=_safe_page_path(page),
+            )
             _emit(timeline, "external_entry", "EXTERNAL_ENTRY_COMPLETED", "success", host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
 
             picker = {"observed": False}
@@ -171,6 +189,14 @@ class CanonicalAccessCoordinator:
                     if picker_restart_count < 1:
                         picker_restart_count += 1
                         _emit(timeline, "access", "ACCOUNT_PICKER_SKIPPED", "retrying", access_profile_id=profile_id)
+                        _emit(
+                            timeline,
+                            "external_entry",
+                            "CANONICAL_ENTRY_NAVIGATION_STARTED",
+                            "retrying",
+                            canonical_entry_url_source="ExternalSystem.entry_url",
+                            entry_url=entry_url,
+                        )
                         await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
                         return False
                     raise AccessCycleError(

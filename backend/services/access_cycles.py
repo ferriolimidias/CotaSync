@@ -56,13 +56,17 @@ def create_access_cycle(external_system_id: str, access_profile_id: str) -> dict
             raise ValueError("Sistema externo ou perfil de acesso inválido.")
         if profile.external_system_id != system.id:
             raise ValueError("O perfil de acesso não pertence ao sistema externo.")
+        entry_url = str((system.config or {}).get("entry_url") or "").strip()
+        if not entry_url:
+            raise ValueError("O sistema externo não possui entry_url configurado.")
         cycle = AccessCycle(
             id=str(uuid4()), external_system_id=system.id, access_profile_id=profile.id,
+            entry_url=entry_url,
             status="starting", stage="access_start", events=[], heartbeat_at=datetime.now(UTC),
         )
         db.add(cycle)
         cycle_id = cycle.id
-    _append_event(cycle_id, "access", "ACCESS_CYCLE_CREATED", "success", access_profile_id=access_profile_id, external_system_id=external_system_id)
+    _append_event(cycle_id, "access", "ACCESS_CYCLE_CREATED", "success", access_profile_id=access_profile_id, external_system_id=external_system_id, canonical_entry_url_source="ExternalSystem.entry_url", entry_url=entry_url)
     return {"access_cycle_id": cycle_id, "status": "starting", "access_profile_id": access_profile_id}
 
 
@@ -74,6 +78,7 @@ def get_access_cycle(cycle_id: str) -> dict[str, Any] | None:
         return {
             "access_cycle_id": cycle.id, "external_system_id": cycle.external_system_id,
             "access_profile_id": cycle.access_profile_id, "status": cycle.status,
+            "entry_url": _safe_url(cycle.entry_url),
             "stage": cycle.stage, "error_code": cycle.error_code, "error_message": cycle.error_message,
             "events": cycle.events or [],
             "created_at": cycle.created_at.isoformat() if cycle.created_at else None,
@@ -128,7 +133,7 @@ async def execute_access_cycle(cycle_id: str) -> None:
             connection.page,
             external_system={
                 "id": system.id,
-                "entry_url": str(config.get("entry_url") or config.get("external_login_url") or ""),
+                "entry_url": cycle.entry_url,
                 "expected_system_host": str(config.get("expected_system_host") or ""),
                 "run_start_strategy": str(config.get("run_start_strategy") or "external_entry_each_run"),
             },

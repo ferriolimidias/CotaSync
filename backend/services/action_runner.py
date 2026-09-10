@@ -318,7 +318,7 @@ def _load_action_config(action: ActionDetail) -> dict[str, Any]:
                     if version.run_start_strategy == "external_entry_each_run":
                         system = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
                         if system is not None:
-                            raw.setdefault("entry_url", str((system.config or {}).get("entry_url") or (system.config or {}).get("external_login_url") or ""))
+                            raw.setdefault("entry_url", str((system.config or {}).get("entry_url") or ""))
                             raw.setdefault("external_system_id", system.id)
                     profile_id = str(raw.get("required_access_profile_id") or "").strip()
                     if profile_id:

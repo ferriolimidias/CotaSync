@@ -34,15 +34,11 @@ def resolve_external_entry_url(
     system_config: dict[str, Any] | None,
     action_config: dict[str, Any] | None = None,
 ) -> str:
+    del action_config
     system = system_config if isinstance(system_config, dict) else {}
-    action = action_config if isinstance(action_config, dict) else {}
-    return str(
-        action.get("entry_url")
-        or action.get("external_login_url")
-        or system.get("entry_url")
-        or system.get("external_login_url")
-        or ""
-    ).strip()
+    # New logical units must use the configured system entry. Legacy login
+    # metadata and action definitions are not navigation authorities.
+    return str(system.get("entry_url") or "").strip()
 
 
 def validate_fresh_start_context(
