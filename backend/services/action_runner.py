@@ -556,16 +556,21 @@ def start_action_run(
         run.action_version_id = version.id if version else None
         client_id = str(request.variables.get("client_id") or "").strip()
         client = session.get(Client, client_id) if client_id else None
-        profile_id = str((version.required_access_profile_id if version else None) or (db_action.required_access_profile_id if db_action else None) or "").strip() or None
+        profile_id = str(
+            (version.required_access_profile_id if version else None)
+            or (db_action.required_access_profile_id if not version and db_action else None)
+            or ""
+        ).strip() or None
         if client and client.list_id:
             client_list = session.get(ClientList, client.list_id)
             if client_list:
                 if profile_id and profile_id != client_list.access_profile_id:
                     raise RuntimeError("A Action e a Lista usam perfis de acesso diferentes.")
-                profile_id = client_list.access_profile_id
         profile = session.get(ExternalAccessProfile, profile_id) if profile_id else None
-        if (version and version.required_access_profile_id) and profile is None:
-            raise RuntimeError("O perfil de acesso exigido pela Action não está disponível.")
+        if version and version.run_start_strategy == "external_entry_each_run" and not version.required_access_profile_id:
+            raise RuntimeError("REQUIRED_ACCESS_PROFILE_UNAVAILABLE: a versão publicada não possui perfil vinculado.")
+        if version and version.required_access_profile_id and profile is None:
+            raise RuntimeError("REQUIRED_ACCESS_PROFILE_UNAVAILABLE: o perfil de acesso exigido pela Action não está disponível.")
         external_system = session.get(ExternalSystem, profile.external_system_id) if profile else None
         run.access_profile_id = profile.id if profile else None
         run.external_system_id = external_system.id if external_system else None

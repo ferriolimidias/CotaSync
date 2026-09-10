@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -38,27 +39,54 @@ class BrowserConnection:
 class BrowserIdentitySession:
     """Bind the shared desktop browser to one explicit access profile.
 
-    CDP attaches to the browser's persistent context. Until the provider can
-    expose durable per-profile contexts, switching profiles uses the narrow
-    fallback of clearing authentication storage at that boundary only.
+    CDP can expose additional browser contexts. Each context uses a durable
+    storage-state file named by the profile id. The shared-context cleanup is
+    retained only as a provider compatibility fallback.
     """
 
     _active_profile_by_scope: dict[str, str] = {}
 
-    def __init__(self, context: BrowserContext, access_profile_id: str, *, scope: str = "desktop_browser") -> None:
+    def __init__(self, context: BrowserContext, access_profile_id: str, *, browser: Browser | None = None, scope: str = "desktop_browser", storage_root: str | Path | None = None) -> None:
         self.context = context
+        self.browser = browser
         self.access_profile_id = str(access_profile_id or "").strip()
         self.scope = str(scope or "desktop_browser")
+        self.storage_root = Path(storage_root or os.getenv("COTASYNC_ACCESS_PROFILE_STORAGE_DIR", "/data/access_profiles"))
+        self.profile_context: BrowserContext | None = None
+
+    @property
+    def storage_path(self) -> Path:
+        digest = hashlib.sha256(self.access_profile_id.encode("utf-8")).hexdigest()[:32]
+        return self.storage_root / f"{digest}.json"
 
     async def activate(self) -> bool:
         if not self.access_profile_id:
             raise BrowserProviderError("Access profile obrigatório para sessão de identidade.")
         previous = self._active_profile_by_scope.get(self.scope)
         switched = previous is not None and previous != self.access_profile_id
-        if switched:
+        if self.browser is not None and hasattr(self.browser, "new_context"):
+            options: dict[str, Any] = {}
+            if self.storage_path.is_file():
+                options["storage_state"] = str(self.storage_path)
+            try:
+                self.profile_context = await self.browser.new_context(**options)
+                self.context = self.profile_context
+            except Exception:
+                self.profile_context = None
+        if self.profile_context is None and switched:
             await self._clear_authentication_storage()
         self._active_profile_by_scope[self.scope] = self.access_profile_id
         return switched
+
+    async def page(self) -> Page:
+        pages = [page for page in self.context.pages if not page.is_closed()]
+        return pages[-1] if pages else await self.context.new_page()
+
+    async def persist(self) -> None:
+        if self.profile_context is None:
+            return
+        self.storage_root.mkdir(parents=True, exist_ok=True)
+        await self.profile_context.storage_state(path=str(self.storage_path))
 
     async def _clear_authentication_storage(self) -> None:
         await self.context.clear_cookies()

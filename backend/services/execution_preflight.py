@@ -47,7 +47,13 @@ def preflight_action_execution(
         if resolved_list_id and (list_row is None or not list_row.active):
             return {"ok": False, "code": "list_not_available", "message": "A lista do cliente não está disponível."}
 
-        profile_id = str(version.required_access_profile_id or db_action.required_access_profile_id or "").strip() or None
+        profile_id = str(version.required_access_profile_id or "").strip() or None
+        if not profile_id and str(version.run_start_strategy or "").strip() == "external_entry_each_run":
+            return {
+                "ok": False,
+                "code": "required_access_profile_unavailable",
+                "message": "A versão publicada não possui o perfil de acesso obrigatório.",
+            }
         if list_row and profile_id != str(list_row.access_profile_id or "").strip():
             return {
                 "ok": False,

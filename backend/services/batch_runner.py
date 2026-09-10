@@ -532,7 +532,11 @@ def create_batch(
         version = session.get(ActionVersion, published_version_id) if published_version_id else None
         list_row = session.get(ClientList, str(list_id)) if list_id else None
         configured_system = session.query(ExternalSystem).order_by(ExternalSystem.updated_at.desc()).first()
-        required_profile_id = str((version.required_access_profile_id if version else None) or (db_action.required_access_profile_id if db_action else None) or "").strip() or None
+        required_profile_id = str(
+            (version.required_access_profile_id if version else None)
+            or (db_action.required_access_profile_id if not version and db_action else None)
+            or ""
+        ).strip() or None
         run_start_strategy = str((version.run_start_strategy if version else None) or "persistent_graph_reentry").strip()
         profile = session.get(ExternalAccessProfile, required_profile_id) if required_profile_id else None
         external_system = session.get(ExternalSystem, profile.external_system_id) if profile else configured_system

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import asyncio
 from contextvars import ContextVar
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -201,13 +202,20 @@ async def execute_access_cycle(cycle_id: str) -> None:
         finish_access_cycle(cycle_id, status="failed", error_code="access_context_invalid", error_message="Contexto de acesso não encontrado.")
         return
     playwright = await async_playwright().start()
+    identity_session: BrowserIdentitySession | None = None
     try:
         connection = await browser_provider("desktop_browser").connect(playwright, f"access-cycle-{cycle_id}")
-        identity_session = BrowserIdentitySession(connection.context, profile.id, scope=desktop_cdp_url())
+        identity_session = BrowserIdentitySession(
+            connection.context,
+            profile.id,
+            browser=getattr(connection, "browser", None),
+            scope=desktop_cdp_url(),
+        )
         await identity_session.activate()
+        page = await identity_session.page() if identity_session.profile_context is not None else connection.page
         timeline = lambda stage, event, status, **context: _append_event(cycle_id, stage, event, status, **context)
         await ensure_access_cycle(
-            connection.page,
+            page,
             external_system={
                 "id": system.id,
                 "entry_url": cycle.entry_url,
@@ -228,6 +236,9 @@ async def execute_access_cycle(cycle_id: str) -> None:
         logger.exception("Falha no ciclo de acesso %s", cycle_id)
         finish_access_cycle(cycle_id, status="failed", error_code="access_cycle_failed", error_message="Falha operacional no ciclo de acesso.")
     finally:
+        if identity_session is not None:
+            with suppress(Exception):
+                await identity_session.persist()
         await playwright.stop()
 
 

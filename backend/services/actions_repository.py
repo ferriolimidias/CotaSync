@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from backend.schemas.actions import ActionDetail, ActionStepPreview, ActionSummary, ActionVariable
 from backend.db import (
@@ -635,8 +635,19 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             validate_profile_binding(profile_id=required_profile_id, external_system_id=external_system_id)
         action.required_access_profile_id = required_profile_id
 
+        latest_version_number = session.scalar(
+            select(func.max(ActionVersion.version_number)).where(ActionVersion.action_id == action.id)
+        ) or 0
         version_id = f"{action.id}-v1"
         version = session.get(ActionVersion, version_id)
+        if version is not None and str(version.status or "").casefold() in {"published", "active"}:
+            # Published versions are immutable. A new learning publication
+            # gets a new version and the Action pointer moves atomically.
+            version_number = int(latest_version_number) + 1
+            version_id = f"{action.id}-v{version_number}"
+            version = None
+        else:
+            version_number = int(latest_version_number or 1)
         definition = dict(learned_action)
         if definition.get("execution_model") == "learned_graph":
             definition["passos_playwright"] = ensure_stable_step_ids(definition.get("passos_playwright") or [])
@@ -656,7 +667,7 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
             version = ActionVersion(
                 id=version_id,
                 action_id=action.id,
-                version_number=1,
+                version_number=version_number,
                 status="published",
                 created_by=str(learned_action.get("created_by") or "" ) or None,
                 source_version_id=None,
