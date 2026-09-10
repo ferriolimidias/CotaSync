@@ -17,7 +17,7 @@ from playwright.async_api import async_playwright
 from backend.db import AccessCycle, ExternalAccessProfile, ExternalSystem, SessionLocal
 from backend.services.access_coordinator import AccessCycleError, start_canonical_access
 from backend.services.access_profiles import active_access_profile_public
-from backend.services.browser_providers import BrowserIdentitySession, browser_provider, desktop_cdp_url
+from backend.services.browser_providers import BrowserIdentitySession, BrowserProviderError, browser_provider, desktop_cdp_url
 
 logger = logging.getLogger("cotasync.access_cycles")
 
@@ -232,6 +232,9 @@ async def execute_access_cycle(cycle_id: str) -> None:
     except AccessCycleError as exc:
         logger.warning("Ciclo de acesso %s terminou: %s", cycle_id, exc.code)
         finish_access_cycle(cycle_id, status="failed", error_code=exc.code, error_message=str(exc))
+    except BrowserProviderError as exc:
+        logger.warning("Ciclo de acesso %s sem isolamento de browser: %s", cycle_id, exc)
+        finish_access_cycle(cycle_id, status="failed", error_code=getattr(exc, "code", "ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE"), error_message=str(exc))
     except Exception:
         logger.exception("Falha no ciclo de acesso %s", cycle_id)
         finish_access_cycle(cycle_id, status="failed", error_code="access_cycle_failed", error_message="Falha operacional no ciclo de acesso.")

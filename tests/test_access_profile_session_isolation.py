@@ -5,9 +5,11 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from backend.db import Action, ActionVersion, ExternalAccessProfile, ExternalSystem, SessionLocal
 from backend.services.access_coordinator import _identity_evidence
-from backend.services.browser_providers import BrowserIdentitySession, reset_browser_identity_sessions
+from backend.services.browser_providers import BrowserIdentitySession, BrowserProviderError, reset_browser_identity_sessions, supports_isolated_browser_contexts
 from backend.services.actions_repository import save_learned_action
 
 
@@ -62,26 +64,41 @@ def setup_function() -> None:
     reset_browser_identity_sessions()
 
 
-def test_same_profile_reuses_session() -> None:
+def test_new_context_available(tmp_path) -> None:
+    context = FakeContext()
+    browser = StorageBrowser()
+
+    async def scenario() -> None:
+        identity = BrowserIdentitySession(context, "profile-a", browser=browser, storage_root=tmp_path, scope="test")
+        assert await identity.activate() is False
+        assert identity.profile_context is not None
+
+    asyncio.run(scenario())
+    assert supports_isolated_browser_contexts(browser) is True
+
+
+def test_new_context_unavailable_fails_closed() -> None:
     context = FakeContext()
 
     async def scenario() -> None:
-        assert await BrowserIdentitySession(context, "profile-a", scope="test").activate() is False
-        assert await BrowserIdentitySession(context, "profile-a", scope="test").activate() is False
+        with pytest.raises(BrowserProviderError) as error:
+            await BrowserIdentitySession(context, "profile-a", scope="test").activate()
+        assert error.value.code == "ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE"
 
     asyncio.run(scenario())
     assert context.clear_count == 0
+    assert supports_isolated_browser_contexts(context) is False
 
 
-def test_different_profile_isolated() -> None:
+def test_no_global_context_profile_fallback() -> None:
     context = FakeContext()
 
     async def scenario() -> None:
-        await BrowserIdentitySession(context, "profile-a", scope="test").activate()
-        assert await BrowserIdentitySession(context, "profile-b", scope="test").activate() is True
+        with pytest.raises(BrowserProviderError):
+            await BrowserIdentitySession(context, "profile-a", scope="test").activate()
 
     asyncio.run(scenario())
-    assert context.clear_count == 1
+    assert context.clear_count == 0
 
 
 def test_profile_storage_isolation(tmp_path) -> None:
@@ -155,28 +172,29 @@ def test_identity_mismatch_with_configured_marker() -> None:
     ) is False
 
 
-def test_multi_output_does_not_reset_session() -> None:
+def test_multi_output_does_not_reset_session(tmp_path) -> None:
     context = FakeContext()
+    browser = StorageBrowser()
 
     async def scenario() -> None:
         for _output in range(3):
-            assert await BrowserIdentitySession(context, "profile-a", scope="test").activate() is False
+            assert await BrowserIdentitySession(context, "profile-a", browser=browser, storage_root=tmp_path, scope="outputs").activate() is False
 
     asyncio.run(scenario())
     assert context.clear_count == 0
 
 
-def test_batch_profile_transitions_are_sequential_and_isolated() -> None:
+def test_batch_profile_transitions_are_sequential_and_isolated(tmp_path) -> None:
     context = FakeContext()
+    browser = StorageBrowser()
     switches: list[bool] = []
 
     async def scenario() -> None:
         for profile_id in ("profile-a", "profile-a", "profile-b", "profile-b"):
-            switches.append(await BrowserIdentitySession(context, profile_id, scope="test").activate())
+            switches.append(await BrowserIdentitySession(context, profile_id, browser=browser, storage_root=tmp_path, scope="batch").activate())
 
     asyncio.run(scenario())
     assert switches == [False, False, True, False]
-    assert context.clear_count == 1
 
 
 def test_learning_publication_binds_profile_and_keeps_previous_version() -> None:

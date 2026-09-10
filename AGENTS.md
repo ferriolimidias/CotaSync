@@ -73,3 +73,8 @@ boundary before access begins.
 external system does not prove the correct identity. The access coordinator
 must verify the requested profile before releasing an Action. These rules and
 their tests must not be weakened to accommodate future implementations.
+
+`BROWSER_PROFILE_ISOLATION_FAILS_CLOSED` is permanent: if an isolated
+`BrowserIdentitySession` cannot be created, the operation must stop with
+`ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE`. Never substitute the global,
+default, or current browser context.

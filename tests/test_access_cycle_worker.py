@@ -140,7 +140,19 @@ def test_first_coordinator_event_is_canonical_entry_navigation():
         stop = AsyncMock()
 
     class _Provider:
-        connect = AsyncMock(return_value=type("Connection", (), {"page": object(), "context": object()})())
+        class _Context:
+            pages = []
+
+            async def new_page(self):
+                return object()
+
+        class _Browser:
+            def __init__(self):
+                context = type("Context", (), {"pages": []})()
+                context.new_page = AsyncMock(return_value=object())
+                self.new_context = AsyncMock(return_value=context)
+
+        connect = AsyncMock(return_value=type("Connection", (), {"page": object(), "context": _Context(), "browser": _Browser()})())
 
     async def coordinator(*_args, **kwargs):
         kwargs["timeline"]("external_entry", "CANONICAL_ENTRY_NAVIGATION_STARTED", "started", entry_url="https://entry.example.test")

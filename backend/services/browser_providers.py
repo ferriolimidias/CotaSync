@@ -28,6 +28,8 @@ _CONFIG_PATH = _ROOT / "data" / "browser_config.json"
 class BrowserProviderError(RuntimeError):
     """Falha operacional segura ao selecionar ou conectar um provider."""
 
+    code = "browser_provider_error"
+
 
 @dataclass(frozen=True)
 class BrowserConnection:
@@ -39,9 +41,9 @@ class BrowserConnection:
 class BrowserIdentitySession:
     """Bind the shared desktop browser to one explicit access profile.
 
-    CDP can expose additional browser contexts. Each context uses a durable
-    storage-state file named by the profile id. The shared-context cleanup is
-    retained only as a provider compatibility fallback.
+    CDP must expose additional browser contexts. Each context uses a durable
+    storage-state file named by the profile id. A shared/default context is
+    never an acceptable substitute.
     """
 
     _active_profile_by_scope: dict[str, str] = {}
@@ -64,17 +66,20 @@ class BrowserIdentitySession:
             raise BrowserProviderError("Access profile obrigatório para sessão de identidade.")
         previous = self._active_profile_by_scope.get(self.scope)
         switched = previous is not None and previous != self.access_profile_id
-        if self.browser is not None and hasattr(self.browser, "new_context"):
-            options: dict[str, Any] = {}
-            if self.storage_path.is_file():
-                options["storage_state"] = str(self.storage_path)
-            try:
-                self.profile_context = await self.browser.new_context(**options)
-                self.context = self.profile_context
-            except Exception:
-                self.profile_context = None
-        if self.profile_context is None and switched:
-            await self._clear_authentication_storage()
+        if self.browser is None or not callable(getattr(self.browser, "new_context", None)):
+            error = BrowserProviderError("O navegador não oferece contexto isolado por perfil.")
+            error.code = "ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE"
+            raise error
+        options: dict[str, Any] = {}
+        if self.storage_path.is_file():
+            options["storage_state"] = str(self.storage_path)
+        try:
+            self.profile_context = await self.browser.new_context(**options)
+            self.context = self.profile_context
+        except Exception as exc:
+            error = BrowserProviderError("Não foi possível criar o contexto isolado do perfil.")
+            error.code = "ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE"
+            raise error from exc
         self._active_profile_by_scope[self.scope] = self.access_profile_id
         return switched
 
@@ -88,20 +93,8 @@ class BrowserIdentitySession:
         self.storage_root.mkdir(parents=True, exist_ok=True)
         await self.profile_context.storage_state(path=str(self.storage_path))
 
-    async def _clear_authentication_storage(self) -> None:
-        await self.context.clear_cookies()
-        for page in list(getattr(self.context, "pages", [])):
-            if page.is_closed():
-                continue
-            try:
-                await page.evaluate(
-                    """() => {
-                        try { window.localStorage.clear(); } catch (_) {}
-                        try { window.sessionStorage.clear(); } catch (_) {}
-                    }"""
-                )
-            except Exception:
-                continue
+def supports_isolated_browser_contexts(browser: Any) -> bool:
+    return browser is not None and callable(getattr(browser, "new_context", None))
 
 
 def reset_browser_identity_sessions() -> None:

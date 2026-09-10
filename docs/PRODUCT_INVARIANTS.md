@@ -71,6 +71,16 @@ the desktop CDP provider must switch profiles in its shared persistent
 context, it clears authentication cookies and web storage at that boundary
 before the new access cycle proceeds.
 
+If an isolated browser context cannot be provided, the operation fails
+closed with `ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE`; the global or
+current browser context is never substituted.
+
+## INVARIANT: BROWSER_PROFILE_ISOLATION_FAILS_CLOSED
+
+If an isolated `BrowserIdentitySession` cannot be provided for the required
+`ExternalAccessProfile`, access stops before authentication or Action
+execution. The global or current browser context must never be substituted.
+
 ## INVARIANT: VERIFY_EXTERNAL_IDENTITY_BEFORE_ACTION
 
 Being inside the external system is insufficient. The access coordinator
