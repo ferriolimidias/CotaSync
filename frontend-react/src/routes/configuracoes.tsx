@@ -30,6 +30,7 @@ import {
 } from "@/services/api";
 import { useAuth } from "@/services/auth";
 import type { AccessProfile, ExternalSystemConfig } from "@/types/api";
+import { openAccessProfileWorkspace } from "@/lib/access-profile-workspace";
 
 export const Route = createFileRoute("/configuracoes")({
   head: () => ({ meta: [{ title: "Configurações — CotaSync" }] }),
@@ -291,7 +292,7 @@ function ConfigPage() {
                       <div><div className="font-medium">{profile.display_name}</div><div className="text-xs text-muted-foreground">{profile.login_identifier}</div><div className="mt-1 text-xs text-muted-foreground">Microsoft: {statusLabel}{validatedLabel}</div></div>
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" size="sm" variant="outline" onClick={() => validateAccessProfile(profile.id).then((result) => { queryClient.setQueryData<AccessProfile[]>(["access-profiles"], (current) => (current || []).map((item) => item.id === result.profile.id ? result.profile : item)); result.available ? toast.success("Conta disponível no navegador.") : result.profile.validation_status === "reauth_required" ? toast.warning("Faça a autenticação manual no navegador.") : toast.warning("Perfil cadastrado, mas não reconhecido no navegador atual."); }).catch((error) => toast.error(error instanceof Error ? error.message : "Falha ao validar perfil."))}><ShieldCheck className="h-4 w-4" /> Validar</Button>
-                        <Button type="button" size="sm" onClick={() => authenticateAccessProfile(profile.id).then(() => { toast.success(`Entrada aberta para ${profile.display_name}. Conclua a autenticação manual no navegador.`); void navigate({ to: "/configuracoes/navegador", search: { access_profile_id: profile.id } }); }).catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível abrir a autenticação do perfil."))} disabled={!loginConfigured}><ExternalLink className="h-4 w-4" /> Autenticar</Button>
+                        <Button type="button" size="sm" onClick={() => { toast.message(`Abrindo o navegador para ${profile.display_name}...`); void openAccessProfileWorkspace(profile.id, navigate, authenticateAccessProfile).then(() => toast.success(`Entrada aberta para ${profile.display_name}. Conclua a autenticação manual no navegador.`)).catch((error) => toast.error(error instanceof Error ? error.message : "Não foi possível abrir a autenticação do perfil.")); }} disabled={!loginConfigured}><ExternalLink className="h-4 w-4" /> Autenticar</Button>
                       </div>
                     </div>
                     );
