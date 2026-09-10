@@ -49,6 +49,7 @@ from backend.services.session_guardian import (
     SessionGuardianError,
     session_failure_message,
 )
+from backend.services.start_policy import requires_external_entry, resolve_external_entry_url
 from backend.db import Action as DbAction, ActionVersion, SessionLocal
 from backend.services.actions_repository import enrich_action_access_profile, save_learned_action
 from backend.services.extraction_targets import extract_value_near_label
@@ -3171,11 +3172,11 @@ class DemoSessionManager:
             "run_start_strategy": requested_strategy,
             "allowed_list_ids": requested_lists,
         }
-        if session.guided_learning["run_start_strategy"] == "external_entry_each_run" and session.guided_learning.get("required_access_profile_id"):
+        if requires_external_entry(session.guided_learning["run_start_strategy"]) and session.guided_learning.get("required_access_profile_id"):
             with SessionLocal() as db:
                 profile = db.get(ExternalAccessProfile, session.guided_learning["required_access_profile_id"])
                 system = db.get(ExternalSystem, profile.external_system_id) if profile else None
-                entry_url = str((system.config or {}).get("entry_url") or (system.config or {}).get("external_login_url") or "") if system else ""
+                entry_url = resolve_external_entry_url(system.config if system else {})
             if profile is None or not profile.active:
                 raise DemoSessionError("Perfil de acesso não encontrado ou inativo.")
             if not entry_url:

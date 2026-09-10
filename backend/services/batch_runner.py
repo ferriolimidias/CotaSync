@@ -25,6 +25,7 @@ from backend.services.clients_repository import (
 )
 from backend.services.learned_graph import validate_graph_reentrancy
 from backend.services.access_profiles import validate_access_bootstrap
+from backend.services.start_policy import requires_external_entry, resolve_external_entry_url
 from backend.services.execution_preflight import preflight_action_execution
 
 logger = logging.getLogger("cotasync.batch_runner")
@@ -563,11 +564,11 @@ def create_batch(
             raise BatchRunnerError("Perfil de acesso inexistente, inativo ou incompatível com o sistema externo.")
     if published_version_id:
         definition = dict(version.definition or {}) if version is not None else {}
-        if run_start_strategy == "external_entry_each_run":
+        if requires_external_entry(run_start_strategy):
             if not required_profile_id:
                 raise BatchRunnerError("Ação com entrada externa precisa de perfil de acesso vinculado.")
             config = external_system.config if external_system is not None else {}
-            if not str(config.get("entry_url") or config.get("external_login_url") or "").strip():
+            if not resolve_external_entry_url(config):
                 raise BatchRunnerError("Ação com entrada externa precisa de entry_url configurado.")
             bootstrap = validate_access_bootstrap(definition, profile_id=required_profile_id)
             if not bootstrap["valid"]:

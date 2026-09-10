@@ -47,6 +47,7 @@ from backend.services.learned_graph import (
 from backend.services.result_selection import extraction_contract_from_action, extract_with_contract
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
 from backend.services.session_guardian import SessionGuardian, SessionGuardianError, session_failure_message
+from backend.services.start_policy import needs_fresh_external_start, resolve_external_entry_url
 
 load_dotenv()
 os.makedirs("data", exist_ok=True)
@@ -1508,13 +1509,8 @@ async def executar_acao_rapida(
             context = connection.context
             run_start_strategy = str(action_config.get("run_start_strategy") or "persistent_graph_reentry").strip()
             external_entry_started = False
-            if run_start_strategy == "external_entry_each_run" and not _same_run_reentry:
-                entry_url = str(
-                    action_config.get("entry_url")
-                    or action_config.get("external_login_url")
-                    or action_config.get("url_inicial")
-                    or ""
-                ).strip()
+            if needs_fresh_external_start(run_start_strategy, same_logical_unit=_same_run_reentry):
+                entry_url = resolve_external_entry_url({}, action_config) or str(action_config.get("url_inicial") or "").strip()
                 if not entry_url:
                     raise SessionGuardianError(
                         "A execução exige uma entrada externa configurada.",
@@ -1535,7 +1531,7 @@ async def executar_acao_rapida(
                 if getattr(exc, "diagnostics", {}).get("reason") != "reauthentication_required":
                     raise
                 page = connection.page
-            if run_start_strategy == "external_entry_each_run" and not _same_run_reentry:
+            if needs_fresh_external_start(run_start_strategy, same_logical_unit=_same_run_reentry):
                 bootstrap_events = await execute_external_access_bootstrap(page)
                 step_trace.extend(bootstrap_events)
                 external_entry_started = True

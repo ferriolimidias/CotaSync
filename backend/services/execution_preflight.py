@@ -7,6 +7,7 @@ from typing import Any
 from backend.db import Action as DbAction, ActionVersion, Client, ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
 from backend.services.access_profiles import validate_access_bootstrap
 from backend.services.learned_graph import validate_graph_reentrancy
+from backend.services.start_policy import requires_external_entry, resolve_external_entry_url, validate_fresh_start_context
 
 
 def _missing_variables(action: Any, variables: dict[str, Any]) -> list[str]:
@@ -65,13 +66,19 @@ def preflight_action_execution(
             return {"ok": False, "code": "external_system_missing", "message": "O sistema externo do acesso não está configurado."}
 
         strategy = str(version.run_start_strategy or "").strip()
-        if strategy not in {"external_entry_each_run", "persistent_graph_reentry"}:
+        start_context = validate_fresh_start_context(
+            strategy=strategy,
+            entry_url=resolve_external_entry_url(system.config or {}),
+            access_profile_id=profile_id,
+        )
+        if not start_context["valid"] and start_context.get("code") == "run_start_strategy_invalid":
             return {"ok": False, "code": "run_start_strategy_invalid", "message": "A estratégia de início da ação é inválida."}
         definition = dict(version.definition or {})
-        if strategy == "external_entry_each_run":
-            entry_url = str((system.config or {}).get("entry_url") or (system.config or {}).get("external_login_url") or "").strip()
-            if not entry_url:
+        if requires_external_entry(strategy):
+            if not start_context["valid"] and start_context.get("code") == "entry_url_missing":
                 return {"ok": False, "code": "entry_url_missing", "message": "A entrada do sistema não está configurada."}
+            if not start_context["valid"] and start_context.get("code") == "access_profile_required":
+                return {"ok": False, "code": "access_profile_required", "message": "A ação precisa de um acesso ativo."}
             bootstrap = validate_access_bootstrap(definition, profile_id=profile_id)
             if not bootstrap["valid"]:
                 return {"ok": False, "code": bootstrap["code"], "message": "A ação não possui bootstrap de acesso válido."}
