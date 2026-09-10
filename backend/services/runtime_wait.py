@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -31,9 +32,10 @@ async def wait_for_runtime_state(
     on_waiting: Callable[[str], Any] | None = None,
     probe_timeout_seconds: float = 0.75,
     poll_interval_seconds: float = 0.25,
+    waiting_interval_seconds: float = 10.0,
 ) -> Any:
     """Poll a condition until reached; a probe timeout is never a run failure."""
-    waiting_notified = False
+    last_waiting_notification = 0.0
     while True:
         if cancellation_probe is not None and await _resolve(cancellation_probe()):
             raise RuntimeWaitCancelled(f"Execução cancelada enquanto aguardava {state_name}.")
@@ -56,8 +58,11 @@ async def wait_for_runtime_state(
             result = None
         if result:
             return result
-        if not waiting_notified and on_waiting is not None:
+        now = time.monotonic()
+        if on_waiting is not None and (
+            not last_waiting_notification
+            or now - last_waiting_notification >= max(1.0, float(waiting_interval_seconds))
+        ):
             await _resolve(on_waiting(state_name))
-            waiting_notified = True
+            last_waiting_notification = now
         await asyncio.sleep(max(0.05, float(poll_interval_seconds)))
-
