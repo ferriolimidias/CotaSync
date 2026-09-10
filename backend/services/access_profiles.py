@@ -96,11 +96,13 @@ def _public(row: ExternalAccessProfile, *, system_name: str = "") -> dict[str, A
     }
 
 
-def list_access_profiles(*, tenant_id: str = "default", external_system_id: str | None = None) -> list[dict[str, Any]]:
+def list_access_profiles(*, tenant_id: str = "default", external_system_id: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
     with SessionLocal() as db:
         query = select(ExternalAccessProfile, ExternalSystem.name).join(ExternalSystem, ExternalSystem.id == ExternalAccessProfile.external_system_id).where(ExternalAccessProfile.tenant_id == tenant_id)
         if external_system_id:
             query = query.where(ExternalAccessProfile.external_system_id == str(external_system_id))
+        if active_only:
+            query = query.where(ExternalAccessProfile.active.is_(True))
         rows = db.execute(query.order_by(ExternalAccessProfile.display_name)).all()
         return [_public(row, system_name=name) for row, name in rows]
 

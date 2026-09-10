@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from backend.db import Action, ActionVersion, ExternalAccessProfile, ExternalSystem, SessionLocal
-from backend.services.access_profiles import AccessProfileError, active_access_profile_public, delete_access_profile
+from backend.db import Action, ActionVersion, ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
+from backend.services.access_profiles import AccessProfileError, active_access_profile_public, delete_access_profile, list_access_profiles
 from backend.services.browser_providers import BrowserIdentitySession
 from backend.services.execution_preflight import preflight_action_execution
 
@@ -140,3 +140,28 @@ def test_deleted_profile_not_selectable() -> None:
 
     with pytest.raises(AccessProfileError):
         active_access_profile_public(profile_id)
+
+
+def test_active_profile_visible() -> None:
+    _system_id, profile_id = _system_and_profile()
+    assert profile_id in {item["id"] for item in list_access_profiles()}
+
+
+def test_retired_profile_hidden() -> None:
+    _system_id, profile_id = _system_and_profile()
+    with SessionLocal.begin() as db:
+        profile = db.get(ExternalAccessProfile, profile_id)
+        assert profile is not None
+        profile.active = False
+    assert profile_id not in {item["id"] for item in list_access_profiles()}
+
+
+def test_retire_refreshes_operational_list_and_preserves_history() -> None:
+    _system_id, profile_id = _system_and_profile()
+    with SessionLocal.begin() as db:
+        db.add(ClientList(id=f"delete-list-{uuid4().hex}", tenant_id="default", name="Referenced list", access_profile_id=profile_id, active=True))
+    result = delete_access_profile(profile_id)
+    assert result["status"] == "retired"
+    assert profile_id not in {item["id"] for item in list_access_profiles()}
+    with SessionLocal() as db:
+        assert db.get(ExternalAccessProfile, profile_id) is not None
