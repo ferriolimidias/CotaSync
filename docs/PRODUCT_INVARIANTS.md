@@ -73,7 +73,10 @@ never valid identity or start-state sources.
 For Microsoft account-picker flows, the selected
 `ExternalAccessProfile.login_identifier` is explicitly selected and confirmed
 before any learned post-selection bootstrap event such as Accept or consent.
-The access bootstrap remains separate from the main Action graph.
+The access bootstrap remains separate from the main Action graph. Merely
+landing on a consent page or seeing a previously selected account does not
+count as `PROFILE_SELECTED`; the coordinator must observe the picker and
+perform the explicit selection in the current cycle.
 
 ## INVARIANT: STATE_DRIVEN_WAITING
 

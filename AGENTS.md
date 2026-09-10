@@ -47,3 +47,7 @@ position, or implement a competing identity/authentication order. Access
 bootstrap is not part of the main Action graph. Any future change that
 violates these rules is a product regression even if unrelated local tests
 pass. See `docs/PRODUCT_INVARIANTS.md` for the permanent specification.
+
+A new Microsoft access cycle is not valid unless the Account Picker is
+actually presented and the configured `ExternalAccessProfile` is explicitly
+selected during that cycle.

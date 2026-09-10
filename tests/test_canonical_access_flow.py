@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from backend.services.access_coordinator import start_canonical_access
+from backend.services.access_coordinator import build_microsoft_entry_url, start_canonical_access
 
 
 class _Locator:
@@ -68,6 +68,21 @@ class _Page:
         return _Locator(self, text=text)
 
 
+class _ConsentThenPickerPage(_Page):
+    def __init__(self):
+        super().__init__()
+        self.goto_count = 0
+
+    async def goto(self, url, **kwargs):
+        self.goto_count += 1
+        if self.goto_count == 1:
+            self.url = "https://login.microsoftonline.com/consent"
+            self.body = "Permissions requested"
+            self.visible_selectors = {"#accept"}
+            return
+        await super().goto(url, **kwargs)
+
+
 def test_canonical_access_selects_profile_before_learned_bootstrap():
     page = _Page()
     events = []
@@ -129,3 +144,31 @@ def test_auth_learning_individual_and_batch_contract_share_state_machine():
         )
         assert events.index("ACCESS_PROFILE_SELECTION_COMPLETED") < events.index("ACCESS_BOOTSTRAP_STARTED")
         assert events.index("ACCESS_BOOTSTRAP_COMPLETED") < events.index("EXTERNAL_SYSTEM_READY")
+
+
+def test_microsoft_entry_forces_picker_without_dropping_oauth_parameters():
+    result = build_microsoft_entry_url(
+        "https://login.microsoftonline.com/common/oauth2/authorize?client_id=c&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=a&response_type=code&state=s&login_hint=old%40example.test"
+    )
+    assert "prompt=select_account" in result
+    assert "login_hint" not in result
+    for required in ("client_id=c", "redirect_uri=https%3A%2F%2Fapp.test%2Fcb", "scope=a", "response_type=code", "state=s"):
+        assert required in result
+
+
+def test_direct_consent_is_restarted_until_picker_is_observed():
+    page = _ConsentThenPickerPage()
+    result = asyncio.run(
+        start_canonical_access(
+            page,
+            external_system={
+                "entry_url": "https://login.microsoftonline.com/entry",
+                "expected_system_host": "external.example.test",
+                "run_start_strategy": "external_entry_each_run",
+            },
+            access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+            action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
+        )
+    )
+    assert result.profile_selected is True
+    assert page.goto_count == 2

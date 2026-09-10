@@ -10,6 +10,7 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from backend.services.action_pages import url_host
 from backend.services.runtime_wait import RuntimeWaitTerminal, wait_for_runtime_state
@@ -34,6 +35,27 @@ def _safe_page_path(page: Any) -> str:
         return str(getattr(page, "url", "") or "")
     except Exception:
         return ""
+
+
+_MICROSOFT_HOSTS = {
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "login.live.com",
+    "login.windows.net",
+    "m365.cloud.microsoft",
+}
+
+
+def build_microsoft_entry_url(entry_url: str) -> str:
+    """Force explicit account selection without discarding OAuth parameters."""
+    raw = str(entry_url or "").strip()
+    parsed = urlsplit(raw)
+    host = str(parsed.hostname or "").casefold()
+    if host not in _MICROSOFT_HOSTS and not any(host.endswith(f".{item}") for item in _MICROSOFT_HOSTS):
+        return raw
+    params = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.casefold() not in {"login_hint", "domain_hint", "prompt"}]
+    params.append(("prompt", "select_account"))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(params), parsed.fragment))
 
 
 async def _body_text(page: Any) -> str:
@@ -93,6 +115,7 @@ class CanonicalAccessCoordinator:
         profile_id = str(profile.get("id") or config.get("required_access_profile_id") or "").strip()
         identifier = str(profile.get("login_identifier") or config.get("access_profile_email_or_identifier") or "").strip()
         entry_url = resolve_external_entry_url(system, config)
+        effective_entry_url = build_microsoft_entry_url(entry_url)
         context = validate_fresh_start_context(
             strategy=strategy,
             entry_url=entry_url,
@@ -113,11 +136,11 @@ class CanonicalAccessCoordinator:
 
         _emit(timeline, "access", "ACCESS_CYCLE_STARTED", "started", access_profile_id=profile_id)
         try:
-            _emit(timeline, "external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=entry_url)
+            _emit(timeline, "external_entry", "EXTERNAL_ENTRY_STARTED", "started", entry_url=effective_entry_url)
             try:
-                await page.goto(entry_url, wait_until="domcontentloaded", timeout=5000)
+                await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
             except Exception:
-                expected_host = url_host(entry_url)
+                expected_host = url_host(effective_entry_url)
                 await wait_for_runtime_state(
                     lambda: bool(expected_host and url_host(_safe_page_path(page)) == expected_host),
                     state_name="entrada externa",
@@ -128,8 +151,10 @@ class CanonicalAccessCoordinator:
             _emit(timeline, "external_entry", "EXTERNAL_ENTRY_COMPLETED", "success", host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
 
             picker = {"observed": False}
+            picker_restart_count = 0
 
             async def observe_picker() -> bool:
+                nonlocal picker_restart_count
                 if not hasattr(page, "locator"):
                     picker["observed"] = "microsoft" in _safe_page_path(page).casefold()
                     return True
@@ -140,10 +165,20 @@ class CanonicalAccessCoordinator:
                     picker["observed"] = True
                     _emit(timeline, "access", "ACCOUNT_PICKER_OBSERVED", "observed", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
                     return True
-                # A provider may already have returned a selected profile to the
-                # external system.  It is not a residual-page start because the
-                # coordinator navigated to entry_url above.
-                return state.state == "authenticated_system"
+                direct_states = {"microsoft_consent_required", "authenticated_system"}
+                direct_external = state.state in direct_states or url_host(_safe_page_path(page)) == str(system.get("expected_system_host") or "").strip()
+                if direct_external:
+                    if picker_restart_count < 1:
+                        picker_restart_count += 1
+                        _emit(timeline, "access", "ACCOUNT_PICKER_SKIPPED", "retrying", access_profile_id=profile_id)
+                        await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
+                        return False
+                    raise AccessCycleError(
+                        "A entrada Microsoft não apresentou o Account Picker para este novo ciclo.",
+                        code="account_picker_skipped",
+                        stage="account_picker",
+                    )
+                return False
 
             await wait_for_runtime_state(
                 observe_picker,
@@ -237,7 +272,7 @@ class CanonicalAccessCoordinator:
                 )
             _emit(timeline, "access", "EXTERNAL_SYSTEM_READY", "success", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
             _emit(timeline, "access", "ACCESS_CYCLE_COMPLETED", "success", access_profile_id=profile_id)
-            return AccessCycleResult("external_system_ready", page, entry_url, events, profile_selected=selected or not picker["observed"])
+            return AccessCycleResult("external_system_ready", page, effective_entry_url, events, profile_selected=selected)
         except (AccessCycleError, RuntimeWaitTerminal):
             raise
         except Exception as exc:
