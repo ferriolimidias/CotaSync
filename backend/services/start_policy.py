@@ -3,10 +3,48 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 EXTERNAL_ENTRY_EACH_RUN = "external_entry_each_run"
 PERSISTENT_GRAPH_REENTRY = "persistent_graph_reentry"
 VALID_START_STRATEGIES = {EXTERNAL_ENTRY_EACH_RUN, PERSISTENT_GRAPH_REENTRY}
+
+
+def normalize_external_entry_url(value: Any) -> str:
+    """Repair one known legacy serialization defect without changing authority.
+
+    Older configuration writes could serialize the first OAuth parameter as
+    ``https://host/path?client_id=<value>`` inside the query string.  The
+    configured host, path and parameter values remain authoritative; this only
+    restores the lost parameter name when the embedded URL exactly matches the
+    enclosing URL and carries one empty parameter value.
+    """
+    raw = str(value or "").strip()
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.query:
+        return raw
+    repaired: list[tuple[str, str]] = []
+    changed = False
+    for key, parameter_value in parse_qsl(parsed.query, keep_blank_values=True):
+        embedded = urlsplit(key)
+        embedded_pairs = parse_qsl(embedded.query, keep_blank_values=True)
+        if not embedded_pairs and embedded.query and "=" not in embedded.query and "&" not in embedded.query:
+            embedded_pairs = [(embedded.query, "")]
+        same_entry = (
+            embedded.scheme == parsed.scheme
+            and embedded.netloc == parsed.netloc
+            and embedded.path == parsed.path
+            and len(embedded_pairs) == 1
+            and embedded_pairs[0][1] == ""
+        )
+        if same_entry:
+            repaired.append((embedded_pairs[0][0], parameter_value))
+            changed = True
+        else:
+            repaired.append((key, parameter_value))
+    if not changed:
+        return raw
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(repaired), parsed.fragment))
 
 
 def normalize_start_strategy(value: Any, default: str = PERSISTENT_GRAPH_REENTRY) -> str:
@@ -38,7 +76,7 @@ def resolve_external_entry_url(
     system = system_config if isinstance(system_config, dict) else {}
     # New logical units must use the configured system entry. Legacy login
     # metadata and action definitions are not navigation authorities.
-    return str(system.get("entry_url") or "").strip()
+    return normalize_external_entry_url(system.get("entry_url"))
 
 
 def validate_fresh_start_context(

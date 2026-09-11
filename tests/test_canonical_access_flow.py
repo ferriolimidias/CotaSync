@@ -4,7 +4,8 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 import pytest
 
-from backend.services.access_coordinator import build_microsoft_entry_url, start_canonical_access
+from backend.services.access_coordinator import AccessCycleError, build_microsoft_entry_url, start_canonical_access
+from backend.services.start_policy import normalize_external_entry_url
 
 
 class _Locator:
@@ -72,6 +73,41 @@ class _Page:
         return _Locator(self, text=text)
 
 
+class _AuthFrame(_Page):
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+
+    def get_by_text(self, text, **_kwargs):
+        locator = _Locator(self, text=text)
+        original_click = locator.click
+
+        async def click(**kwargs):
+            await original_click(**kwargs)
+            self.owner.body = "Permissions requested"
+            self.owner.visible_selectors = {"#accept"}
+            self.owner.url = "https://login.microsoftonline.com/consent"
+
+        locator.click = click
+        return locator
+
+
+class _PickerInFramePage(_Page):
+    def __init__(self):
+        super().__init__()
+        self.auth_frame = _AuthFrame(self)
+
+    @property
+    def frames(self):
+        return [self, self.auth_frame]
+
+    async def goto(self, url, **_kwargs):
+        self.goto_urls.append(url)
+        self.url = url
+        self.body = "Microsoft shell"
+        self.auth_frame.body = "Pick an account\nworker@example.test\nSigned in"
+
+
 class _ConsentThenPickerPage(_Page):
     def __init__(self):
         super().__init__()
@@ -111,6 +147,24 @@ def test_canonical_access_selects_profile_before_learned_bootstrap():
     assert result.state == "external_system_ready"
     assert events.index("ACCESS_PROFILE_SELECTION_COMPLETED") < events.index("ACCESS_BOOTSTRAP_STARTED")
     assert events.index("ACCESS_BOOTSTRAP_COMPLETED") < events.index("EXTERNAL_SYSTEM_READY")
+    assert page.url == "https://external.example.test/home"
+
+
+def test_canonical_access_selects_profile_rendered_in_auth_iframe():
+    page = _PickerInFramePage()
+    result = asyncio.run(
+        start_canonical_access(
+            page,
+            external_system={
+                "entry_url": "https://login.microsoftonline.com/entry",
+                "expected_system_host": "external.example.test",
+                "run_start_strategy": "external_entry_each_run",
+            },
+            access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+            action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
+        )
+    )
+    assert result.state == "external_system_ready"
     assert page.url == "https://external.example.test/home"
 
 
@@ -177,6 +231,22 @@ def test_microsoft_entry_forces_picker_without_dropping_oauth_parameters():
     assert "login_hint" not in result
     for required in ("client_id=c", "redirect_uri=https%3A%2F%2Fapp.test%2Fcb", "scope=a", "response_type=code", "state=s"):
         assert required in result
+
+
+def test_legacy_embedded_oauth_parameter_is_repaired_without_changing_entry_authority():
+    malformed = (
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=client"
+        "&redirect_uri=https%3A%2F%2Fapp.test%2Fcallback&scope=api%3A%2F%2Fscope&state=state"
+    )
+    normalized = normalize_external_entry_url(malformed)
+    assert normalized.startswith("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?")
+    assert "client_id=client" in normalized
+    assert "redirect_uri=https%3A%2F%2Fapp.test%2Fcallback" in normalized
+    assert "https%3A%2F%2Flogin.microsoftonline.com" not in normalized
+    effective = build_microsoft_entry_url(malformed)
+    assert "prompt=select_account" in effective
+    assert "client_id=client" in effective
 
 
 def test_canonical_entry_ignores_action_navigation_metadata():
@@ -261,3 +331,30 @@ def test_direct_consent_is_restarted_until_picker_is_observed():
     )
     assert result.profile_selected is True
     assert page.goto_count == 2
+
+
+class _PickerLostPage(_Page):
+    async def goto(self, url, **_kwargs):
+        self.goto_urls.append(url)
+        self.url = url
+        self.body = "Pick an account\nworker@example.test"
+        self.visible_selectors = set()
+
+    def get_by_text(self, _text, **_kwargs):
+        self.body = "Microsoft portal"
+        self.url = "https://m365.cloud.microsoft/search"
+        return _Locator(self, text="missing")
+
+
+def test_picker_lost_before_explicit_selection_fails_instead_of_waiting_forever():
+    page = _PickerLostPage()
+    with pytest.raises(AccessCycleError) as failure:
+        asyncio.run(
+            start_canonical_access(
+                page,
+                external_system={"entry_url": "https://login.microsoftonline.com/entry", "run_start_strategy": "external_entry_each_run"},
+                access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+                require_external_system=False,
+            )
+        )
+    assert failure.value.code == "account_picker_selection_lost"

@@ -20,6 +20,7 @@ from backend.services.access_profiles import active_access_profile_public
 from backend.services.browser_providers import BrowserIdentitySession, BrowserProviderError, browser_provider, desktop_cdp_url, browser_page_identity, _desktop_version
 from backend.services.session_guardian import classify_microsoft_auth_state
 from backend.services.action_pages import url_host
+from backend.services.start_policy import normalize_external_entry_url
 
 logger = logging.getLogger("cotasync.access_cycles")
 
@@ -85,7 +86,7 @@ def create_access_cycle(external_system_id: str, access_profile_id: str) -> dict
             raise ValueError("Sistema externo ou perfil de acesso inválido.")
         if profile.external_system_id != system.id:
             raise ValueError("O perfil de acesso não pertence ao sistema externo.")
-        entry_url = str((system.config or {}).get("entry_url") or "").strip()
+        entry_url = normalize_external_entry_url((system.config or {}).get("entry_url"))
         if not entry_url:
             raise ValueError("O sistema externo não possui entry_url configurado.")
         cycle = AccessCycle(

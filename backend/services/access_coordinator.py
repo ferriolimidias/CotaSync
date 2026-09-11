@@ -17,6 +17,7 @@ from backend.services.runtime_wait import RuntimeWaitTerminal, wait_for_runtime_
 from backend.services.session_guardian import SessionGuardian
 from backend.services.start_policy import (
     EXTERNAL_ENTRY_EACH_RUN,
+    normalize_external_entry_url,
     resolve_external_entry_url,
     validate_fresh_start_context,
 )
@@ -48,7 +49,7 @@ _MICROSOFT_HOSTS = {
 
 def build_microsoft_entry_url(entry_url: str) -> str:
     """Force explicit account selection without discarding OAuth parameters."""
-    raw = str(entry_url or "").strip()
+    raw = normalize_external_entry_url(entry_url)
     parsed = urlsplit(raw)
     host = str(parsed.hostname or "").casefold()
     if host not in _MICROSOFT_HOSTS and not any(host.endswith(f".{item}") for item in _MICROSOFT_HOSTS):
@@ -63,6 +64,16 @@ async def _body_text(page: Any) -> str:
         return str(await page.locator("body").inner_text(timeout=750))[:20_000]
     except Exception:
         return ""
+
+
+def _page_scopes(page: Any) -> list[Any]:
+    """Return the page and child frames where Microsoft renders auth UI."""
+    scopes = [page]
+    try:
+        scopes.extend(frame for frame in page.frames if frame is not page)
+    except Exception:
+        pass
+    return scopes
 
 
 async def _visible(page: Any, selector: str) -> bool:
@@ -194,7 +205,7 @@ class CanonicalAccessCoordinator:
                 if not hasattr(page, "locator"):
                     picker["observed"] = "microsoft" in _safe_page_path(page).casefold()
                     return True
-                text = await _body_text(page)
+                text = "\n".join(await _body_text(scope) for scope in _page_scopes(page))
                 state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier, "microsoft_saved_account_identifier": identifier})
                 is_picker = state.state == "microsoft_pick_account" or "pick an account" in text.casefold() or "escolha uma conta" in text.casefold()
                 if is_picker:
@@ -235,19 +246,53 @@ class CanonicalAccessCoordinator:
             selected = False
             if picker["observed"]:
                 _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_STARTED", "started", access_profile_id=profile_id)
+                selection_restart_count = 0
 
                 async def select_profile() -> bool:
-                    nonlocal selected
+                    nonlocal selected, selection_restart_count
                     if selected:
                         return True
-                    selected = await self.guardian.click_configured_saved_account(
+                    state = await self.guardian.classify(
                         page,
-                        {
-                            "microsoft_saved_account_identifier": identifier,
-                            "access_profile_email_or_identifier": identifier,
-                            "microsoft_saved_account_text": identifier,
-                        },
+                        {**config, "access_profile_email_or_identifier": identifier, "microsoft_saved_account_identifier": identifier},
                     )
+                    text = "\n".join(await _body_text(scope) for scope in _page_scopes(page))
+                    picker_still_visible = (
+                        state.state == "microsoft_pick_account"
+                        or "pick an account" in text.casefold()
+                        or "escolha uma conta" in text.casefold()
+                    )
+                    if not picker_still_visible:
+                        # A pre-existing Microsoft session must never become a
+                        # successful profile selection for this logical unit.
+                        if selection_restart_count < 1:
+                            selection_restart_count += 1
+                            _emit(timeline, "access", "ACCOUNT_PICKER_SELECTION_LOST", "retrying", access_profile_id=profile_id)
+                            _emit(
+                                timeline,
+                                "external_entry",
+                                "CANONICAL_ENTRY_NAVIGATION_STARTED",
+                                "retrying",
+                                canonical_entry_url_source="ExternalSystem.entry_url",
+                                entry_url=entry_url,
+                            )
+                            await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
+                            return False
+                        raise AccessCycleError(
+                            "O Account Picker deixou de estar disponível antes da seleção explícita do perfil.",
+                            code="account_picker_selection_lost",
+                            stage="account_picker",
+                        )
+                    selection_action = {
+                        "microsoft_saved_account_identifier": identifier,
+                        "access_profile_email_or_identifier": identifier,
+                        "microsoft_saved_account_text": identifier,
+                    }
+                    selected = False
+                    for scope in _page_scopes(page):
+                        if await self.guardian.click_configured_saved_account(scope, selection_action):
+                            selected = True
+                            break
                     return selected
 
                 await wait_for_runtime_state(
@@ -261,8 +306,12 @@ class CanonicalAccessCoordinator:
                 async def confirm_selection() -> bool:
                     if not hasattr(page, "locator"):
                         return True
+                    text = "\n".join(await _body_text(scope) for scope in _page_scopes(page))
                     state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier})
-                    return state.state != "microsoft_pick_account"
+                    picker_visible = state.state == "microsoft_pick_account" or any(
+                        marker in text.casefold() for marker in ("pick an account", "escolha uma conta", "selecionar uma conta")
+                    )
+                    return not picker_visible
 
                 await wait_for_runtime_state(
                     confirm_selection,

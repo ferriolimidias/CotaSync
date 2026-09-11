@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 from backend.db import ExternalSystem, SessionLocal
+from backend.services.start_policy import normalize_external_entry_url
 
 
 DEFAULT_ACCESS_PROFILE = {
@@ -130,6 +131,8 @@ def load_current_external_system() -> dict[str, Any]:
                     result["entry_url"] = result["external_login_url"]
                 if not result["external_login_url"]:
                     result["external_login_url"] = result["entry_url"]
+                result["entry_url"] = normalize_external_entry_url(result["entry_url"])
+                result["external_login_url"] = normalize_external_entry_url(result["external_login_url"])
                 result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
                 _normalize_access_profile_fields(result)
                 result["updated_at"] = payload.get("updated_at")
@@ -158,6 +161,8 @@ def save_current_external_system(payload: dict[str, Any]) -> dict[str, Any]:
     result["microsoft_hosts"] = _normalize_microsoft_hosts(payload.get("microsoft_hosts"))
     result["entry_url"] = result["entry_url"] or result["external_login_url"]
     result["external_login_url"] = result["external_login_url"] or result["entry_url"]
+    result["entry_url"] = normalize_external_entry_url(result["entry_url"])
+    result["external_login_url"] = normalize_external_entry_url(result["external_login_url"])
     result["run_start_strategy"] = result["run_start_strategy"] or "persistent_graph_reentry"
     if result["run_start_strategy"] not in {"persistent_graph_reentry", "external_entry_each_run"}:
         raise ExternalSystemConfigError("Estratégia de início inválida.")

@@ -17,3 +17,4 @@ def test_learning_get_preserves_access_cycle_and_workspace_contract():
     ), patch.object(demo_session_manager, "recording_diagnostics", AsyncMock(return_value=diagnostics)):
         response = asyncio.run(learning_get_session("learning-a", None))
     assert response["session"] == {**snapshot, **diagnostics}
+
