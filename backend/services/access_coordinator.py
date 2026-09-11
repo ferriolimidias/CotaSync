@@ -76,6 +76,20 @@ def _page_scopes(page: Any) -> list[Any]:
     return scopes
 
 
+def _is_account_picker_scope(scope: Any, text: str) -> bool:
+    try:
+        scope_url = str(getattr(scope, "url", "") or "").casefold()
+    except Exception:
+        scope_url = ""
+    normalized = str(text or "").casefold()
+    return (
+        "savedusers" in scope_url
+        or "pick an account" in normalized
+        or "escolha uma conta" in normalized
+        or "selecionar uma conta" in normalized
+    )
+
+
 async def _visible(page: Any, selector: str) -> bool:
     try:
         locator = page.locator(selector).first
@@ -205,9 +219,12 @@ class CanonicalAccessCoordinator:
                 if not hasattr(page, "locator"):
                     picker["observed"] = "microsoft" in _safe_page_path(page).casefold()
                     return True
-                text = "\n".join(await _body_text(scope) for scope in _page_scopes(page))
+                scope_texts = [(scope, await _body_text(scope)) for scope in _page_scopes(page)]
+                text = "\n".join(value for _, value in scope_texts)
                 state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier, "microsoft_saved_account_identifier": identifier})
-                is_picker = state.state == "microsoft_pick_account" or "pick an account" in text.casefold() or "escolha uma conta" in text.casefold()
+                is_picker = state.state == "microsoft_pick_account" or any(
+                    _is_account_picker_scope(scope, value) for scope, value in scope_texts
+                )
                 if is_picker:
                     picker["observed"] = True
                     _emit(timeline, "access", "ACCOUNT_PICKER_OBSERVED", "observed", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
@@ -256,11 +273,10 @@ class CanonicalAccessCoordinator:
                         page,
                         {**config, "access_profile_email_or_identifier": identifier, "microsoft_saved_account_identifier": identifier},
                     )
-                    text = "\n".join(await _body_text(scope) for scope in _page_scopes(page))
-                    picker_still_visible = (
-                        state.state == "microsoft_pick_account"
-                        or "pick an account" in text.casefold()
-                        or "escolha uma conta" in text.casefold()
+                    scope_texts = [(scope, await _body_text(scope)) for scope in _page_scopes(page)]
+                    text = "\n".join(value for _, value in scope_texts)
+                    picker_still_visible = state.state == "microsoft_pick_account" or any(
+                        _is_account_picker_scope(scope, value) for scope, value in scope_texts
                     )
                     if not picker_still_visible:
                         # A pre-existing Microsoft session must never become a
@@ -306,10 +322,11 @@ class CanonicalAccessCoordinator:
                 async def confirm_selection() -> bool:
                     if not hasattr(page, "locator"):
                         return True
-                    text = "\n".join(await _body_text(scope) for scope in _page_scopes(page))
+                    scope_texts = [(scope, await _body_text(scope)) for scope in _page_scopes(page)]
+                    text = "\n".join(value for _, value in scope_texts)
                     state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier})
                     picker_visible = state.state == "microsoft_pick_account" or any(
-                        marker in text.casefold() for marker in ("pick an account", "escolha uma conta", "selecionar uma conta")
+                        _is_account_picker_scope(scope, value) for scope, value in scope_texts
                     )
                     return not picker_visible
 
