@@ -263,6 +263,15 @@ class PersistentBatchWorker:
             while not self.stop_event.is_set():
                 self._reap_access_tasks()
                 await release_unavailable_profile_sessions()
+                recovered_access = recover_stale_access_cycles(
+                    utc_now() - timedelta(seconds=stale_seconds())
+                )
+                if recovered_access:
+                    logger.warning(
+                        "AccessCycles stale recuperados durante o loop worker=%s count=%s",
+                        self.instance_id,
+                        recovered_access,
+                    )
                 self.heartbeat("access_cycle_waiting" if self.current_access_cycle_id else "idle")
                 await self.schedule_access_cycle_once()
                 if self.access_tasks:
