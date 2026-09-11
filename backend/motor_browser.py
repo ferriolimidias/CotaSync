@@ -69,6 +69,14 @@ if not _LOGGER.handlers:
     _LOGGER.addHandler(file_handler)
     _LOGGER.propagate = False
 
+_MICROSOFT_AUTH_HOST_SUFFIXES = (
+    "login.microsoftonline.com",
+    "login.live.com",
+    "login.microsoft.com",
+    "login.windows.net",
+    "m365.cloud.microsoft",
+)
+
 
 class PassoCartografo(BaseModel):
     raciocinio: str = Field(description="Explicação curta do próximo passo.")
@@ -883,6 +891,12 @@ async def _visible_text(page: Any, text: str) -> Any:
 async def _page_terminal_state(page: Any) -> Any:
     if page is None or (hasattr(page, "is_closed") and page.is_closed()):
         return RuntimeWaitTerminal("browser_unavailable", "O browser deixou de estar disponível durante a espera.")
+    # Authentication text is meaningful only on a Microsoft authentication
+    # page. External systems commonly render ordinary labels such as
+    # "Senha" and must never trip this terminal probe.
+    current_host = url_host(_safe_result_url(str(getattr(page, "url", "") or "")))
+    if not any(current_host == suffix or current_host.endswith(f".{suffix}") for suffix in _MICROSOFT_AUTH_HOST_SUFFIXES):
+        return None
     try:
         body = str(await page.locator("body").inner_text(timeout=500)).casefold()
     except Exception:

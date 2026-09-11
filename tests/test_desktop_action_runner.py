@@ -28,6 +28,8 @@ from backend.services.file_names import safe_file_name
 from backend.services.result_selection import extract_with_contract
 from backend.services.runs_repository import get_run
 from backend.services.session_guardian import SessionGuardian, SessionGuardianConfig
+from backend.motor_browser import _page_terminal_state
+from backend.services.runtime_wait import RuntimeWaitTerminal, wait_for_runtime_state
 from backend.motor_browser import (
     is_learned_client_query_transition,
     query_result_matches_inputs,
@@ -340,6 +342,50 @@ class FakeGuardianPage:
 
     def has_visible_text(self, text: str) -> bool:
         return str(text or "").casefold() in self.body_text.casefold()
+
+
+class RuntimeTerminalProbeTests(unittest.TestCase):
+    def test_external_page_password_word_is_not_reauthentication(self) -> None:
+        page = FakeGuardianPage(
+            "https://nwcweb.randonconsorcios.com.br/frmMain.aspx",
+            "Intranet Newcon\nSenha expira em: 31/12/3000",
+        )
+        self.assertIsNone(asyncio.run(_page_terminal_state(page)))
+
+    def test_microsoft_password_page_is_reauthentication(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/login",
+            "Sign in\nEnter password",
+            password_visible=True,
+        )
+        terminal = asyncio.run(_page_terminal_state(page))
+        self.assertIsInstance(terminal, RuntimeWaitTerminal)
+        self.assertEqual(terminal.code, "reauth_required")
+
+    def test_microsoft_mfa_page_is_reauthentication(self) -> None:
+        page = FakeGuardianPage(
+            "https://login.microsoftonline.com/common/login",
+            "Approve sign in request",
+        )
+        terminal = asyncio.run(_page_terminal_state(page))
+        self.assertIsInstance(terminal, RuntimeWaitTerminal)
+        self.assertEqual(terminal.code, "reauth_required")
+
+    def test_external_ready_wait_ignores_password_word(self) -> None:
+        page = FakeGuardianPage(
+            "https://nwcweb.randonconsorcios.com.br/frmMain.aspx",
+            "Intranet Newcon\nSenha expira em: 31/12/3000",
+            visible_selectors={"#ctl00_img_Atendimento"},
+        )
+        result = asyncio.run(
+            wait_for_runtime_state(
+                lambda: page.locator("#ctl00_img_Atendimento"),
+                state_name="external system ready step",
+                terminal_probe=lambda: _page_terminal_state(page),
+                poll_interval_seconds=0.05,
+            )
+        )
+        self.assertIsNotNone(result)
 
 
 class DesktopActionPageTests(unittest.TestCase):
