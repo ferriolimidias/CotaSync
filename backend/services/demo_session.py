@@ -4259,6 +4259,9 @@ class DemoSessionManager:
 
         learned_action = canonicalize_graph_metadata(learned_action)
         learned_action = normalize_compiled_graph_sources(learned_action)
+        # Keep publication provenance explicit: the endpoint's session is the
+        # only learning source allowed to produce this ActionVersion.
+        learned_action["learning_session_id"] = str(session.id)
 
         screenshot_path = _DATA_DIR / f"mapeamento_{_safe_file_name(action_name)}.png"
         await session.page.screenshot(path=str(screenshot_path), full_page=False)

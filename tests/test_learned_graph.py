@@ -131,6 +131,25 @@ class LearnedGraphTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertEqual(result["errors"][0]["code"], "step_source_state_mismatch")
 
+    def test_publication_rejects_disconnected_terminal_path(self) -> None:
+        result = validate_compiled_action_graph(
+            {
+                "execution_model": "learned_graph",
+                "robust_steps": [
+                    {"step_id": "first", "tipo": "clicar", "before_state_id": "entry"},
+                    {"step_id": "orphan", "tipo": "clicar", "before_state_id": "orphan"},
+                ],
+                "learned_states": [{"state_id": "entry"}, {"state_id": "ready"}, {"state_id": "orphan"}],
+                "learned_transitions": [
+                    {"transition_id": "t1", "sequence_index": 0, "from_state_id": "entry", "to_state_id": "ready", "step_id": "first"},
+                    {"transition_id": "t2", "sequence_index": 1, "from_state_id": "orphan", "to_state_id": "orphan", "step_id": "orphan"},
+                ],
+                "output_states": [{"state_id": "orphan"}],
+            }
+        )
+        self.assertFalse(result["valid"])
+        self.assertIn("graph_state_unreachable", {item["code"] for item in result["errors"]})
+
     def test_reentrancy_validator_rejects_terminal_graph_without_return_path(self) -> None:
         result = validate_graph_reentrancy(
             {

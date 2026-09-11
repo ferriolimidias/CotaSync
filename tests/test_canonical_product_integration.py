@@ -190,10 +190,9 @@ def test_canonical_learning_publication_and_individual_preflight(canonical_produ
     with SessionLocal.begin() as db:
         version = db.get(ActionVersion, ids["version"])
         version.definition = {**version.definition, "access_bootstrap": []}
-    assert preflight_action_execution(action, client_id=ids["clients"][0], variables={"grupo": "100", "cota": "200", "versao": "00"})["ok"] is False
-    with SessionLocal.begin() as db:
-        version = db.get(ActionVersion, ids["version"])
-        version.definition = {**version.definition, "access_bootstrap": [{"event_type": "click", "selector": "[data-profile='integration']"}]}
+    # Access is owned by AccessCycle; legacy action bootstrap metadata is not
+    # an execution prerequisite.
+    assert preflight_action_execution(action, client_id=ids["clients"][0], variables={"grupo": "100", "cota": "200", "versao": "00"})["ok"] is True
 
 
 def test_canonical_individual_and_batch_outputs_are_isolated_and_google_is_separate(canonical_product):

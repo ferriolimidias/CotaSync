@@ -24,7 +24,6 @@ from backend.services.clients_repository import (
     validate_clients_for_action,
 )
 from backend.services.learned_graph import validate_graph_reentrancy
-from backend.services.access_profiles import validate_access_bootstrap
 from backend.services.start_policy import requires_external_entry, resolve_external_entry_url
 from backend.services.execution_preflight import preflight_action_execution
 
@@ -574,9 +573,6 @@ def create_batch(
             config = external_system.config if external_system is not None else {}
             if not resolve_external_entry_url(config):
                 raise BatchRunnerError("Ação com entrada externa precisa de entry_url configurado.")
-            bootstrap = validate_access_bootstrap(definition, profile_id=required_profile_id)
-            if not bootstrap["valid"]:
-                raise BatchRunnerError("Ação não possui bootstrap de acesso validado: " + str(bootstrap["code"]))
         else:
             reentrancy = validate_graph_reentrancy(definition)
             if not reentrancy["valid"]:

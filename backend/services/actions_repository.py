@@ -674,7 +674,10 @@ def save_learned_action(action_key: str, learned_action: dict[str, Any]) -> Acti
                 source_version_id=None,
                 definition=definition,
                 variables=version_variables,
-                metadata_json={"source": "learning"},
+                metadata_json={
+                    "source": "learning",
+                    "learning_session_id": str(learned_action.get("learning_session_id") or "") or None,
+                },
                 required_access_profile_id=required_profile_id,
                 run_start_strategy=run_start_strategy,
                 created_at=datetime.now(UTC),

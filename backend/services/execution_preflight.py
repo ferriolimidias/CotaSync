@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from backend.db import Action as DbAction, ActionVersion, Client, ClientList, ExternalAccessProfile, ExternalSystem, SessionLocal
-from backend.services.access_profiles import validate_access_bootstrap
-from backend.services.learned_graph import validate_graph_reentrancy
+from backend.services.learned_graph import validate_compiled_action_graph, validate_graph_reentrancy
 from backend.services.start_policy import requires_external_entry, resolve_external_entry_url, validate_fresh_start_context
 
 
@@ -86,17 +85,22 @@ def preflight_action_execution(
         if not start_context["valid"] and start_context.get("code") == "run_start_strategy_invalid":
             return {"ok": False, "code": "run_start_strategy_invalid", "message": "A estratégia de início da ação é inválida."}
         definition = dict(version.definition or {})
+        graph = validate_compiled_action_graph(definition)
+        if not graph["valid"]:
+            return {
+                "ok": False,
+                "code": "main_graph_invalid",
+                "message": "A ação não possui um grafo executável válido.",
+                "graph_errors": graph["errors"],
+            }
         if requires_external_entry(strategy):
             if not start_context["valid"] and start_context.get("code") == "entry_url_missing":
                 return {"ok": False, "code": "entry_url_missing", "message": "A entrada do sistema não está configurada."}
             if not start_context["valid"] and start_context.get("code") == "access_profile_required":
                 return {"ok": False, "code": "access_profile_required", "message": "A ação precisa de um acesso ativo."}
-            bootstrap = validate_access_bootstrap(definition, profile_id=profile_id)
-            if not bootstrap["valid"]:
-                return {"ok": False, "code": bootstrap["code"], "message": "A ação não possui bootstrap de acesso válido."}
         else:
-            graph = validate_graph_reentrancy(definition)
-            if not graph["valid"]:
+            reentrancy = validate_graph_reentrancy(definition)
+            if not reentrancy["valid"]:
                 return {"ok": False, "code": "main_graph_invalid", "message": "A ação não possui um grafo de reentrada válido."}
 
         missing = _missing_variables(action, variables)

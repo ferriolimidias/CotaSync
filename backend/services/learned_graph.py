@@ -213,6 +213,50 @@ def validate_compiled_action_graph(action: dict[str, Any]) -> dict[str, Any]:
     for output in output_states:
         if isinstance(output, dict) and output.get("state_id") and str(output["state_id"]) not in state_ids:
             errors.append({"code": "invalid_output_state_reference", "state_id": output["state_id"]})
+    if not errors and action.get("execution_model") == "learned_graph":
+        ordered = sorted(
+            (item for item in transitions if isinstance(item, dict)),
+            key=lambda item: int(item.get("sequence_index", item.get("step_index", 0)) or 0),
+        )
+        entry_state = ""
+        if ordered:
+            entry_state = str(ordered[0].get("from_state_id") or ordered[0].get("from_state") or "")
+        adjacency: dict[str, set[str]] = {}
+        for transition in ordered:
+            source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+            target = str(transition.get("to_state_id") or transition.get("to_state") or "")
+            if source and target:
+                adjacency.setdefault(source, set()).add(target)
+        reachable: set[str] = set()
+        pending = deque([entry_state]) if entry_state else deque()
+        while pending:
+            state_id = pending.popleft()
+            if not state_id or state_id in reachable:
+                continue
+            reachable.add(state_id)
+            pending.extend(adjacency.get(state_id, set()) - reachable)
+        for transition in ordered:
+            source = str(transition.get("from_state_id") or transition.get("from_state") or "")
+            if source and source not in reachable:
+                errors.append(
+                    {
+                        "code": "graph_state_unreachable",
+                        "state_id": source,
+                        "transition_id": transition.get("transition_id"),
+                    }
+                )
+        terminal_states = set(output_state_ids)
+        if not terminal_states and ordered:
+            terminal_states.add(str(ordered[-1].get("to_state_id") or ordered[-1].get("to_state") or ""))
+        for terminal_state in terminal_states:
+            if terminal_state and terminal_state not in reachable:
+                errors.append(
+                    {
+                        "code": "graph_terminal_unreachable",
+                        "entry_state_id": entry_state,
+                        "terminal_state_id": terminal_state,
+                    }
+                )
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
