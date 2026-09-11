@@ -15,7 +15,7 @@ from sqlalchemy import select
 from playwright.async_api import async_playwright
 
 from backend.db import AccessCycle, ExternalAccessProfile, ExternalSystem, SessionLocal
-from backend.services.access_coordinator import AccessCycleError, _body_text, _identity_evidence, start_canonical_access
+from backend.services.access_coordinator import AccessCycleError, IdentityEvidenceResult, _body_text, _identity_evidence, start_canonical_access
 from backend.services.access_profiles import active_access_profile_public
 from backend.services.browser_providers import BrowserIdentitySession, BrowserProviderError, browser_provider, desktop_cdp_url, browser_page_identity, _desktop_version
 from backend.services.session_guardian import classify_microsoft_auth_state
@@ -264,9 +264,10 @@ async def validate_current_profile_session(profile_id: str) -> dict[str, Any]:
                         continue
                     expected_host = str(config.get("expected_system_host") or "").lower().rstrip(".")
                     if expected_host and url_host(page.url).lower().rstrip(".") == expected_host:
-                        if await _identity_evidence(page, profile, config):
+                        identity_result = await _identity_evidence(page, profile, config)
+                        if identity_result.status == "match":
                             from backend.services.access_profiles import record_profile_validation
-                            confirmed = record_profile_validation(profile_id, status="verified", reason="passive_identity_verified")
+                            confirmed = record_profile_validation(profile_id, status="verified", reason="passive_identity_verified", identity_evidence=list(identity_result.evidence))
                             return {"profile": confirmed, "available": True, "diagnostic": {"reason": "identity_verified"}}
                     return {"profile": profile, "available": False, "diagnostic": {"reason": "current_identity_not_confirmed"}}
     except Exception as exc:
@@ -286,6 +287,7 @@ async def _validate_owned_access_cycle(cycle_id: str, identity_session: BrowserI
             "reauthentication_required",
             "account_picker_skipped",
             "access_authentication_not_completed",
+            "ACCESS_IDENTITY_NOT_OBSERVED",
             "access_identity_mismatch",
         }
         if cycle.status not in {"starting", "running", "waiting"} and cycle.error_code not in allowed_failed:
@@ -325,7 +327,13 @@ async def _validate_owned_access_cycle(cycle_id: str, identity_session: BrowserI
             return {"status": "waiting", "validated": False, "code": "ACCESS_AUTHENTICATION_NOT_COMPLETED", "message": message, "access_cycle": get_access_cycle(cycle_id)}
 
         _append_event(cycle_id, "access_identity", "ACCESS_IDENTITY_VERIFICATION_STARTED", "started", access_profile_id=profile_id)
-        if not await _identity_evidence(page, profile_data, {"identity_selector": str(config.get("identity_selector") or "")}):
+        identity_result = await _identity_evidence(page, profile_data, {"identity_selector": str(config.get("identity_selector") or "")})
+        if identity_result.status == "unknown":
+            message = "A identidade ainda não está disponível. Aguarde o carregamento do sistema e tente novamente."
+            _append_event(cycle_id, "access_identity", "ACCESS_IDENTITY_VERIFICATION_PENDING", "waiting", access_profile_id=profile_id, host=current_host)
+            _mark_manual_validation_waiting(cycle_id, stage="access_identity", code="ACCESS_IDENTITY_NOT_OBSERVED", message=message)
+            return {"status": "waiting", "validated": False, "code": "ACCESS_IDENTITY_NOT_OBSERVED", "message": message, "access_cycle": get_access_cycle(cycle_id)}
+        if identity_result.status == "mismatch":
             message = "A identidade exibida não corresponde ao perfil de acesso selecionado."
             _append_event(cycle_id, "access_identity", "ACCESS_IDENTITY_MISMATCH", "failed", access_profile_id=profile_id, host=current_host)
             _mark_manual_validation_waiting(cycle_id, stage="access_identity", code="ACCESS_IDENTITY_MISMATCH", message=message)
@@ -336,7 +344,7 @@ async def _validate_owned_access_cycle(cycle_id: str, identity_session: BrowserI
         _append_event(cycle_id, "manual_access_validation", "ACCESS_SESSION_PERSISTED", "success", access_profile_id=profile_id)
         from backend.services.access_profiles import record_profile_validation
 
-        validated_profile = record_profile_validation(profile_id, status="verified", reason="manual_access_validated")
+        validated_profile = record_profile_validation(profile_id, status="verified", reason="manual_access_validated", identity_evidence=list(identity_result.evidence))
         _append_event(cycle_id, "manual_access_validation", "MANUAL_ACCESS_VALIDATION_COMPLETED", "success", access_profile_id=profile_id)
         _append_event(cycle_id, "external_system_ready", "EXTERNAL_SYSTEM_READY", "success", access_profile_id=profile_id, host=current_host)
         _append_event(cycle_id, "external_system_ready", "ACCESS_CYCLE_COMPLETED", "success", access_profile_id=profile_id)
@@ -381,7 +389,8 @@ async def _coordinate_owned_access(cycle_id: str, identity_session: BrowserIdent
                 else:
                     await identity_session.persist()
                     from backend.services.access_profiles import record_profile_validation
-                    record_profile_validation(identity_session.access_profile_id, status="verified", reason="access_identity_verified")
+                    result = task.result()
+                    record_profile_validation(identity_session.access_profile_id, status="verified", reason="access_identity_verified", identity_evidence=list(getattr(result, "identity_evidence", ()) or ()))
                     finish_access_cycle(cycle_id, status="ready")
                     return
             await asyncio.sleep(0.25)

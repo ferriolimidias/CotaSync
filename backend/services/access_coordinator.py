@@ -98,22 +98,50 @@ async def _visible(page: Any, selector: str) -> bool:
         return False
 
 
-async def _identity_evidence(page: Any, profile: dict[str, Any], system: dict[str, Any]) -> bool:
-    """Verify deterministic identity evidence without treating host as identity."""
+@dataclass(frozen=True)
+class IdentityEvidenceResult:
+    status: str
+    observed_identity: str = ""
+    evidence: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.status == "match"
+
+
+def _normalized_identity_values(profile: dict[str, Any]) -> list[str]:
     expected = [
         str(profile.get("login_identifier") or "").strip(),
         str(profile.get("display_name") or "").strip(),
     ]
-    expected = [item.casefold() for item in expected if item]
+    expected.extend(str(item).strip() for item in (profile.get("identity_evidence") or []))
+    return [item.casefold() for item in expected if item]
+
+
+async def _identity_evidence(page: Any, profile: dict[str, Any], system: dict[str, Any]) -> IdentityEvidenceResult:
+    """Classify identity without treating missing evidence as a conflict."""
+    expected = _normalized_identity_values(profile)
     selector = str(system.get("identity_selector") or "").strip()
     if selector:
         try:
-            observed = str(await page.locator(selector).first.inner_text(timeout=1000)).casefold()
+            raw_observed = str(await page.locator(selector).first.inner_text(timeout=1000)).strip()
         except Exception:
-            return False
-        return bool(expected and any(item in observed for item in expected))
-    body = (await _body_text(page)).casefold()
-    return bool(expected and any(item in body for item in expected))
+            return IdentityEvidenceResult("unknown")
+        if not raw_observed:
+            return IdentityEvidenceResult("unknown")
+        observed = raw_observed.casefold()
+        if expected and any(item in observed for item in expected):
+            return IdentityEvidenceResult("match", raw_observed, (raw_observed,))
+        return IdentityEvidenceResult("mismatch", raw_observed, (raw_observed,))
+    raw_body = await _body_text(page)
+    body = raw_body.casefold()
+    if expected and any(item in body for item in expected):
+        matching_lines = tuple(
+            line.strip()[:255]
+            for line in raw_body.splitlines()
+            if line.strip() and any(item in line.casefold() for item in expected)
+        )
+        return IdentityEvidenceResult("match", matching_lines[0] if matching_lines else "", matching_lines[:3])
+    return IdentityEvidenceResult("unknown")
 
 
 @dataclass
@@ -123,6 +151,7 @@ class AccessCycleResult:
     entry_url: str
     bootstrap_events: list[dict[str, Any]] = field(default_factory=list)
     profile_selected: bool = False
+    identity_evidence: tuple[str, ...] = ()
 
 
 class AccessCycleError(RuntimeError):
@@ -264,9 +293,10 @@ class CanonicalAccessCoordinator:
             if picker["observed"]:
                 _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_STARTED", "started", access_profile_id=profile_id)
                 selection_restart_count = 0
+                picker_miss_count = 0
 
                 async def select_profile() -> bool:
-                    nonlocal selected, selection_restart_count
+                    nonlocal selected, selection_restart_count, picker_miss_count
                     if selected:
                         return True
                     state = await self.guardian.classify(
@@ -279,6 +309,12 @@ class CanonicalAccessCoordinator:
                         _is_account_picker_scope(scope, value) for scope, value in scope_texts
                     )
                     if not picker_still_visible:
+                        # Microsoft may replace the auth iframe while the
+                        # picker is settling. One empty probe is not proof
+                        # that explicit profile selection was skipped.
+                        picker_miss_count += 1
+                        if picker_miss_count < 8:
+                            return False
                         # A pre-existing Microsoft session must never become a
                         # successful profile selection for this logical unit.
                         if selection_restart_count < 1:
@@ -299,6 +335,7 @@ class CanonicalAccessCoordinator:
                             code="account_picker_selection_lost",
                             stage="account_picker",
                         )
+                    picker_miss_count = 0
                     selection_action = {
                         "microsoft_saved_account_identifier": identifier,
                         "access_profile_email_or_identifier": identifier,
@@ -381,18 +418,37 @@ class CanonicalAccessCoordinator:
                     on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
                 )
             _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFICATION_STARTED", "started", access_profile_id=profile_id)
-            identity_verified = await _identity_evidence(page, profile, system)
-            if not identity_verified:
+            latest_identity = IdentityEvidenceResult("unknown")
+
+            async def identity_probe() -> IdentityEvidenceResult | None:
+                nonlocal latest_identity
+                latest_identity = await _identity_evidence(page, profile, system)
+                if latest_identity.status == "mismatch":
+                    raise AccessCycleError(
+                        "A identidade externa ativa não corresponde ao perfil de acesso.",
+                        code="access_identity_mismatch",
+                        stage="access_identity",
+                    )
+                return latest_identity if latest_identity.status == "match" else None
+
+            await wait_for_runtime_state(
+                identity_probe,
+                state_name="identidade externa",
+                terminal_probe=terminal_probe,
+                cancellation_probe=cancellation_probe,
+                on_waiting=lambda name: _emit(timeline, "access_identity", "WAITING_EXTERNAL_SYSTEM", "waiting", access_profile_id=profile_id, wait_target=name),
+            )
+            if latest_identity.status != "match":
                 _emit(timeline, "access_identity", "ACCESS_IDENTITY_MISMATCH", "failed", access_profile_id=profile_id)
                 raise AccessCycleError(
                     "A identidade externa ativa não corresponde ao perfil de acesso.",
                     code="access_identity_mismatch",
                     stage="access_identity",
                 )
-            _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFIED", "success", access_profile_id=profile_id)
+            _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFIED", "success", access_profile_id=profile_id, identity_evidence=list(latest_identity.evidence))
             _emit(timeline, "access", "EXTERNAL_SYSTEM_READY", "success", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
             _emit(timeline, "access", "ACCESS_CYCLE_COMPLETED", "success", access_profile_id=profile_id)
-            return AccessCycleResult("external_system_ready", page, effective_entry_url, events, profile_selected=selected)
+            return AccessCycleResult("external_system_ready", page, effective_entry_url, events, profile_selected=selected, identity_evidence=latest_identity.evidence)
         except (AccessCycleError, RuntimeWaitTerminal):
             raise
         except Exception as exc:

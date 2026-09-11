@@ -144,18 +144,49 @@ def test_profile_storage_roundtrip(tmp_path) -> None:
 
 def test_identity_match() -> None:
     page = FakePage("signed in as Priscila")
-    assert asyncio.run(
+    result = asyncio.run(
         _identity_evidence(
             page,
             {"login_identifier": "priscila@example.test", "display_name": "Priscila"},
             {},
         )
-    ) is True
+    )
+    assert result.status == "match"
+    assert result.observed_identity == "signed in as Priscila"
+
+
+def test_identity_without_evidence_is_unknown() -> None:
+    result = asyncio.run(
+        _identity_evidence(
+            FakePage("external system loading"),
+            {"login_identifier": "priscila@example.test", "display_name": "Priscila"},
+            {},
+        )
+    )
+    assert result.status == "unknown"
+
+
+def test_identity_uses_persisted_evidence_alias() -> None:
+    result = asyncio.run(
+        _identity_evidence(
+            FakePage("PRISCILA SUSIN (0000708747)"),
+            {
+                "login_identifier": "priscila@example.test",
+                "display_name": "Priscila",
+                "identity_evidence": ["PRISCILA SUSIN (0000708747)"],
+            },
+            {},
+        )
+    )
+    assert result.status == "match"
+    assert result.evidence == ("PRISCILA SUSIN (0000708747)",)
 
 
 def test_identity_mismatch_with_configured_marker() -> None:
     class Locator:
-        first = None
+        @property
+        def first(self):
+            return self
 
         async def inner_text(self, **_kwargs):
             return "Priscila"
@@ -164,13 +195,15 @@ def test_identity_mismatch_with_configured_marker() -> None:
         def locator(self, _selector):
             return Locator()
 
-    assert asyncio.run(
+    result = asyncio.run(
         _identity_evidence(
             Page(),
             {"login_identifier": "joao@example.test", "display_name": "Joao"},
             {"identity_selector": "[data-current-user]"},
         )
-    ) is False
+    )
+    assert result.status == "mismatch"
+    assert result.observed_identity == "Priscila"
 
 
 def test_multi_output_does_not_reset_session(tmp_path) -> None:

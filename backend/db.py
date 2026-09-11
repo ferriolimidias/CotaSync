@@ -337,6 +337,7 @@ class ExternalAccessProfile(Base):
     validation_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unverified", server_default="unverified", index=True)
     last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_validation_reason: Mapped[str | None] = mapped_column(String(255))
+    identity_evidence: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

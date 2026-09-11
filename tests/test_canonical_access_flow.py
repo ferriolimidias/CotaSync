@@ -4,7 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 import pytest
 
-from backend.services.access_coordinator import AccessCycleError, build_microsoft_entry_url, start_canonical_access
+from backend.services.access_coordinator import AccessCycleError, IdentityEvidenceResult, build_microsoft_entry_url, start_canonical_access
 from backend.services.start_policy import normalize_external_entry_url
 
 
@@ -172,7 +172,7 @@ def test_picker_selection_does_not_override_failed_system_identity():
     from backend.services.access_coordinator import AccessCycleError
     page = _Page()
     events = []
-    with patch("backend.services.access_coordinator._identity_evidence", new=AsyncMock(return_value=False)):
+    with patch("backend.services.access_coordinator._identity_evidence", new=AsyncMock(return_value=IdentityEvidenceResult("mismatch", "other-user@example.test", ("other-user@example.test",)))):
         with pytest.raises(AccessCycleError) as failure:
             asyncio.run(start_canonical_access(
                 page,
@@ -185,6 +185,38 @@ def test_picker_selection_does_not_override_failed_system_identity():
     assert "ACCESS_PROFILE_SELECTION_COMPLETED" in events
     assert "ACCESS_IDENTITY_VERIFIED" not in events
     assert "EXTERNAL_SYSTEM_READY" not in events
+
+
+def test_identity_evidence_is_retried_until_late_dom_identity_appears():
+    class DelayedIdentityPage(_Page):
+        def __init__(self):
+            super().__init__()
+            self.body_reads = 0
+
+        def locator(self, selector):
+            locator = super().locator(selector)
+            if selector != "body":
+                return locator
+            original = locator.inner_text
+
+            async def inner_text(**kwargs):
+                self.body_reads += 1
+                if self.body_reads == 2:
+                    return "external system loading"
+                return await original(**kwargs)
+
+            locator.inner_text = inner_text
+            return locator
+
+    page = DelayedIdentityPage()
+    result = asyncio.run(start_canonical_access(
+        page,
+        external_system={"entry_url": "https://login.microsoftonline.com/entry", "expected_system_host": "external.example.test", "run_start_strategy": "external_entry_each_run"},
+        access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+        action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
+    ))
+    assert result.state == "external_system_ready"
+    assert page.body_reads >= 3
 
 
 def test_canonical_access_never_uses_residual_page_as_start():

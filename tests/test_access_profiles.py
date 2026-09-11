@@ -48,6 +48,17 @@ class AccessProfileTests(unittest.TestCase):
         with self.assertRaises(AccessProfileError):
             record_profile_validation(profile["id"], status="available", tenant_id="other-tenant")
 
+    def test_verified_identity_evidence_is_durable(self) -> None:
+        profile = create_access_profile(external_system_id=self.system_id, display_name="Durable identity", login_identifier=f"identity-{uuid4()}@example.test")
+        updated = record_profile_validation(
+            profile["id"],
+            status="verified",
+            reason="manual_access_validated",
+            identity_evidence=["DISPLAYED USER (0001)", "ignored-after-limit"],
+        )
+        self.assertEqual(updated["identity_evidence"], ["DISPLAYED USER (0001)", "ignored-after-limit"])
+        self.assertEqual(next(item for item in list_access_profiles() if item["id"] == profile["id"])["identity_evidence"], ["DISPLAYED USER (0001)", "ignored-after-limit"])
+
     def test_picker_uses_identifier_not_dom_order(self) -> None:
         text = "Pick an account João Signed in Priscila Susin D0004267@rdmz.com.br Signed in Maria Signed in"
         result = detect_microsoft_account_picker(text, ["D0004267@rdmz.com.br"])

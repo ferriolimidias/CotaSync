@@ -132,6 +132,7 @@ def _public(row: ExternalAccessProfile, *, system_name: str = "") -> dict[str, A
         "validation_status": row.validation_status or "unverified",
         "last_validated_at": row.last_validated_at.isoformat() if row.last_validated_at else None,
         "last_validation_reason": row.last_validation_reason or "",
+        "identity_evidence": [str(item)[:255] for item in (row.identity_evidence or []) if str(item).strip()][:10],
         # Kept for compatibility with the existing live-validation response.
         "session_status": row.validation_status or "unverified",
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -191,6 +192,7 @@ def record_profile_validation(
     *,
     status: str,
     reason: str = "",
+    identity_evidence: list[str] | None = None,
     tenant_id: str = "default",
 ) -> dict[str, Any]:
     allowed = {"available", "verified", "reauth_required", "not_found", "unknown", "browser_offline"}
@@ -209,6 +211,8 @@ def record_profile_validation(
         row.validation_status = normalized
         row.last_validated_at = datetime.now(UTC)
         row.last_validation_reason = str(reason or "")[:255] or None
+        if identity_evidence is not None and normalized == "verified":
+            row.identity_evidence = [str(item).strip()[:255] for item in identity_evidence if str(item).strip()][:10]
         system = db.get(ExternalSystem, row.external_system_id)
         return _public(row, system_name=system.name if system else "")
 
