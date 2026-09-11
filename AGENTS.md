@@ -1,5 +1,12 @@
 # CotaSync Product Invariants
 
+Manual authentication validation is worker-owned. HTTP requests only enqueue
+validation on the AccessCycle's existing isolated session. Never create a new
+browser context to validate a page reached by the user. Stop automation before
+inspection, persist only verified sessions, and keep terminal cycle states
+immune to later heartbeat updates. Cover this with real CDP contract tests,
+not a new_context mock that returns the user's existing page.
+
 The permanent product invariants are defined in
 [`docs/PRODUCT_INVARIANTS.md`](docs/PRODUCT_INVARIANTS.md). Any change to
 learning, individual execution, batch execution, or browser start behavior
@@ -76,8 +83,8 @@ never between steps or outputs of the same Action.
 `AUTH_SESSION_ISOLATED_PER_ACCESS_PROFILE` is permanent: authentication
 storage belongs to `ExternalAccessProfile`, never to a global browser
 identity. The same profile may reuse its session; switching profiles must
-activate an isolated session or the provider's controlled storage-clearing
-boundary before access begins.
+activate that profile's isolated session before access begins. Clearing a
+shared context is not a substitute for per-profile isolation.
 
 `VERIFY_EXTERNAL_IDENTITY_BEFORE_ACTION` is also permanent: being inside the
 external system does not prove the correct identity. The access coordinator

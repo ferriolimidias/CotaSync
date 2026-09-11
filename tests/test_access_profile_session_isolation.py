@@ -47,7 +47,8 @@ class StorageContext(FakeContext):
         super().__init__()
         self.state = state
 
-    async def storage_state(self, *, path: str) -> None:
+    async def storage_state(self, *, path: str, indexed_db: bool = False) -> None:
+        assert indexed_db is True
         Path(path).write_text(json.dumps({"state": self.state}), encoding="utf-8")
 
 

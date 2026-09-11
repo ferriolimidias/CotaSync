@@ -2,6 +2,19 @@
 
 These are permanent product rules, not implementation suggestions.
 
+## INVARIANT: MANUAL_VALIDATION_USES_OWNED_SESSION
+
+Manual validation observes the live isolated session owned by the AccessCycle's
+worker. HTTP requests enqueue validation; they do not create browser contexts.
+Automation stops before manual validation observes the page. Only confirmed
+external-system identity permits session persistence and access completion.
+A heartbeat must never revert a completed cycle to running/waiting.
+
+The Playwright connection owning an isolated context must stay alive while the
+page is in use. Storage snapshots do not preserve a live page across a CDP
+disconnect. Tests must exercise this boundary against real CDP with synthetic
+pages and must not navigate an existing operational page.
+
 ## INVARIANT: FRESH_LOGICAL_START
 
 Every new logical execution unit starts at the external entry:
@@ -66,10 +79,10 @@ default, or account-picker ordinal is never a fallback.
 ## INVARIANT: AUTH_SESSION_ISOLATED_PER_ACCESS_PROFILE
 
 Authentication and session state belong to an `ExternalAccessProfile`, not
-to a global browser identity. The same profile may reuse its session. When
-the desktop CDP provider must switch profiles in its shared persistent
-context, it clears authentication cookies and web storage at that boundary
-before the new access cycle proceeds.
+to a global browser identity. The same profile may reuse its isolated session.
+Switching profiles selects the other profile's isolated context; it must not
+clear or substitute a shared/global context. Verified storage is persisted
+exclusively under the owning profile's storage key.
 
 If an isolated browser context cannot be provided, the operation fails
 closed with `ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE`; the global or

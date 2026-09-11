@@ -20,6 +20,7 @@ from backend.services.access_cycles import (
     recover_stale_access_cycles,
     reset_worker_access_executor,
     touch_access_cycle,
+    release_unavailable_profile_sessions,
 )
 from backend.schemas.runs import ActionRunRequest
 from backend.services.action_runner import missing_required_variables, run_action_sync
@@ -261,6 +262,7 @@ class PersistentBatchWorker:
         try:
             while not self.stop_event.is_set():
                 self._reap_access_tasks()
+                await release_unavailable_profile_sessions()
                 self.heartbeat("access_cycle_waiting" if self.current_access_cycle_id else "idle")
                 await self.schedule_access_cycle_once()
                 if self.access_tasks:
@@ -285,6 +287,7 @@ class PersistentBatchWorker:
                 with suppress(asyncio.CancelledError):
                     await task
             self.access_tasks.clear()
+            await release_unavailable_profile_sessions(shutdown=True)
             with SessionLocal.begin() as session:
                 row = session.get(WorkerInstance, self.worker_row_id)
                 if row is not None:

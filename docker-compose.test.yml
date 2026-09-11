@@ -75,6 +75,7 @@ services:
       - "127.0.0.1:${BACKEND_PORT:-8100}:8000"
     volumes:
       - .:/app
+      - cotasync_test_access_profile_storage:/data/access_profiles
     networks:
       - cotasync_test_net
     restart: unless-stopped

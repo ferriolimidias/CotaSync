@@ -108,6 +108,7 @@ function EnsinarPage() {
       void queryClient.invalidateQueries({ queryKey: ["learning-access-cycle", learningCycleId] });
       void queryClient.invalidateQueries({ queryKey: ["learning-session", sessionId] });
       if (result.validated) toast.success("Usuário autenticado e acesso validado. O ensino será liberado.");
+      else if (result.status === "validation_requested") toast.info(result.message);
       else toast.warning(result.message || "Finalize a autenticação no navegador antes de validar o acesso.");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Não foi possível validar o acesso."),

@@ -44,7 +44,7 @@ from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
 from backend.services.browser_observation import browser_observation_service
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
-from backend.services.access_cycles import AccessCycleError, create_access_cycle, get_access_cycle, validate_manual_access_cycle
+from backend.services.access_cycles import AccessCycleError, create_access_cycle, get_access_cycle, validate_manual_access_cycle, validate_current_profile_session
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -93,9 +93,7 @@ from backend.services.access_profiles import (
     current_external_system_id,
     delete_access_profile,
     list_access_profiles,
-    record_profile_validation,
     update_access_profile,
-    validate_profile_from_observation,
 )
 from backend.services.deletions import DeletionError, delete_client, delete_clients, delete_client_list, delete_system_spreadsheet
 from backend.services.google_settings import public_settings as public_google_settings, remove_credentials as remove_google_credentials, save_credentials as save_google_credentials
@@ -1583,17 +1581,10 @@ async def access_profile_delete(profile_id: str, _admin: AuthUser = Depends(requ
 @router.post("/access-profiles/{profile_id}/validate", summary="Valida disponibilidade do perfil no navegador")
 async def access_profile_validate(profile_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
-        profile = active_access_profile_public(profile_id)
+        result = await validate_current_profile_session(profile_id)
     except AccessProfileError as exc:
         raise _error(404, "ACCESS_PROFILE_NOT_FOUND", str(exc)) from exc
-    observation = await browser_observation_service.observe_deep(source="access_profile_validate")
-    if not observation.browser_available:
-        persisted = record_profile_validation(profile_id, status="browser_offline", reason="browser_unavailable")
-        return {"status": "ok", "profile": persisted, "available": False}
-    if not observation.page_available:
-        persisted = record_profile_validation(profile_id, status="unknown", reason="page_unavailable")
-        return {"status": "ok", "profile": persisted, "available": False}
-    return {"status": "ok", **validate_profile_from_observation(profile, observation)}
+    return {"status": "ok", **result}
 
 
 @router.post("/access-profiles/{profile_id}/authenticate", summary="Abre a entrada para autenticação manual do perfil")
@@ -1765,7 +1756,7 @@ async def external_session_validate(_user: AuthUser = Depends(require_user)) -> 
     validated_profiles = []
     for profile in profiles:
         if profile.get("active"):
-            validated_profiles.append(validate_profile_from_observation(profile, observation))
+            validated_profiles.append(await validate_current_profile_session(str(profile["id"])))
     persisted_profiles = [item["profile"] for item in validated_profiles]
     profile_summary, available_count, profile_count = _microsoft_profile_summary(persisted_profiles)
     external_session["session_status"] = _external_session_status_from_observation(config, observation, profiles=persisted_profiles)

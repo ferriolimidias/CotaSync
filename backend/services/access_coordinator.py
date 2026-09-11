@@ -316,8 +316,6 @@ class CanonicalAccessCoordinator:
                 )
             _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFICATION_STARTED", "started", access_profile_id=profile_id)
             identity_verified = await _identity_evidence(page, profile, system)
-            if not identity_verified and picker["observed"] and selected:
-                identity_verified = True
             if not identity_verified:
                 _emit(timeline, "access_identity", "ACCESS_IDENTITY_MISMATCH", "failed", access_profile_id=profile_id)
                 raise AccessCycleError(

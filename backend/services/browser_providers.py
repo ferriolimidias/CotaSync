@@ -95,7 +95,23 @@ class BrowserIdentitySession:
         if self.profile_context is None:
             return
         self.storage_root.mkdir(parents=True, exist_ok=True)
-        await self.profile_context.storage_state(path=str(self.storage_path))
+        with NamedTemporaryFile(dir=self.storage_root, delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+        try:
+            await self.profile_context.storage_state(path=str(temporary_path), indexed_db=True)
+            os.replace(temporary_path, self.storage_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+
+async def browser_page_identity(context: Any, page: Any) -> dict[str, str]:
+    """Read CDP ownership without navigating or inspecting authentication data."""
+    session = await context.new_cdp_session(page)
+    try:
+        target = (await session.send("Target.getTargetInfo"))["targetInfo"]
+        return {"target_id": target["targetId"], "context_id": target["browserContextId"]}
+    finally:
+        await session.detach()
 
 
 def remove_browser_identity_storage(access_profile_id: str, *, storage_root: str | Path | None = None) -> bool:

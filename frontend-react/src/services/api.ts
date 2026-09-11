@@ -658,7 +658,7 @@ export async function deleteAccessProfile(id: string) {
 }
 
 export async function getAccessCycle(id: string) {
-  const payload = await apiFetch<{ access_cycle: { access_cycle_id: string; access_profile_id: string; status: string; stage: string; error_code?: string | null; error_message?: string | null; events: Array<Record<string, unknown>> } }>(`/api/v1/access-cycles/${id}`);
+  const payload = await apiFetch<{ access_cycle: { access_cycle_id: string; access_profile_id: string; status: string; stage: string; manual_validation_pending?: boolean; error_code?: string | null; error_message?: string | null; events: Array<Record<string, unknown>> } }>(`/api/v1/access-cycles/${id}`);
   return payload.access_cycle;
 }
 

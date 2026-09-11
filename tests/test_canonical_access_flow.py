@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, patch
+import pytest
 
 from backend.services.access_coordinator import build_microsoft_entry_url, start_canonical_access
 
@@ -29,7 +31,7 @@ class _Locator:
             self.page.visible_selectors = {"#accept"}
             self.page.url = "https://login.microsoftonline.com/consent"
         elif self.selector == "#accept":
-            self.page.body = "External system"
+            self.page.body = "External system\nworker@example.test"
             self.page.visible_selectors = set()
             self.page.url = "https://external.example.test/home"
 
@@ -112,6 +114,25 @@ def test_canonical_access_selects_profile_before_learned_bootstrap():
     assert page.url == "https://external.example.test/home"
 
 
+def test_picker_selection_does_not_override_failed_system_identity():
+    from backend.services.access_coordinator import AccessCycleError
+    page = _Page()
+    events = []
+    with patch("backend.services.access_coordinator._identity_evidence", new=AsyncMock(return_value=False)):
+        with pytest.raises(AccessCycleError) as failure:
+            asyncio.run(start_canonical_access(
+                page,
+                external_system={"entry_url": "https://login.microsoftonline.com/entry", "expected_system_host": "external.example.test", "run_start_strategy": "external_entry_each_run"},
+                access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
+                action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
+                timeline=lambda _stage, event, _status, **_context: events.append(event),
+            ))
+    assert failure.value.code == "access_identity_mismatch"
+    assert "ACCESS_PROFILE_SELECTION_COMPLETED" in events
+    assert "ACCESS_IDENTITY_VERIFIED" not in events
+    assert "EXTERNAL_SYSTEM_READY" not in events
+
+
 def test_canonical_access_never_uses_residual_page_as_start():
     page = _Page()
     asyncio.run(
@@ -119,11 +140,11 @@ def test_canonical_access_never_uses_residual_page_as_start():
             page,
             external_system={"entry_url": "https://login.microsoftonline.com/entry", "run_start_strategy": "external_entry_each_run"},
             access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
-            action={},
+            action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
             require_external_system=False,
         )
     )
-    assert page.url == "https://login.microsoftonline.com/consent"
+    assert page.url == "https://external.example.test/home"
     assert "old-result" not in page.url
 
 
@@ -170,7 +191,7 @@ def test_canonical_entry_ignores_action_navigation_metadata():
                 "run_start_strategy": "external_entry_each_run",
             },
             access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
-            action={"entry_url": "https://m365.cloud.microsoft/residual", "url_inicial": "https://wrong.example.test"},
+            action={"entry_url": "https://m365.cloud.microsoft/residual", "url_inicial": "https://wrong.example.test", "access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
             timeline=lambda _stage, event, _status, **context: events.append((event, context)),
             require_external_system=False,
         )
@@ -205,7 +226,7 @@ def test_batch_clients_each_get_one_entry_and_outputs_do_not_restart_entry():
                 page,
                 external_system={"entry_url": "https://configured.example.test/entry", "run_start_strategy": "external_entry_each_run"},
                 access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
-                action={},
+                action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
                 require_external_system=False,
             )
         )
@@ -217,7 +238,7 @@ def test_batch_clients_each_get_one_entry_and_outputs_do_not_restart_entry():
             same_client,
             external_system={"entry_url": "https://configured.example.test/entry", "run_start_strategy": "external_entry_each_run"},
             access_profile={"id": "profile-a", "login_identifier": "worker@example.test"},
-            action={},
+            action={"access_bootstrap": [{"event_type": "click", "selector": "#accept"}]},
             require_external_system=False,
         )
     )

@@ -4,10 +4,36 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
+import sys
+from types import SimpleNamespace
+import pytest
+from sqlalchemy.orm import sessionmaker
 
 from backend.db import AccessCycle, ExternalAccessProfile, ExternalSystem, SessionLocal
 from backend.services.access_cycles import claim_next_access_cycle, recover_stale_access_cycles
 from backend.worker import PersistentBatchWorker
+
+
+@pytest.fixture(autouse=True)
+def isolated_queue(monkeypatch):
+    from backend.db import engine
+    from backend.services import access_cycles
+    from backend.services import access_profiles
+    import backend.worker as worker_module
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        factory = sessionmaker(bind=connection, expire_on_commit=False, join_transaction_mode="create_savepoint")
+        monkeypatch.setattr(sys.modules[__name__], "SessionLocal", factory)
+        monkeypatch.setattr(access_cycles, "SessionLocal", factory)
+        monkeypatch.setattr(access_profiles, "SessionLocal", factory)
+        monkeypatch.setattr(worker_module, "SessionLocal", factory)
+        with factory.begin() as session:
+            session.query(AccessCycle).delete()
+        try:
+            yield
+        finally:
+            transaction.rollback()
+            access_cycles._LIVE_PROFILE_SESSIONS.clear()
 
 
 def test_auto_consume_calls_access_cycle_executor():
@@ -149,7 +175,8 @@ def test_first_coordinator_event_is_canonical_entry_navigation():
         class _Browser:
             def __init__(self):
                 context = type("Context", (), {"pages": []})()
-                context.new_page = AsyncMock(return_value=object())
+                context.new_page = AsyncMock(return_value=SimpleNamespace(bring_to_front=AsyncMock()))
+                context.storage_state = AsyncMock()
                 self.new_context = AsyncMock(return_value=context)
 
         connect = AsyncMock(return_value=type("Connection", (), {"page": object(), "context": _Context(), "browser": _Browser()})())
@@ -164,7 +191,7 @@ def test_first_coordinator_event_is_canonical_entry_navigation():
         start = AsyncMock(side_effect=start_playwright)
 
     try:
-        with patch("backend.services.access_cycles.async_playwright", return_value=_PlaywrightFactory()), patch("backend.services.access_cycles.browser_provider", return_value=_Provider()), patch("backend.services.access_cycles.ensure_access_cycle", side_effect=coordinator):
+        with patch("backend.services.access_cycles.browser_page_identity", new=AsyncMock(return_value={"target_id": "test-target", "context_id": "test-context"})), patch("backend.services.access_cycles.async_playwright", return_value=_PlaywrightFactory()), patch("backend.services.access_cycles.browser_provider", return_value=_Provider()), patch("backend.services.access_cycles.ensure_access_cycle", side_effect=coordinator), patch("backend.services.access_profiles.record_profile_validation"):
             from backend.services.access_cycles import execute_access_cycle
             asyncio.run(execute_access_cycle(ids[2]))
         with SessionLocal() as db:
