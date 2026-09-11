@@ -28,7 +28,11 @@ def test_learning_reattaches_only_verified_profile_page(tmp_path, monkeypatch):
             try:
                 owned = await own_context.new_page()
                 foreign = await other_context.new_page()
-                await owned.set_content('<button id="query">Query</button>')
+                async def route_learning(route):
+                    body = '<input id="group"><input id="quota"><button id="search">Search</button>' if route.request.url.endswith("/fields") else '<input id="next-field">'
+                    await route.fulfill(status=200, content_type="text/html", body=body)
+                await owned.route("https://learning.example.test/**", route_learning)
+                await owned.set_content('<a id="query" href="https://learning.example.test/next">Query</a>')
                 await foreign.set_content('<button id="private">Other profile</button>')
                 identity = await browser_page_identity(own_context, owned)
                 with SessionLocal.begin() as db:
@@ -66,12 +70,38 @@ def test_learning_reattaches_only_verified_profile_page(tmp_path, monkeypatch):
                     assert await manager._record_live_step(session, {"tipo": "clicar"}, {"page": foreign}) is None
                     assert session.steps == []
                     captured = asyncio.Event()
+                    record = manager._record_live_step
                     async def receive(*args, **kwargs):
+                        await record(*args, **kwargs)
                         captured.set()
                     manager._record_live_step = AsyncMock(side_effect=receive)
                     await owned.locator("#query").click()
                     await asyncio.wait_for(captured.wait(), 3)
+                    assert owned.url == "https://learning.example.test/next"
                     assert manager._record_live_step.call_count == 1
+                    assert len(session.learning_events) == 1
+                    click = session.learning_events[0]
+                    assert click["event_type"] == "click"
+                    assert click["before_state_id"] != click["after_state_id"]
+                    captured.clear()
+                    await owned.locator("#next-field").fill("00")
+                    await asyncio.wait_for(captured.wait(), 5)
+                    assert len(session.learning_events) == 2
+                    assert click["after_state_id"] == session.learning_events[1]["before_state_id"]
+                    await owned.goto("https://learning.example.test/fields")
+                    await manager._install_recorder_for_session(session)
+                    await owned.locator("#group").fill("935")
+                    await owned.locator("#quota").fill("438")
+                    await owned.locator("#search").click()
+                    for _ in range(30):
+                        if len(session.learning_events) >= 5:
+                            break
+                        await asyncio.sleep(0.1)
+                    events = session.learning_events[-3:]
+                    assert [event["event_type"] for event in events] == ["fill", "fill", "click"]
+                    assert events[0]["selector"] == "#group"
+                    assert events[1]["selector"] == "#quota"
+                    assert events[2]["selector"] == "#search"
                     session.recording = False
                     for task in list(session.observer_tasks):
                         task.cancel()

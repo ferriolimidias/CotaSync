@@ -232,10 +232,9 @@ _RECORDER_SCRIPT = r"""
     }
     return current;
   };
-  const send = (payload, before, delay = 0) => {
+  const send = (payload, before, immediate = false) => {
     if (!payload.seletor || typeof window.__cotasyncRecord !== 'function') return;
-    setTimeout(async () => {
-      const after = await stabilizedAfter(before);
+    const deliver = (after) => {
       Promise.resolve(window.__cotasyncRecord({
         ...payload,
         timestamp_before: before.timestamp,
@@ -248,36 +247,60 @@ _RECORDER_SCRIPT = r"""
         dom_summary_before: before.dom_summary,
         dom_summary_after: after.dom_summary
       })).catch(() => {});
-    }, delay);
+    };
+    // Navigation destroys page timers. Hand off click evidence before the
+    // default action; the backend observes the settled post-action state.
+    if (immediate) deliver(before);
+    else stabilizedAfter(before).then(deliver);
   };
 
   const inputBefore = new WeakMap();
   const inputTimers = new WeakMap();
+  const inputRecorded = new WeakSet();
+  const pendingInputs = new Set();
+  const flushInput = (el) => {
+    if (!el || inputRecorded.has(el) || sensitive(el)) return;
+    const pending = inputTimers.get(el);
+    if (pending) clearTimeout(pending);
+    const before = inputBefore.get(el) || snapshot();
+    inputRecorded.add(el);
+    pendingInputs.delete(el);
+    send({
+      tipo: 'preencher',
+      event_type: 'fill',
+      seletor: selectorFor(el),
+      valor: '',
+      value_template: '{{input_value}}',
+      field_metadata: fieldMetadata(el),
+      // Field entry does not navigate in the normal browser path. Keep its
+      // local observation so a following submit cannot rewrite its evidence.
+      post_action_capture: 'immediate'
+    }, before, true);
+    inputBefore.delete(el);
+  };
   document.addEventListener('beforeinput', (event) => {
-    if (event.target && !sensitive(event.target)) inputBefore.set(event.target, snapshot());
+    if (event.target && !sensitive(event.target)) {
+      inputBefore.set(event.target, snapshot());
+      inputRecorded.delete(event.target);
+      pendingInputs.add(event.target);
+    }
   }, true);
   document.addEventListener('input', (event) => {
     const el = event.target;
     if (!el || !['INPUT', 'TEXTAREA'].includes(el.tagName) || sensitive(el)) return;
     const previousTimer = inputTimers.get(el);
     if (previousTimer) clearTimeout(previousTimer);
-    const before = inputBefore.get(el) || snapshot();
-    inputTimers.set(el, setTimeout(() => {
-      send({
-        tipo: 'preencher',
-        event_type: 'fill',
-        seletor: selectorFor(el),
-        valor: '',
-        value_template: '{{input_value}}',
-        field_metadata: fieldMetadata(el)
-      }, before);
-      inputBefore.delete(el);
-    }, 250));
+    inputTimers.set(el, setTimeout(() => flushInput(el), 750));
   }, true);
 
   document.addEventListener('change', (event) => {
     const el = event.target;
-    if (!el || el.tagName !== 'SELECT' || sensitive(el)) return;
+    if (!el || sensitive(el)) return;
+    if (['INPUT', 'TEXTAREA'].includes(el.tagName)) {
+      flushInput(el);
+      return;
+    }
+    if (el.tagName !== 'SELECT') return;
     const before = snapshot();
     send({
       tipo: 'selecionar',
@@ -296,6 +319,9 @@ _RECORDER_SCRIPT = r"""
     if (!el || sensitive(el)) return;
     const type = String(el.type || '').toLowerCase();
     if (['text', 'email', 'password', 'search', 'number'].includes(type)) return;
+    // Browser `change` may be dispatched after the click listener. Flush all
+    // pending field evidence first so a lookup click cannot overtake inputs.
+    Array.from(pendingInputs).forEach(flushInput);
     const before = snapshot();
     send({
       tipo: 'clicar',
@@ -305,7 +331,7 @@ _RECORDER_SCRIPT = r"""
       target_text: textOf(el).slice(0, 200),
       target_label: labelFor(el),
       field_metadata: fieldMetadata(el)
-    }, before, 500);
+    }, before, true);
     setTimeout(captureOutputs, 650);
     setTimeout(captureOutputs, 900);
   }, true);
@@ -1038,6 +1064,7 @@ class DemoBrowserSession:
     next_page_ref_number: int = 2
     publication_status: str = "not_attempted"
     ai_review: dict[str, Any] = field(default_factory=dict)
+    recording_event_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     tenant_id: str = "default"
 
 
@@ -1196,6 +1223,11 @@ class DemoSessionManager:
                 ai_review=dict((row.diagnostics or {}).get("ai_review") or {}) if isinstance(row.diagnostics, dict) else {},
             )
             self._sessions[row.id] = session
+            # A Playwright recorder binding exists only in the process that
+            # created it. After restart, preserve evidence as an explicit draft
+            # rather than claiming an orphaned recording remains active.
+            if row.recording_status == "recording":
+                persist_learning_session(session)
             if session.access_profile_id and session.access_cycle_id:
                 cycle = get_access_cycle(session.access_cycle_id)
                 if cycle and cycle.get("status") == "ready":
@@ -1724,6 +1756,30 @@ class DemoSessionManager:
         *,
         bypass_operator_suppression: bool = False,
     ) -> dict[str, Any] | None:
+        # CDP bindings are asynchronous. Serialize their durable handling in
+        # browser-event order so a submit cannot overtake pending field input.
+        lock = getattr(session, "recording_event_lock", None)
+        if lock is None:
+            # Test doubles and compatibility rehydration objects may predate
+            # the session field; give them the same per-session guarantee.
+            lock = asyncio.Lock()
+            session.recording_event_lock = lock
+        async with lock:
+            return await self._record_live_step_serialized(
+                session,
+                raw,
+                source,
+                bypass_operator_suppression=bypass_operator_suppression,
+            )
+
+    async def _record_live_step_serialized(
+        self,
+        session: DemoBrowserSession,
+        raw: Any,
+        source: Any = None,
+        *,
+        bypass_operator_suppression: bool = False,
+    ) -> dict[str, Any] | None:
         if session.access_profile_id:
             source_page = source.get("page") if isinstance(source, dict) else session.page
             if source_page not in await self._recording_pages(session):
@@ -1762,7 +1818,17 @@ class DemoSessionManager:
         # or frame redirect has committed. Re-observe the same target here so
         # the persisted after-state represents the settled result, not the
         # action's immediate snapshot.
-        observed_after = await self._stabilize_recorder_after_state(page, source_frame, dict(raw))
+        if str(raw.get("post_action_capture") or "") == "immediate":
+            observed_after = {
+                "url": _full_page_url(raw.get("url_after") or raw.get("url_before") or page.url),
+                "title": str(raw.get("title_after") or raw.get("title_before") or "")[:200],
+                "dom_summary": raw.get("dom_summary_after") if isinstance(raw.get("dom_summary_after"), dict) else (
+                    raw.get("dom_summary_before") if isinstance(raw.get("dom_summary_before"), dict) else {}
+                ),
+                "timestamp": str(raw.get("timestamp_after") or raw.get("timestamp_before") or _utc_now()),
+            }
+        else:
+            observed_after = await self._stabilize_recorder_after_state(page, source_frame, dict(raw))
         raw = dict(raw)
         raw["url_after"] = observed_after.get("url") or raw.get("url_after") or page.url
         raw["title_after"] = observed_after.get("title") or raw.get("title_after") or ""

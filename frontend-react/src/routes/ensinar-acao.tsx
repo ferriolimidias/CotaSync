@@ -188,12 +188,16 @@ function EnsinarPage() {
         allowed_list_ids: scopeAllLists ? [] : scopeListIds,
         ...preparedContext.current,
       }),
-    onSuccess: () => toast.success("Gravação iniciada."),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["learning-session", sessionId] });
+      toast.success(result.recording ? "Gravação iniciada." : "Ensino criado. Aguardando acesso validado.");
+    },
   });
   const stop = useMutation({
     mutationFn: () => stopLearningRecording(sessionId as string),
     onSuccess: () => {
       setStopped(true);
+      void queryClient.invalidateQueries({ queryKey: ["learning-session", sessionId] });
       toast.message("Gravação finalizada. Revise e publique a ação.");
     },
   });
@@ -418,7 +422,7 @@ function EnsinarPage() {
               {accessProfiles.isError && <p className="text-xs text-amber-700">Não foi possível carregar os perfis. Atualize a página.</p>}
               {accessProfiles.isSuccess && externalConfig.isSuccess && !availableProfiles.length && <p className="text-xs text-amber-700">{accessProfiles.data.some((profile) => profile.external_system_id === externalConfig.data.id) ? "Nenhum perfil ativo disponível." : "Nenhum perfil de acesso cadastrado para este sistema."}</p>}
               {sessionId && !accessProfileId && <p className="text-xs text-amber-700">O ensino retomado não possui perfil de acesso definido.</p>}
-              {sessionId && (session.data?.recording === false || (session.error instanceof ApiError && session.error.status === 404)) && <Button type="button" variant="outline" onClick={newTeaching}><Play className="h-4 w-4" /> Novo ensino</Button>}
+              {sessionId && (stopped || session.data?.recording === false || (session.error instanceof ApiError && session.error.status === 404)) && <Button type="button" variant="outline" onClick={newTeaching}><Play className="h-4 w-4" /> Novo ensino</Button>}
               <p className="text-xs text-muted-foreground">Início: {externalConfig.data?.run_start_strategy === "external_entry_each_run" ? "Entrada do sistema" : externalConfig.data?.run_start_strategy === "persistent_graph_reentry" ? "Reentrada pelo grafo" : "Configuração pendente"}</p>
               {externalConfig.data?.run_start_strategy === "external_entry_each_run" && !accessProfileId && !sessionId && (
                 <p className="text-xs text-amber-700">Este sistema exige um perfil antes de iniciar o ensino.</p>
@@ -477,7 +481,7 @@ function EnsinarPage() {
                 <Button
                   className="w-full"
                   variant="outline"
-                  disabled={!session.data?.recording || stop.isPending}
+                  disabled={sessionStopped || !session.data?.recording || stop.isPending}
                   onClick={() => stop.mutate()}
                 >
                   <Square className="h-4 w-4" /> Finalizar ensino
@@ -536,8 +540,8 @@ function EnsinarPage() {
             <OperatorAssistant
               collapsible
               mode="learning"
-              sessionId={session.data?.recording ? sessionId : null}
-              statusText={session.data?.recording ? "Controles prontos" : sessionId ? "Aguardando acesso validado" : "Inicie o ensino para usar"}
+              sessionId={session.data?.recording && !sessionStopped ? sessionId : null}
+              statusText={sessionStopped ? "Ensino finalizado" : session.data?.recording ? "Controles prontos" : sessionId ? "Aguardando acesso validado" : "Inicie o ensino para usar"}
               variant="dock"
             />
           }
