@@ -41,6 +41,7 @@ from backend.services.browser_providers import (
     browser_provider,
     configured_browser_mode,
     desktop_profile_dir,
+    browser_page_identity,
 )
 from backend.services.client_fields import canonical_client_field_key, client_field_label
 from backend.services.runtime_files import runtime_download_path, runtime_file_metadata
@@ -1044,6 +1045,7 @@ class DemoSessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, DemoBrowserSession] = {}
         self._ai_review_locks: dict[str, asyncio.Lock] = {}
+        self._recorder_page_sessions: dict[Page, str] = {}
 
     def _get(self, session_id: str) -> DemoBrowserSession:
         session = self._sessions.get(str(session_id))
@@ -1155,7 +1157,6 @@ class DemoSessionManager:
             connection = await browser_provider(browser_mode).connect(playwright, str(session_id))
             context = connection.context
             page = connection.page
-            await self._prepare_reconnected_context(str(session_id), context)
             target_id = ""
             cdp = await context.new_cdp_session(page)
             try:
@@ -1195,6 +1196,14 @@ class DemoSessionManager:
                 ai_review=dict((row.diagnostics or {}).get("ai_review") or {}) if isinstance(row.diagnostics, dict) else {},
             )
             self._sessions[row.id] = session
+            if session.access_profile_id and session.access_cycle_id:
+                cycle = get_access_cycle(session.access_cycle_id)
+                if cycle and cycle.get("status") == "ready":
+                    await self._bind_learning_access_page(session)
+                if session.status == "aguardando_acesso":
+                    task = asyncio.create_task(self._await_learning_access_cycle(session.id, session.access_cycle_id))
+                    session.observer_tasks.add(task)
+                    task.add_done_callback(session.observer_tasks.discard)
             logger.info("Sessao de aprendizado reidratada: session=%s revision=%s", row.id, row.revision)
             return session
         except Exception:
@@ -1715,6 +1724,10 @@ class DemoSessionManager:
         *,
         bypass_operator_suppression: bool = False,
     ) -> dict[str, Any] | None:
+        if session.access_profile_id:
+            source_page = source.get("page") if isinstance(source, dict) else session.page
+            if source_page not in await self._recording_pages(session):
+                return None
         if isinstance(raw, dict) and str(raw.get("tipo") or "").strip().lower() in {"preencher", "selecionar"}:
             raw = self._normalize_field_variable_raw(
                 session,
@@ -1735,7 +1748,7 @@ class DemoSessionManager:
             page = session.page
         if not isinstance(source_frame, Frame):
             source_frame = None
-        live_pages = [item for item in session.context.pages if not item.is_closed()]
+        live_pages = await self._recording_pages(session)
         opened_new_page = len(live_pages) > session.last_page_count
         if opened_new_page and live_pages:
             newest_page = live_pages[-1]
@@ -1984,13 +1997,14 @@ class DemoSessionManager:
             connection = await browser_provider(session.browser_mode).connect(session.playwright, session.id)
             browser = connection.browser
             context = connection.context
-            await self._prepare_reconnected_context(session.id, context)
             session.browser = browser
             session.context = context
             session.recorder_context_watched = False
             session.recorder_watched_pages.clear()
             if session.page.is_closed() or session.page.context != context:
                 session.page = connection.page
+            if session.access_profile_id:
+                await self._bind_learning_access_page(session)
             self._watch_recording_context(session)
             return True
         except Exception as exc:
@@ -2005,9 +2019,7 @@ class DemoSessionManager:
         if not await self._reconnect_live_browser(session):
             return None
 
-        candidates = [session.page]
-        for context in session.browser.contexts:
-            candidates.extend(context.pages)
+        candidates = await self._recording_pages(session)
 
         seen: set[int] = set()
         valid_candidates: list[Page] = []
@@ -2027,6 +2039,10 @@ class DemoSessionManager:
         return next((page for page in valid_candidates if page is session.page), valid_candidates[0])
 
     async def _save_storage_state(self, session: DemoBrowserSession, *, required: bool) -> bool:
+        if session.access_profile_id:
+            # Only the owning worker can persist isolated profile storage.
+            cycle = get_access_cycle(session.access_cycle_id) if session.access_cycle_id else None
+            return bool(cycle and cycle.get("status") == "ready")
         path = session.storage_state_path
         tmp_path: Path | None = None
         try:
@@ -2074,6 +2090,8 @@ class DemoSessionManager:
         return "available"
 
     async def _apply_saved_storage_state(self, session: DemoBrowserSession) -> bool:
+        if session.access_profile_id:
+            return False
         path = session.storage_state_path
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
@@ -2112,17 +2130,54 @@ class DemoSessionManager:
             )
         return True
 
-    async def _prepare_reconnected_context(self, session_id: str, context: BrowserContext) -> None:
+    async def _recording_pages(self, session: DemoBrowserSession) -> list[Page]:
+        if not session.access_profile_id:
+            return [page for page in session.context.pages if not page.is_closed()]
+        cycle = get_access_cycle(session.access_cycle_id) if session.access_cycle_id else None
+        if not cycle or cycle.get("access_profile_id") != session.access_profile_id:
+            return []
+        if cycle.get("status") != "ready" or cycle.get("stage") != "external_system_ready":
+            return []
+        context_id = cycle.get("browser_context_id")
+        if not context_id:
+            return []
+        pages = []
+        # Reattached Playwright connections may aggregate contexts; use CDP
+        # identity, never the reader's default context, as ownership evidence.
+        for context in session.browser.contexts:
+            for page in context.pages:
+                if not page.is_closed():
+                    identity = await browser_page_identity(context, page)
+                    if identity["context_id"] == context_id:
+                        pages.append(page)
+        return pages
+
+    async def _bind_learning_access_page(self, session: DemoBrowserSession) -> None:
+        cycle = get_access_cycle(session.access_cycle_id) if session.access_cycle_id else None
+        for page in await self._recording_pages(session):
+            identity = await browser_page_identity(page.context, page)
+            if cycle and identity["target_id"] == cycle.get("browser_target_id"):
+                await self._set_active_page(session, page)
+                return
+        raise DemoSessionError("A pagina isolada do acesso validado nao esta disponivel.", code="LEARNING_ACCESS_SESSION_UNAVAILABLE")
+
+    async def _prepare_recorder_page(self, session_id: str, page: Page) -> None:
+        if page in self._recorder_page_sessions:
+            self._recorder_page_sessions[page] = session_id
+            return
         async def record_binding(source: Any, payload: Any) -> None:
-            current = self._sessions.get(session_id)
+            current = self._sessions.get(self._recorder_page_sessions.get(page, ""))
             if current is not None:
                 await self._record_live_step(current, payload, source)
 
-        await context.expose_binding("__cotasyncRecord", record_binding)
-        await context.add_init_script(_RECORDER_SCRIPT)
+        await page.expose_binding("__cotasyncRecord", record_binding)
+        self._recorder_page_sessions[page] = session_id
+        await page.add_init_script(_RECORDER_SCRIPT)
 
     async def _install_recorder_on_frame(self, session: DemoBrowserSession, frame: Frame) -> None:
         if not session.recording:
+            return
+        if session.access_profile_id and frame.page not in await self._recording_pages(session):
             return
         try:
             await frame.evaluate(_RECORDER_SCRIPT)
@@ -2166,7 +2221,8 @@ class DemoSessionManager:
 
     async def _install_recorder_for_session(self, session: DemoBrowserSession) -> None:
         self._watch_recording_context(session)
-        for current_page in [page for page in session.context.pages if not page.is_closed()]:
+        for current_page in await self._recording_pages(session):
+            await self._prepare_recorder_page(session.id, current_page)
             self._watch_page_recording(session, current_page)
             for frame in current_page.frames:
                 await self._install_recorder_on_frame(session, frame)
@@ -2177,7 +2233,7 @@ class DemoSessionManager:
         script: str,
     ) -> list[tuple[Page, Frame, Any]]:
         results: list[tuple[Page, Frame, Any]] = []
-        for current_page in [page for page in session.context.pages if not page.is_closed()]:
+        for current_page in await self._recording_pages(session):
             self._watch_page_recording(session, current_page)
             for frame in current_page.frames:
                 try:
@@ -2187,6 +2243,11 @@ class DemoSessionManager:
         return results
 
     async def _restore_storage_state(self, session: DemoBrowserSession, expected_url: str) -> Page | None:
+        if session.access_profile_id:
+            if not await self._reconnect_live_browser(session):
+                return None
+            await self._bind_learning_access_page(session)
+            return session.page
         try:
             if not await self._reconnect_live_browser(session):
                 return None
@@ -2261,7 +2322,6 @@ class DemoSessionManager:
             browser = connection.browser
             context = connection.context
             page = connection.page
-            await self._prepare_reconnected_context(session_id, context)
             cdp = await context.new_cdp_session(page)
             target_info = await cdp.send("Target.getTargetInfo")
             target_id = str(target_info.get("targetInfo", {}).get("targetId") or "")
@@ -2408,7 +2468,7 @@ class DemoSessionManager:
         """Diagnostico seguro do target usado pela janela remota e pelo modo operador."""
 
         session = self._get(session_id)
-        live_pages = [page for page in session.context.pages if not page.is_closed()]
+        live_pages = await self._recording_pages(session)
         return {
             "session_id": session.id,
             "browser_mode": session.browser_mode,
@@ -2425,7 +2485,7 @@ class DemoSessionManager:
 
     async def recording_diagnostics(self, session_id: str) -> dict[str, Any]:
         session = await self.ensure_session(session_id)
-        live_pages = [page for page in session.context.pages if not page.is_closed()]
+        live_pages = await self._recording_pages(session)
         active_title = ""
         try:
             active_title = await session.page.title()
@@ -2972,6 +3032,11 @@ class DemoSessionManager:
 
     async def reopen_with_saved_session(self, session_id: str) -> dict[str, Any]:
         session = self._get(session_id)
+        if session.access_profile_id:
+            if not await self._reconnect_live_browser(session):
+                raise DemoSessionError("A sessao isolada nao esta disponivel.", code="LEARNING_ACCESS_SESSION_UNAVAILABLE")
+            await self._bind_learning_access_page(session)
+            return await self.status(session_id)
         if not await self._reconnect_live_browser(session):
             session.status = "expirada"
             raise DemoSessionError("A sessão do navegador não está disponível.")
@@ -3172,6 +3237,8 @@ class DemoSessionManager:
             cycle = get_access_cycle(session.access_cycle_id)
             if not cycle or cycle.get("status") != "ready" or cycle.get("stage") != "external_system_ready":
                 raise DemoSessionError("O acesso externo ainda não está pronto.", code="LEARNING_ACCESS_PENDING")
+        if session.access_profile_id:
+            await self._bind_learning_access_page(session)
         session.recording = True
         session.status = "gravando"
         await self._install_recorder_for_session(session)
@@ -3182,7 +3249,7 @@ class DemoSessionManager:
             session.last_screenshot_path = str(baseline_path.relative_to(_ROOT))
         except Exception:
             session.last_screenshot_path = ""
-        session.last_page_count = len([page for page in session.context.pages if not page.is_closed()])
+        session.last_page_count = len(await self._recording_pages(session))
         session.download_detected = False
         persist_learning_session(session)
         logger.info("Gravacao iniciada na sessao %s", session.id)
@@ -3226,6 +3293,7 @@ class DemoSessionManager:
             raise DemoSessionError("Este ensino já foi finalizado. Abra a revisão ou inicie um novo ensino.")
         if not session.access_profile_id:
             raise DemoSessionError("O ensino salvo não possui acesso definido.")
+        await self._bind_learning_access_page(session)
         session.recording = True
         session.active_recording_session_id = session.id
         try:

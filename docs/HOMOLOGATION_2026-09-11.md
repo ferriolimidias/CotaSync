@@ -58,3 +58,32 @@ to learning/runtime: their current code can retain the pre-cycle page/context.
 Do not start a real Action until that handoff is proven against CDP. Profile CRUD
 through the authenticated UI, real learning, publication, individual runs and
 batches of 3/10 remain unhomologated.
+
+## Learning Handoff Milestone
+
+The user completed real authentication and the separate CotaSync UI login.
+Managed Chromium remains exclusively for the external system.
+
+Learning `86524f8d-2610-446a-86f0-53a411db5537` created persisted access cycle
+`a4a858f6-807f-4543-bc42-57e0b8c02bf6`. The previous pending authentication
+cycle was validated through the existing UI, allowing this cycle to proceed.
+
+Two integration defects were reproduced and corrected:
+
+- Learning retained the pre-access page. It now binds the actual verified
+  CDP target/context and scopes instrumentation/events to that profile.
+- GET learning returned only diagnostics, dropping access_cycle_id and session
+  metadata. The UI could not show manual validation and claimed recording while
+  waiting. GET now preserves the session contract; controls reflect recording.
+
+Real UI evidence: the learning workspace showed waiting and disabled controls;
+its validation button completed the cycle with verified identity; only then
+PostgreSQL changed learning to recording. A separate-browser real CDP test
+proves profile page isolation and the pending/resume gate. The related suite
+passed 63 tests, frontend 10 tests, typecheck and Docker builds passed.
+
+The first real recorded click on Atendimento redirected from the external
+system to Microsoft rather than the query form. Recording was stopped through
+the UI with one event retained for diagnosis. Nothing was published or replayed.
+This new external-session transition remains under investigation; completed
+teaching, publication, individual execution and batches are NOT homologated.

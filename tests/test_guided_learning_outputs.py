@@ -176,6 +176,8 @@ def _session(*, download_detected: bool = False) -> SimpleNamespace:
         external_system_name="",
         external_login_url="",
         access_profile_name="",
+        access_profile_id="",
+        access_cycle_id="",
         access_profile_email_or_identifier="",
         microsoft_saved_account_identifier="",
         microsoft_saved_account_selector="",
@@ -380,7 +382,8 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(action["url_inicial"], current_url)
 
     def test_empty_external_system_has_no_real_access_profile_defaults(self) -> None:
-        config = load_current_external_system()
+        from backend.services.external_systems import empty_external_system
+        config = empty_external_system()
         self.assertEqual(config["access_profile_name"], "")
         self.assertEqual(config["microsoft_saved_account_text"], "")
         self.assertEqual(config["microsoft_saved_account_identifier"], "")
@@ -409,44 +412,53 @@ class GuidedLearningSaveTests(unittest.TestCase):
         self.assertEqual(result["id"], "session")
 
     def test_new_learning_moves_residual_page_to_external_entry_before_recording(self) -> None:
-        manager = DemoSessionManager()
-        session = _session()
-        page = LearningEntryPage()
-        session.page = page
-        session.guided_learning = {}
-        manager._sessions["session"] = session  # type: ignore[attr-defined]
-        with patch.object(manager, "_set_active_page", new=AsyncMock()):
-            asyncio.run(manager._prepare_learning_external_entry(session, "https://system.example.test/entry"))
-        self.assertEqual(page.goto_calls[0][0], "https://system.example.test/entry")
-        self.assertEqual(session.guided_learning["entry_url"], "https://system.example.test/entry")
+        session, entry = self._start_persisted_learning()
+        self.assertEqual(entry, "https://login.example.test")
+        self.assertFalse(session.recording)
+        self.assertEqual(session.status, "aguardando_acesso")
+        self.assertTrue(session.access_cycle_id)
         self.assertEqual(session.guided_learning["access_bootstrap_boundary"], "before_main_recording")
         self.assertTrue(session.guided_learning["main_recording_starts_after_external_entry"])
 
     def test_new_learning_never_uses_residual_url_as_entry(self) -> None:
-        manager = DemoSessionManager()
-        session = _session()
-        page = LearningEntryPage()
-        session.page = page
-        session.guided_learning = {}
-        with patch.object(manager, "_set_active_page", new=AsyncMock()):
-            asyncio.run(manager._prepare_learning_external_entry(session, "https://system.example.test/entry"))
-        self.assertNotEqual(page.goto_calls[0][0], "https://system.example.test/residual-result")
+        session, entry = self._start_persisted_learning()
+        self.assertNotEqual(entry, session.page.url)
+        self.assertEqual(session.page.goto_calls, [])
 
     def test_new_learning_keeps_account_selection_inside_bootstrap(self) -> None:
+        session, _entry = self._start_persisted_learning()
+        self.assertFalse(session.recording)
+        self.assertEqual(session.steps, [])
+        self.assertEqual(session.guided_learning["access_bootstrap_boundary"], "before_main_recording")
+
+    def _start_persisted_learning(self):
+        from backend.db import AccessCycle
+        from tests.test_manual_access_validation import _cycle, _remove
+        ids = _cycle("https://system.example.test/home")
         manager = DemoSessionManager()
         session = _session()
-        page = LearningEntryPage()
-        session.page = page
+        session.page = LearningEntryPage()
+        session.external_system_id = ids[0]
+        session.recording = False
         session.guided_learning = {}
-        session.microsoft_hosts = ["login.microsoftonline.com"]
-        session.access_profile_email_or_identifier = "profile@example.test"
-        guardian = SimpleNamespace(click_configured_saved_account=AsyncMock(return_value=True))
-        with patch.object(manager, "_set_active_page", new=AsyncMock()), patch(
-            "backend.services.session_guardian.SessionGuardian", return_value=guardian
-        ):
-            asyncio.run(manager._prepare_learning_external_entry(session, "https://login.microsoftonline.com/entry"))
-        guardian.click_configured_saved_account.assert_awaited_once()
-        self.assertEqual(session.guided_learning["access_bootstrap_boundary"], "before_main_recording")
+        manager._sessions[session.id] = session
+        try:
+            with patch.object(manager, "status", new=AsyncMock(return_value={})), patch(
+                "backend.services.demo_session.persist_learning_session"
+            ):
+                asyncio.run(manager.start_recording(session.id, {
+                    "name": "Synthetic query", "run_start_strategy": "external_entry_each_run",
+                    "required_access_profile_id": ids[1],
+                }))
+            with SessionLocal() as db:
+                cycle = db.get(AccessCycle, session.access_cycle_id)
+                self.assertEqual(cycle.access_profile_id, ids[1])
+                return session, cycle.entry_url
+        finally:
+            with SessionLocal.begin() as db:
+                if session.access_cycle_id:
+                    db.execute(delete(AccessCycle).where(AccessCycle.id == session.access_cycle_id))
+            _remove(ids)
 
     def test_recording_can_start_from_waiting_login_screen(self) -> None:
         manager = DemoSessionManager()

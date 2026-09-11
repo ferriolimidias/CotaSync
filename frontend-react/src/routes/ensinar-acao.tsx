@@ -461,8 +461,8 @@ function EnsinarPage() {
               </Button>
             ) : (
               <div className="space-y-2">
-                <BadgeStatus tone={sessionStopped ? "success" : "error"}>
-                  <CircleDot className="h-3 w-3" /> {sessionStopped ? "Gravação finalizada" : "Gravando"}
+                <BadgeStatus tone={sessionStopped ? "success" : session.data?.recording ? "error" : "warning"}>
+                  <CircleDot className="h-3 w-3" /> {sessionStopped ? "Gravação finalizada" : session.data?.recording ? "Gravando" : "Aguardando acesso"}
                 </BadgeStatus>
                 <p className="text-xs text-muted-foreground">
                   {eventCount} passos · {variableCount} variáveis
@@ -477,7 +477,7 @@ function EnsinarPage() {
                 <Button
                   className="w-full"
                   variant="outline"
-                  disabled={sessionStopped || stop.isPending}
+                  disabled={!session.data?.recording || stop.isPending}
                   onClick={() => stop.mutate()}
                 >
                   <Square className="h-4 w-4" /> Finalizar ensino
@@ -524,7 +524,7 @@ function EnsinarPage() {
               ) : (
                 <Button
                   size="sm"
-                  disabled={!sessionId || startSelection.isPending || stopped}
+                  disabled={!session.data?.recording || startSelection.isPending || stopped}
                   onClick={() => startSelection.mutate()}
                 >
                   <Crosshair className="h-4 w-4" /> {outputs.length > 0 ? "+ Selecionar outro resultado" : "Selecionar resultado"}
@@ -536,8 +536,8 @@ function EnsinarPage() {
             <OperatorAssistant
               collapsible
               mode="learning"
-              sessionId={sessionId}
-              statusText={sessionId ? "Controles prontos" : "Inicie o ensino para usar"}
+              sessionId={session.data?.recording ? sessionId : null}
+              statusText={session.data?.recording ? "Controles prontos" : sessionId ? "Aguardando acesso validado" : "Inicie o ensino para usar"}
               variant="dock"
             />
           }

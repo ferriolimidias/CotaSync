@@ -46,8 +46,9 @@ class ResumeTeachingTests(unittest.IsolatedAsyncioTestCase):
         from backend.services.demo_session import DemoSessionManager
         manager = DemoSessionManager()
         session = SimpleNamespace(id="draft", status="interrupted", recording=False, publication_status="not_attempted", access_profile_id="a", steps=[{"variavel": "versao", "valor": "00"}], learning_events=[{"event_type": "fill"}], outputs=[{"id": "one"}, {"id": "two"}, {"id": "three"}])
-        with patch.object(manager, "ensure_session", AsyncMock(return_value=session)), patch.object(manager, "_install_recorder_for_session", AsyncMock()), patch.object(manager, "status", AsyncMock(return_value={})), patch("backend.services.demo_session.persist_learning_session") as persist:
+        with patch.object(manager, "_bind_learning_access_page", AsyncMock()) as bind, patch.object(manager, "ensure_session", AsyncMock(return_value=session)), patch.object(manager, "_install_recorder_for_session", AsyncMock()), patch.object(manager, "status", AsyncMock(return_value={})), patch("backend.services.demo_session.persist_learning_session") as persist:
             await manager.resume_recording("draft")
+        bind.assert_awaited_once_with(session)
         self.assertTrue(session.recording)
         self.assertEqual(session.steps, [{"variavel": "versao", "valor": "00"}])
         self.assertEqual(len(session.outputs), 3)

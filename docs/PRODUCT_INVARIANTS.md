@@ -15,6 +15,13 @@ page is in use. Storage snapshots do not preserve a live page across a CDP
 disconnect. Tests must exercise this boundary against real CDP with synthetic
 pages and must not navigate an existing operational page.
 
+Learning handoff must use the verified cycle's persisted target/context IDs.
+CDP reattachment may expose multiple Chromium contexts through Playwright's
+default context. Recorder installation, inbound events and page discovery must
+remain restricted to the actual profile context. Authentication UI is not the
+learning workspace, and interrupted teaching may resume only after its access
+gate is ready. The reader must not copy global storage into a profile session.
+
 ## INVARIANT: FRESH_LOGICAL_START
 
 Every new logical execution unit starts at the external entry:

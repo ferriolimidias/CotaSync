@@ -1247,7 +1247,8 @@ async def learning_context(payload: dict[str, Any], _user: AuthUser = Depends(re
 async def learning_get_session(session_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
     try:
         await demo_session_manager.ensure_session(session_id)
-        session = await demo_session_manager.recording_diagnostics(session_id)
+        session = await demo_session_manager.status(session_id)
+        session.update(await demo_session_manager.recording_diagnostics(session_id))
     except DemoSessionError as exc:
         raise _error(404, "LEARNING_SESSION_NOT_FOUND", str(exc)) from exc
     return {"status": "ok", "session": session}
