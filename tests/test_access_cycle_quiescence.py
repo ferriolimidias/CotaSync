@@ -108,6 +108,43 @@ def test_worker_owned_attention_preserves_same_cycle_and_stops_coordinator():
         _remove(ids)
 
 
+def test_picker_selection_stall_requests_worker_owned_attention():
+    ids = _cycle()
+
+    async def scenario() -> None:
+        identity = SimpleNamespace(access_profile_id=ids[1], context=SimpleNamespace(), persist=AsyncMock())
+
+        async def coordinator(reobserve_current_page: bool = False):
+            assert reobserve_current_page is False
+            raise AccessCycleError(
+                "picker did not transition",
+                code="ACCOUNT_SELECTION_STALLED",
+                stage="account_picker",
+            )
+
+        task = asyncio.create_task(
+            _coordinate_owned_access(
+                ids[2],
+                identity,
+                SimpleNamespace(context=identity.context),
+                coordinator_factory=coordinator,
+            )
+        )
+        for _ in range(20):
+            if _status(ids[2]) == "needs_attention":
+                break
+            await asyncio.sleep(0.05)
+        assert _status(ids[2]) == "needs_attention"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _remove(ids)
+
+
 def test_resume_preserves_cycle_and_reobserves_without_entry_navigation():
     ids = _cycle()
 

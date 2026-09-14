@@ -890,9 +890,25 @@ class SessionGuardian:
         diagnostic["reason"] = "next_step_selector_not_visible_on_microsoft_page"
         return diagnostic
 
-    async def click_configured_saved_account(self, page: Any, action: Any) -> bool:
+    async def click_configured_saved_account(
+        self,
+        page: Any,
+        action: Any,
+        *,
+        on_event: Callable[..., Any] | None = None,
+    ) -> bool:
+        def notify(event: str, **context: Any) -> None:
+            if on_event is None:
+                return
+            try:
+                on_event(event, **context)
+            except Exception:
+                # Diagnostic telemetry must never change the access decision.
+                return
+
         texts = configured_saved_account_texts(action)
         if not texts:
+            notify("EXPECTED_TILE_NOT_FOUND", reason="missing_identity_text")
             return False
         selector = str(_metadata(action, "microsoft_saved_account_selector", "") or "").strip()
         for text in texts:
@@ -900,23 +916,29 @@ class SessionGuardian:
                 try:
                     locator = page.locator(selector).filter(has_text=re.compile(re.escape(text), re.I)).first
                     if await locator.count() > 0 and await locator.is_visible():
+                        notify("EXPECTED_TILE_FOUND", matched_by="configured_selector")
                         # Microsoft submits the picker form immediately. Do
                         # not make the click await a cross-document load;
                         # the coordinator owns the subsequent state wait.
                         await locator.click(timeout=self.config.check_timeout_seconds * 1000, no_wait_after=True)
+                        notify("CLICK_DISPATCHED", matched_by="configured_selector")
                         return True
-                except Exception:
-                    pass
+                except Exception as exc:
+                    notify("CLICK_EXCEPTION", exception_class=type(exc).__name__, matched_by="configured_selector")
             try:
                 locator = page.get_by_text(text, exact=False).first
                 if await locator.count() > 0 and await locator.is_visible():
+                    notify("EXPECTED_TILE_FOUND", matched_by="text")
                     # The account selection can navigate/detach its auth
                     # frame as part of the click. Completion is confirmed by
                     # the coordinator after this dispatch.
                     await locator.click(timeout=self.config.check_timeout_seconds * 1000, no_wait_after=True)
+                    notify("CLICK_DISPATCHED", matched_by="text")
                     return True
-            except Exception:
+            except Exception as exc:
+                notify("CLICK_EXCEPTION", exception_class=type(exc).__name__, matched_by="text")
                 continue
+        notify("EXPECTED_TILE_NOT_FOUND", reason="no_actionable_match")
         return False
 
     async def _wait_after_recovery(self, page: Any) -> None:
