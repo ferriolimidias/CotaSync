@@ -72,7 +72,7 @@ def _append_event(cycle_id: str, stage: str, event: str, status: str, **context:
         cycle.events = [*(cycle.events or []), _event_payload(stage, event, status, context)][-500:]
         cycle.stage = stage
         cycle.heartbeat_at = datetime.now(UTC)
-        if status == "waiting":
+        if status == "waiting" and cycle.status != "needs_attention":
             cycle.status = "waiting"
         elif status in {"started", "observed", "retrying"} and cycle.status == "starting":
             cycle.status = "running"
@@ -108,9 +108,14 @@ def get_access_cycle(cycle_id: str) -> dict[str, Any] | None:
         return {
             "access_cycle_id": cycle.id, "external_system_id": cycle.external_system_id,
             "access_profile_id": cycle.access_profile_id, "status": cycle.status,
+            "worker_id": cycle.worker_id,
             "browser_target_id": cycle.browser_target_id,
             "browser_context_id": cycle.browser_context_id,
             "manual_validation_pending": cycle.manual_validation_requested_at is not None,
+            "attention_requested": cycle.attention_requested_at is not None,
+            "attention_since": cycle.attention_since.isoformat() if cycle.attention_since else None,
+            "attention_reason": cycle.attention_reason,
+            "resume_requested": cycle.resume_requested_at is not None,
             "entry_url": _safe_url(cycle.entry_url),
             "stage": cycle.stage, "error_code": cycle.error_code, "error_message": cycle.error_message,
             "events": cycle.events or [],
@@ -170,7 +175,7 @@ def recover_stale_access_cycles(stale_before: datetime) -> int:
     with SessionLocal.begin() as db:
         cycles = (
             db.query(AccessCycle)
-            .filter(AccessCycle.status.in_(["running", "waiting"]))
+            .filter(AccessCycle.status.in_(["running", "waiting", "needs_attention"]))
             .filter(AccessCycle.worker_id.is_not(None))
             .filter(AccessCycle.heartbeat_at.is_not(None), AccessCycle.heartbeat_at < stale_before)
             .with_for_update(skip_locked=True)
@@ -182,6 +187,9 @@ def recover_stale_access_cycles(stale_before: datetime) -> int:
             cycle.started_at = None
             cycle.heartbeat_at = datetime.now(UTC)
             cycle.worker_id = None
+            cycle.attention_requested_at = None
+            cycle.attention_since = None
+            cycle.resume_requested_at = None
             recovered += 1
     return recovered
 
@@ -189,10 +197,60 @@ def recover_stale_access_cycles(stale_before: datetime) -> int:
 def touch_access_cycle(cycle_id: str, *, status: str | None = None) -> None:
     with SessionLocal.begin() as db:
         cycle = db.scalar(select(AccessCycle).where(AccessCycle.id == cycle_id).with_for_update())
-        if cycle is not None and cycle.status in {"starting", "running", "waiting"}:
+        if cycle is not None and cycle.status in {"starting", "running", "waiting", "needs_attention"}:
             cycle.heartbeat_at = datetime.now(UTC)
-            if status:
+            if status and cycle.status != "needs_attention":
                 cycle.status = status
+
+
+def bind_access_cycle_owner(cycle_id: str, worker_id: str) -> None:
+    """Persist the worker that already owns the browser execution path."""
+    with SessionLocal.begin() as db:
+        cycle = db.scalar(select(AccessCycle).where(AccessCycle.id == cycle_id).with_for_update())
+        if cycle is None:
+            raise AccessCycleError("Ciclo de acesso não encontrado.", code="access_cycle_missing", stage="access")
+        if cycle.worker_id not in {None, worker_id}:
+            raise AccessCycleError("Ciclo de acesso já pertence a outro worker.", code="access_cycle_owner_conflict", stage="access")
+        if cycle.status in {"ready", "failed", "cancelled", "superseded"}:
+            raise AccessCycleError("Ciclo de acesso não está ativo.", code="access_cycle_not_active", stage="access")
+        cycle.worker_id = worker_id
+        cycle.heartbeat_at = datetime.now(UTC)
+
+
+def request_access_attention(cycle_id: str, *, reason: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Request a worker-owned hold without changing terminal or ownership state."""
+    with SessionLocal.begin() as db:
+        cycle = db.scalar(select(AccessCycle).where(AccessCycle.id == cycle_id).with_for_update())
+        if cycle is None:
+            raise AccessCycleError("Ciclo de acesso não encontrado.", code="access_cycle_missing", stage="access")
+        if cycle.status in {"ready", "failed", "cancelled", "superseded"}:
+            raise AccessCycleError("Ciclo de acesso não está ativo.", code="access_cycle_not_active", stage="access")
+        if not cycle.worker_id:
+            raise AccessCycleError("Ciclo de acesso ainda não possui worker owner.", code="access_cycle_owner_missing", stage="access")
+        if cycle.status != "needs_attention" and cycle.attention_requested_at is None:
+            cycle.attention_requested_at = datetime.now(UTC)
+            cycle.attention_reason = str(reason or "operator_requested")[:128]
+            cycle.attention_details = {
+                str(key): value
+                for key, value in (details or {}).items()
+                if not any(secret_word in str(key).casefold() for secret_word in ("password", "token", "cookie", "secret", "authorization"))
+                and isinstance(value, (str, int, float, bool, type(None)))
+            }
+            cycle.heartbeat_at = datetime.now(UTC)
+    return get_access_cycle(cycle_id) or {"access_cycle_id": cycle_id, "status": "running"}
+
+
+def request_access_resume(cycle_id: str) -> dict[str, Any]:
+    """Signal the current owner to reobserve the current page."""
+    with SessionLocal.begin() as db:
+        cycle = db.scalar(select(AccessCycle).where(AccessCycle.id == cycle_id).with_for_update())
+        if cycle is None:
+            raise AccessCycleError("Ciclo de acesso não encontrado.", code="access_cycle_missing", stage="access")
+        if cycle.status != "needs_attention" or not cycle.worker_id:
+            raise AccessCycleError("Ciclo de acesso não está em atenção retomável.", code="access_cycle_not_in_attention", stage="access")
+        cycle.resume_requested_at = datetime.now(UTC)
+        cycle.heartbeat_at = datetime.now(UTC)
+    return get_access_cycle(cycle_id) or {"access_cycle_id": cycle_id, "status": "needs_attention"}
 
 
 def finish_access_cycle(cycle_id: str, *, status: str, error_code: str | None = None, error_message: str | None = None) -> None:
@@ -214,7 +272,8 @@ def _mark_manual_validation_waiting(cycle_id: str, *, stage: str, code: str, mes
         cycle = db.scalar(select(AccessCycle).where(AccessCycle.id == cycle_id).with_for_update())
         if cycle is None or cycle.status in {"ready", "cancelled", "superseded"}:
             return
-        cycle.status = "waiting"
+        if cycle.status != "needs_attention":
+            cycle.status = "waiting"
         cycle.stage = stage
         cycle.error_code = code
         cycle.error_message = message
@@ -230,7 +289,7 @@ async def validate_manual_access_cycle(cycle_id: str) -> dict[str, Any]:
             raise AccessCycleError("Ciclo não encontrado.", code="access_cycle_missing", stage="access")
         if cycle.status == "ready":
             return {"status": "ready", "validated": True}
-        if cycle.status not in {"running", "waiting"} or not cycle.browser_target_id:
+        if cycle.status not in {"running", "waiting", "needs_attention"} or not cycle.browser_target_id:
             raise AccessCycleError("Este ciclo não possui uma sessão ativa para validar. Inicie um novo acesso pelo perfil.", code="ACCESS_CYCLE_SESSION_UNAVAILABLE", stage="access")
         active_access_profile_public(cycle.access_profile_id)
         cycle.manual_validation_requested_at = datetime.now(UTC)
@@ -290,7 +349,7 @@ async def _validate_owned_access_cycle(cycle_id: str, identity_session: BrowserI
             "ACCESS_IDENTITY_NOT_OBSERVED",
             "access_identity_mismatch",
         }
-        if cycle.status not in {"starting", "running", "waiting"} and cycle.error_code not in allowed_failed:
+        if cycle.status not in {"starting", "running", "waiting", "needs_attention"} and cycle.error_code not in allowed_failed:
             raise AccessCycleError(
                 "Este ciclo não está aguardando validação manual.",
                 code="access_cycle_not_waiting_manual_validation",
@@ -357,9 +416,37 @@ async def _validate_owned_access_cycle(cycle_id: str, identity_session: BrowserI
                 cycle.manual_validation_requested_at = None
 
 
-async def _coordinate_owned_access(cycle_id: str, identity_session: BrowserIdentitySession, page: Any, coordinator: Any) -> None:
-    """Serialize automation and manual validation on the same live page."""
-    task = asyncio.create_task(coordinator)
+async def _coordinate_owned_access(
+    cycle_id: str,
+    identity_session: BrowserIdentitySession,
+    page: Any,
+    coordinator: Any = None,
+    *,
+    coordinator_factory: Any | None = None,
+) -> None:
+    """Serialize automation, attention, and manual validation on one live page."""
+    if coordinator_factory is None:
+        used_initial = False
+
+        def coordinator_factory(reobserve_current_page: bool = False) -> Any:
+            nonlocal used_initial
+            if reobserve_current_page or used_initial:
+                raise AccessCycleError(
+                    "Este ciclo não possui uma fábrica de retomada worker-owned.",
+                    code="access_cycle_resume_unavailable",
+                    stage="access",
+                )
+            used_initial = True
+            return coordinator
+
+    async def start_coordinator(*, reobserve_current_page: bool = False) -> asyncio.Task[Any]:
+        value = coordinator_factory(reobserve_current_page)
+        if asyncio.iscoroutine(value) or isinstance(value, Awaitable):
+            return asyncio.create_task(value)
+        return asyncio.create_task(value)
+
+    task = await start_coordinator()
+    task_is_resume = False
     try:
         while True:
             with SessionLocal() as db:
@@ -367,6 +454,9 @@ async def _coordinate_owned_access(cycle_id: str, identity_session: BrowserIdent
                 if cycle is None or cycle.status in {"cancelled", "superseded", "ready"}:
                     return
                 requested = cycle.manual_validation_requested_at is not None
+                attention_requested = cycle.attention_requested_at is not None
+                in_attention = cycle.status == "needs_attention"
+                resume_requested = cycle.resume_requested_at is not None
             if requested:
                 if task is not None:
                     task.cancel()
@@ -378,14 +468,66 @@ async def _coordinate_owned_access(cycle_id: str, identity_session: BrowserIdent
                     return
                 # No automation restart after human takeover. Wait for the
                 # next explicit validation on this same page.
+            elif attention_requested and not in_attention:
+                if task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, AccessCycleError):
+                        await task
+                    task = None
+                with SessionLocal.begin() as db:
+                    cycle = db.get(AccessCycle, cycle_id)
+                    if cycle is not None and cycle.status not in {"ready", "cancelled", "superseded"}:
+                        cycle.status = "needs_attention"
+                        cycle.stage = "access_attention"
+                        cycle.attention_since = cycle.attention_since or datetime.now(UTC)
+                        cycle.error_code = "ACCESS_CYCLE_NEEDS_ATTENTION"
+                        cycle.error_message = cycle.attention_reason or "Atenção do operador solicitada."
+                        cycle.finished_at = None
+                        cycle.heartbeat_at = datetime.now(UTC)
+                        cycle.attention_requested_at = None
+                _append_event(cycle_id, "access_attention", "ACCESS_ATTENTION_ENTERED", "waiting")
+            elif in_attention:
+                if resume_requested:
+                    with SessionLocal.begin() as db:
+                        cycle = db.get(AccessCycle, cycle_id)
+                        if cycle is not None and cycle.status == "needs_attention":
+                            cycle.status = "running"
+                            cycle.stage = "access_resuming"
+                            cycle.resume_requested_at = None
+                            cycle.attention_since = None
+                            cycle.error_code = None
+                            cycle.error_message = None
+                            cycle.heartbeat_at = datetime.now(UTC)
+                    _append_event(cycle_id, "access_attention", "ACCESS_ATTENTION_RESUMING", "started")
+                    task = await start_coordinator(reobserve_current_page=True)
+                    task_is_resume = True
+                elif task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, AccessCycleError):
+                        await task
+                    task = None
             elif task is not None and task.done():
                 try:
                     await task
                 except AccessCycleError as exc:
-                    if exc.code not in {"account_picker_skipped", "reauthentication_required", "access_identity_mismatch"}:
+                    if exc.code not in {"account_picker_skipped", "account_picker_selection_lost", "reauthentication_required", "access_authentication_not_completed", "access_identity_mismatch"}:
                         raise
-                    _mark_manual_validation_waiting(cycle_id, stage="manual_authentication", code=exc.code, message=str(exc))
+                    if task_is_resume:
+                        with SessionLocal.begin() as db:
+                            cycle = db.get(AccessCycle, cycle_id)
+                            if cycle is not None and cycle.status not in {"ready", "cancelled", "superseded"}:
+                                cycle.status = "needs_attention"
+                                cycle.stage = "access_attention"
+                                cycle.attention_since = datetime.now(UTC)
+                                cycle.attention_reason = exc.code
+                                cycle.error_code = exc.code
+                                cycle.error_message = str(exc)
+                                cycle.heartbeat_at = datetime.now(UTC)
+                        _append_event(cycle_id, "access_attention", "ACCESS_ATTENTION_REENTERED", "waiting", reason=exc.code)
+                    else:
+                        _mark_manual_validation_waiting(cycle_id, stage="manual_authentication", code=exc.code, message=str(exc))
                     task = None
+                    task_is_resume = False
                 else:
                     await identity_session.persist()
                     from backend.services.access_profiles import record_profile_validation
@@ -437,20 +579,29 @@ async def execute_access_cycle(cycle_id: str) -> None:
             bound.browser_context_id = identity["context_id"]
         await page.bring_to_front()
         timeline = lambda stage, event, status, **context: _append_event(cycle_id, stage, event, status, **context)
-        await _coordinate_owned_access(cycle_id, identity_session, page, ensure_access_cycle(
+        def coordinator_factory(reobserve_current_page: bool = False) -> Any:
+            return ensure_access_cycle(
+                page,
+                external_system={
+                    "id": system.id,
+                    "entry_url": cycle.entry_url,
+                    "expected_system_host": str(config.get("expected_system_host") or ""),
+                    "identity_selector": str(config.get("identity_selector") or ""),
+                    "run_start_strategy": str(config.get("run_start_strategy") or "external_entry_each_run"),
+                },
+                access_profile=profile_data,
+                action={"access_bootstrap": config.get("access_bootstrap") or []},
+                timeline=timeline,
+                require_external_system=True,
+                reobserve_current_page=reobserve_current_page,
+            )
+
+        await _coordinate_owned_access(
+            cycle_id,
+            identity_session,
             page,
-            external_system={
-                "id": system.id,
-                "entry_url": cycle.entry_url,
-                "expected_system_host": str(config.get("expected_system_host") or ""),
-                "identity_selector": str(config.get("identity_selector") or ""),
-                "run_start_strategy": str(config.get("run_start_strategy") or "external_entry_each_run"),
-            },
-            access_profile=profile_data,
-            action={"access_bootstrap": config.get("access_bootstrap") or []},
-            timeline=timeline,
-            require_external_system=True,
-        ))
+            coordinator_factory=coordinator_factory,
+        )
     except AccessCycleError as exc:
         logger.warning("Ciclo de acesso %s terminou: %s", cycle_id, exc.code)
         finish_access_cycle(cycle_id, status="failed", error_code=exc.code, error_message=str(exc))

@@ -155,6 +155,16 @@ credentials, cookies, tokens, OAuth query strings, or secret field values.
 For `external_entry_each_run`, `MAIN_GRAPH_STARTED` must follow
 `BOOTSTRAP_COMPLETED`.
 
+## INVARIANT: ACCESS_CYCLE_WORKER_OWNED_ATTENTION
+
+An active worker-owned AccessCycle may enter `needs_attention` without being
+cancelled or recreated. The owning worker keeps the cycle, BatchItem, Run,
+BrowserIdentitySession, BrowserContext, and page alive while continuing
+heartbeats. Resume is an explicit signal to the same worker, which
+reobserves the current page and must not navigate to `ExternalSystem.entry_url`
+again. A healthy owned cycle in attention is not stale-recovered; only a real
+loss of its worker ownership may make it eligible for recovery.
+
 ## Regression Rule
 
 Do not weaken or remove tests for these invariants to accommodate another

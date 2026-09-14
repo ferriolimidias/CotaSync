@@ -44,7 +44,15 @@ from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
 from backend.services.browser_observation import browser_observation_service
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
-from backend.services.access_cycles import AccessCycleError, create_access_cycle, get_access_cycle, validate_manual_access_cycle, validate_current_profile_session
+from backend.services.access_cycles import (
+    AccessCycleError,
+    create_access_cycle,
+    get_access_cycle,
+    request_access_attention,
+    request_access_resume,
+    validate_manual_access_cycle,
+    validate_current_profile_session,
+)
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -1619,6 +1627,29 @@ async def access_cycle_validate_manual(cycle_id: str, _user: AuthUser = Depends(
     except AccessCycleError as exc:
         raise _error(409, exc.code.upper(), str(exc)) from exc
     return {"status": "ok", **result}
+
+
+@router.post("/access-cycles/{cycle_id}/attention", summary="Solicita atenção worker-owned no ciclo de acesso")
+async def access_cycle_attention(cycle_id: str, payload: dict[str, Any] | None = None, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        cycle = request_access_attention(
+            cycle_id,
+            reason=str(body.get("reason") or "operator_requested"),
+            details=body.get("details") if isinstance(body.get("details"), dict) else None,
+        )
+    except AccessCycleError as exc:
+        raise _error(409, exc.code.upper(), str(exc)) from exc
+    return {"status": "ok", "access_cycle": cycle}
+
+
+@router.post("/access-cycles/{cycle_id}/resume", summary="Retoma o ciclo de acesso na página atual")
+async def access_cycle_resume(cycle_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        cycle = request_access_resume(cycle_id)
+    except AccessCycleError as exc:
+        raise _error(409, exc.code.upper(), str(exc)) from exc
+    return {"status": "ok", "access_cycle": cycle}
 
 
 @router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")

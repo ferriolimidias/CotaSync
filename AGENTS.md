@@ -101,6 +101,12 @@ their tests must not be weakened to accommodate future implementations.
 `ACCESS_PROFILE_BROWSER_ISOLATION_UNAVAILABLE`. Never substitute the global,
 default, or current browser context.
 
+AccessCycle quiescence is worker-owned: an active cycle may enter
+`needs_attention` while its worker, heartbeat, ownership, BrowserIdentitySession,
+BrowserContext, page, Run, and BatchItem remain alive. Resume signals the same
+worker to reobserve the current page; it never creates a new Run or cycle and
+never repeats `ExternalSystem.entry_url` merely because attention ended.
+
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
