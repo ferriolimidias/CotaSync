@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from backend.db import AccessCycle, Batch as DbBatch, BatchItem, Run as DbRun, SessionLocal, WorkerInstance, engine
 from backend.services.access_cycles import (
+    bind_access_cycle_owner,
     bind_worker_access_executor,
     claim_next_access_cycle,
     execute_access_cycle,
@@ -328,8 +329,9 @@ class PersistentBatchWorker:
                 touch_access_cycle(cycle_id, status="waiting")
                 await asyncio.sleep(poll_seconds())
         self.current_access_cycle_id = cycle_id
-        self.heartbeat("access_cycle")
         try:
+            bind_access_cycle_owner(cycle_id, self.instance_id)
+            self.heartbeat("access_cycle")
             await execute_access_cycle(cycle_id)
         finally:
             self.current_access_cycle_id = None

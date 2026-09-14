@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import unicodedata
 from datetime import UTC, datetime, timedelta
@@ -15,7 +16,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from backend.db import Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, ClientList, DataSource, DataSourceField, ExternalAccessProfile, ExternalSystem, Run as DbRun, SessionLocal
+from backend.db import AccessCycle, Action as DbAction, ActionVersion, Batch as DbBatch, BatchItem, Client as DbClient, ClientList, DataSource, DataSourceField, ExternalAccessProfile, ExternalSystem, GoogleSyncPending, Run as DbRun, SessionLocal, WorkerInstance
 from backend.services.google_sync_queue import pending_count
 from backend.services.actions_repository import find_action, resolve_compatible_actions
 from backend.services.clients_repository import (
@@ -49,6 +50,8 @@ ITEM_STATUS_INTERRUPTED = "interrupted"
 ITEM_STATUS_CANCELLED = "cancelled"
 ITEM_STATUS_NEEDS_ATTENTION = "needs_attention"
 ITEM_STATUS_NOT_PROCESSED = "not_processed"
+PRE_ACTION_RETRY_REASON = "PRE_ACTION_RETRY"
+LEGACY_RECONCILIATION_REASON = "LEGACY_EXECUTION_RECONCILIATION"
 
 FINAL_BATCH_STATUSES = {
     BATCH_STATUS_CANCELLED,
@@ -72,6 +75,24 @@ class BatchRunnerError(Exception):
 
 class BatchIdempotencyConflict(BatchRunnerError):
     """Idempotency-Key reutilizada com payload diferente no mesmo escopo."""
+
+
+class PreActionRetryDenied(BatchRunnerError):
+    """A reconciliação não pode provar que a Action ainda não começou."""
+
+    def __init__(self, code: str, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+
+class LegacyExecutionReconciliationDenied(BatchRunnerError):
+    """An explicit operator reconciliation failed a safety precondition."""
+
+    def __init__(self, code: str, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 
 def utc_now() -> datetime:
@@ -271,6 +292,432 @@ def _recount_batch(session: Any, batch_id: str) -> None:
     batch.error_items = sum(1 for item in items if item.status == ITEM_STATUS_ERROR)
     batch.interrupted_items = sum(1 for item in items if item.status == ITEM_STATUS_INTERRUPTED)
     batch.cancelled_items = sum(1 for item in items if item.status == ITEM_STATUS_CANCELLED)
+
+
+def _retry_stale_seconds() -> int:
+    return max(1, int(os.getenv("COTASYNC_WORKER_STALE_SECONDS", "60")))
+
+
+def _heartbeat_is_fresh(value: datetime | None, *, now: datetime) -> bool:
+    return bool(value and value >= now - timedelta(seconds=_retry_stale_seconds()))
+
+
+def _execution_marker(run: DbRun) -> tuple[bool | None, str | None]:
+    diagnostics = run.diagnostics if isinstance(run.diagnostics, dict) else {}
+    record = diagnostics.get("_record") if isinstance(diagnostics.get("_record"), dict) else {}
+    payload = diagnostics.get("_result_payload") if isinstance(diagnostics.get("_result_payload"), dict) else {}
+    action_started = record.get("action_started") if "action_started" in record else payload.get("action_started")
+    execution_stage = record.get("execution_stage") if "execution_stage" in record else payload.get("execution_stage")
+    if not isinstance(action_started, bool):
+        return None, str(execution_stage) if execution_stage else None
+    return action_started, str(execution_stage) if execution_stage else None
+
+
+def _contains_main_graph_event(value: Any) -> bool:
+    if isinstance(value, dict):
+        event = str(value.get("event") or "").upper()
+        stage = str(value.get("stage") or "").lower()
+        if event in {"MAIN_GRAPH_STARTED", "MAIN_STEP_STARTED", "ACTION_STEP_STARTED", "OUTPUT_PERSISTED"}:
+            return True
+        if stage == "main_graph" and event:
+            return True
+        return any(_contains_main_graph_event(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_main_graph_event(item) for item in value)
+    return False
+
+
+def _run_proves_pre_action(run: DbRun) -> bool:
+    action_started, execution_stage = _execution_marker(run)
+    if action_started is not False or execution_stage != "pre_action":
+        return False
+    diagnostics = run.diagnostics if isinstance(run.diagnostics, dict) else {}
+    payload = diagnostics.get("_result_payload") if isinstance(diagnostics.get("_result_payload"), dict) else {}
+    if _contains_main_graph_event(diagnostics) or _contains_main_graph_event(run.step_trace or []):
+        return False
+    if payload.get("dados_extraidos") or run.extracted_data:
+        return False
+    return True
+
+
+def _fresh_batch_owner(session: Any, batch: DbBatch, *, now: datetime) -> bool:
+    if not batch.worker_id:
+        return False
+    worker = session.get(WorkerInstance, batch.worker_id)
+    if worker is not None and worker.status != "offline" and _heartbeat_is_fresh(worker.heartbeat_at, now=now):
+        return True
+    return batch.status in {BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED} and _heartbeat_is_fresh(batch.heartbeat_at, now=now)
+
+
+def _fresh_execution_owner(session: Any, batch: DbBatch, *, now: datetime) -> bool:
+    """Treat a fresh running batch heartbeat as ownership even for legacy rows."""
+    if _fresh_batch_owner(session, batch, now=now):
+        return True
+    return batch.status in {BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED} and _heartbeat_is_fresh(batch.heartbeat_at, now=now)
+
+
+def _fresh_cycle_owner(cycle: AccessCycle | None, *, now: datetime) -> bool:
+    return bool(cycle and cycle.worker_id and cycle.status not in {"ready", "failed", "cancelled", "superseded"} and _heartbeat_is_fresh(cycle.heartbeat_at, now=now))
+
+
+def _resolve_retry_run(session: Any, item: BatchItem, requested_run_id: str | None) -> DbRun | None:
+    if requested_run_id:
+        run = session.get(DbRun, requested_run_id)
+        if run is None or run.batch_id != item.batch_id or (item.client_id and run.client_id != item.client_id):
+            raise PreActionRetryDenied("RUN_NOT_ASSOCIATED", "A Run informada não pertence ao item do batch.")
+        return run
+    if item.run_id:
+        return session.get(DbRun, item.run_id)
+    candidates = (
+        session.query(DbRun)
+        .filter(DbRun.batch_id == item.batch_id, DbRun.client_id == item.client_id)
+        .order_by(DbRun.created_at.desc())
+        .all()
+    )
+    if len(candidates) != 1:
+        raise PreActionRetryDenied("RUN_AMBIGUOUS", "Não foi possível identificar uma única Run antiga para reconciliar.")
+    return candidates[0]
+
+
+def _resolve_retry_cycle(session: Any, item: BatchItem, run: DbRun, requested_cycle_id: str | None) -> AccessCycle | None:
+    if requested_cycle_id:
+        cycle = session.get(AccessCycle, requested_cycle_id)
+        if cycle is None or cycle.access_profile_id != run.access_profile_id or cycle.external_system_id != run.external_system_id:
+            raise PreActionRetryDenied("ACCESS_CYCLE_NOT_ASSOCIATED", "O AccessCycle informado não corresponde à Run.")
+        return cycle
+    if not run.access_profile_id or not run.external_system_id or not run.created_at:
+        raise PreActionRetryDenied("ACCESS_CYCLE_UNRESOLVED", "A Run não possui dados suficientes para identificar o AccessCycle.")
+    lower_bound = run.created_at - timedelta(minutes=2)
+    cycles = (
+        session.query(AccessCycle)
+        .filter(
+            AccessCycle.access_profile_id == run.access_profile_id,
+            AccessCycle.external_system_id == run.external_system_id,
+            AccessCycle.created_at >= lower_bound,
+            AccessCycle.created_at <= utc_now() + timedelta(minutes=1),
+        )
+        .order_by(AccessCycle.created_at.desc())
+        .all()
+    )
+    if len(cycles) != 1:
+        raise PreActionRetryDenied("ACCESS_CYCLE_AMBIGUOUS", "Não foi possível identificar um único AccessCycle antigo para reconciliar.")
+    return cycles[0]
+
+
+def retry_pre_action_batch_item(
+    batch_id: str,
+    item_id: str,
+    *,
+    requested_run_id: str | None = None,
+    requested_access_cycle_id: str | None = None,
+) -> dict[str, Any]:
+    """Atomically reconcile a pre-action attempt and put only that item back in the queue."""
+    now = utc_now()
+    with SessionLocal.begin() as session:
+        batch = session.query(DbBatch).filter(DbBatch.id == batch_id).with_for_update().one_or_none()
+        if batch is None:
+            raise PreActionRetryDenied("BATCH_NOT_FOUND", "Batch não encontrado.")
+        item = (
+            session.query(BatchItem)
+            .filter(BatchItem.id == item_id, BatchItem.batch_id == batch_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if item is None:
+            raise PreActionRetryDenied("ITEM_NOT_FOUND", "Item não encontrado neste batch.")
+        marker = item.error_data if isinstance(item.error_data, dict) else {}
+        if item.status == ITEM_STATUS_PENDING and marker.get("reason") == PRE_ACTION_RETRY_REASON:
+            return {
+                "item_id": item.id, "old_run_id": marker.get("old_run_id"), "old_access_cycle_id": marker.get("old_access_cycle_id"),
+                "new_item_status": item.status, "retry_reason": PRE_ACTION_RETRY_REASON, "action_was_started": False, "ready_for_claim": True,
+            }
+        if item.status == ITEM_STATUS_SUCCESS:
+            raise PreActionRetryDenied("ITEM_ALREADY_SUCCESS", "Item concluído não pode ser reprocessado por retry pré-Action.")
+        if item.status not in {ITEM_STATUS_ERROR, ITEM_STATUS_INTERRUPTED, ITEM_STATUS_NEEDS_ATTENTION}:
+            raise PreActionRetryDenied("ITEM_NOT_RETRYABLE", "O item não está em estado de falha/interrupção retryable.")
+        if _fresh_batch_owner(session, batch, now=now):
+            raise PreActionRetryDenied("EXECUTION_STILL_OWNED", "A execução ainda possui owner ativo e heartbeat recente.")
+
+        run = _resolve_retry_run(session, item, requested_run_id)
+        if run is None or not _run_proves_pre_action(run):
+            raise PreActionRetryDenied("RETRY_DENIED", "Não foi possível provar de forma persistida que a Action não começou.", action_was_started=None)
+        cycle = _resolve_retry_cycle(session, item, run, requested_access_cycle_id)
+        if cycle is None or _fresh_cycle_owner(cycle, now=now):
+            raise PreActionRetryDenied("EXECUTION_STILL_OWNED", "O AccessCycle ainda possui owner ativo e heartbeat recente.")
+        if run.status == "success" or run.extracted_data:
+            raise PreActionRetryDenied("ACTION_ALREADY_TERMINAL", "A Run possui resultado e não pode ser reprocessada como pré-Action.")
+
+        previous_run_id = run.id
+        previous_cycle_id = cycle.id
+        attempt_history = list(item.attempt_history or [])
+        attempt_history.append({
+            "attempt": int(item.retry_count or 0) + 1,
+            "run_id": previous_run_id,
+            "access_cycle_id": previous_cycle_id,
+            "status": item.status,
+            "reason": PRE_ACTION_RETRY_REASON,
+            "finished_at": item.finished_at.isoformat() if item.finished_at else None,
+        })
+        run.status = "cancelled"
+        run.finished_at = now
+        run.result_summary = "Execução encerrada antes da Action para retry operacional."
+        run.error_data = {"code": PRE_ACTION_RETRY_REASON, "message": "A execução não iniciou a Action; o item foi reencaminhado para retry."}
+        run.diagnostics = {**(run.diagnostics if isinstance(run.diagnostics, dict) else {}), "pre_action_retry": {"reason": PRE_ACTION_RETRY_REASON, "reconciled_at": now.isoformat()}}
+        cycle.status = "superseded"
+        cycle.stage = "access_retry"
+        cycle.error_code = PRE_ACTION_RETRY_REASON
+        cycle.error_message = "AccessCycle encerrado para retry pré-Action."
+        cycle.finished_at = now
+        cycle.heartbeat_at = now
+        cycle.events = [*(cycle.events or []), {"timestamp": now.isoformat(), "stage": "access_retry", "event": PRE_ACTION_RETRY_REASON, "status": "success"}][-500:]
+        item.status = ITEM_STATUS_PENDING
+        item.run_id = None
+        item.result_data = {}
+        item.error_data = {"reason": PRE_ACTION_RETRY_REASON, "old_run_id": previous_run_id, "old_access_cycle_id": previous_cycle_id, "message": "Pronto para nova tentativa pelo worker."}
+        item.started_at = None
+        item.finished_at = None
+        item.retry_count = int(item.retry_count or 0) + 1
+        item.attempt_history = attempt_history
+        batch.status = BATCH_STATUS_QUEUED
+        batch.cancel_requested = False
+        batch.finished_at = None
+        batch.worker_id = None
+        batch.heartbeat_at = now
+        _recount_batch(session, batch_id)
+        return {
+            "item_id": item.id, "old_run_id": previous_run_id, "old_access_cycle_id": previous_cycle_id,
+            "new_item_status": item.status, "retry_reason": PRE_ACTION_RETRY_REASON, "action_was_started": False, "ready_for_claim": True,
+        }
+
+
+def _run_has_action_evidence(session: Any, run: DbRun, item: BatchItem, cycle: AccessCycle | None) -> bool:
+    """Return true for any durable evidence that the Action path was entered."""
+    if run.status in {"success", "completed"}:
+        return True
+    if run.step_trace or run.extracted_data:
+        return True
+    if item.result_data:
+        return True
+    diagnostics = run.diagnostics if isinstance(run.diagnostics, dict) else {}
+    if _contains_main_graph_event(diagnostics):
+        return True
+    if cycle is not None and _contains_main_graph_event(cycle.events or []):
+        return True
+    if session.query(GoogleSyncPending).filter(GoogleSyncPending.run_id == run.id).first() is not None:
+        return True
+    return False
+
+
+def _legacy_reconciliation_result(item: BatchItem, marker: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "item_id": item.id,
+        "old_run_id": marker.get("old_run_id"),
+        "old_access_cycle_id": marker.get("old_access_cycle_id"),
+        "new_item_status": item.status,
+        "reconciliation_reason": LEGACY_RECONCILIATION_REASON,
+        "automatic_pre_action_proof": False,
+        "operator_override": True,
+        "ready_for_claim": item.status == ITEM_STATUS_PENDING,
+        "idempotent": True,
+    }
+
+
+def reconcile_legacy_execution(
+    batch_id: str,
+    item_id: str,
+    *,
+    operator_acknowledgement: bool,
+    operator_reason: str,
+    evidence_reference: str | None = None,
+    actor: str,
+    actor_role: str,
+    requested_run_id: str | None = None,
+    requested_access_cycle_id: str | None = None,
+) -> dict[str, Any]:
+    """Requeue one legacy execution only after an explicit operator decision.
+
+    This intentionally does not call or relax ``retry_pre_action_batch_item``.
+    Missing historical telemetry remains a denial for automatic retry.
+    """
+    reason = str(operator_reason or "").strip()
+    if not operator_acknowledgement:
+        raise LegacyExecutionReconciliationDenied(
+            "OPERATOR_ACK_REQUIRED",
+            "A confirmação explícita do operador é obrigatória.",
+        )
+    if not reason:
+        raise LegacyExecutionReconciliationDenied(
+            "OPERATOR_REASON_REQUIRED",
+            "A justificativa do operador é obrigatória.",
+        )
+    if len(reason) > 1000:
+        raise LegacyExecutionReconciliationDenied(
+            "OPERATOR_REASON_TOO_LONG",
+            "A justificativa do operador excede 1000 caracteres.",
+        )
+    reference = str(evidence_reference or "").strip()[:255] or None
+    now = utc_now()
+    with SessionLocal.begin() as session:
+        batch = session.query(DbBatch).filter(DbBatch.id == batch_id).with_for_update().one_or_none()
+        if batch is None:
+            raise LegacyExecutionReconciliationDenied("BATCH_NOT_FOUND", "Batch não encontrado.")
+        item = (
+            session.query(BatchItem)
+            .filter(BatchItem.id == item_id, BatchItem.batch_id == batch_id)
+            .with_for_update()
+            .one_or_none()
+        )
+        if item is None:
+            raise LegacyExecutionReconciliationDenied("ITEM_NOT_FOUND", "Item não encontrado neste batch.")
+        marker = item.error_data if isinstance(item.error_data, dict) else {}
+        if item.status == ITEM_STATUS_PENDING and marker.get("reason") == LEGACY_RECONCILIATION_REASON:
+            return _legacy_reconciliation_result(item, marker)
+        if item.status == ITEM_STATUS_SUCCESS:
+            raise LegacyExecutionReconciliationDenied("ITEM_ALREADY_SUCCESS", "Item concluído não pode ser reconciliado.")
+        if item.status not in {ITEM_STATUS_RUNNING, ITEM_STATUS_ERROR, ITEM_STATUS_INTERRUPTED, ITEM_STATUS_NEEDS_ATTENTION}:
+            raise LegacyExecutionReconciliationDenied("ITEM_STATE_INCOMPATIBLE", "O item não está em estado reconciliável.")
+        if _fresh_execution_owner(session, batch, now=now):
+            raise LegacyExecutionReconciliationDenied(
+                "EXECUTION_STILL_OWNED",
+                "A execução ainda possui owner ativo e heartbeat recente.",
+                active_execution_owner=batch.worker_id,
+            )
+        if item.run_id and requested_run_id and item.run_id != requested_run_id:
+            raise LegacyExecutionReconciliationDenied(
+                "RUN_NOT_ASSOCIATED",
+                "O item já está associado a outra Run.",
+            )
+
+        run = _resolve_retry_run(session, item, requested_run_id)
+        if run is None:
+            raise LegacyExecutionReconciliationDenied("RUN_NOT_FOUND", "Não foi possível identificar a Run legada.")
+        if requested_run_id and run.id != requested_run_id:
+            raise LegacyExecutionReconciliationDenied("RUN_NOT_ASSOCIATED", "A Run informada não pertence ao item do batch.")
+        cycle = _resolve_retry_cycle(session, item, run, requested_access_cycle_id)
+        if cycle is None:
+            raise LegacyExecutionReconciliationDenied("ACCESS_CYCLE_UNRESOLVED", "Não foi possível identificar o AccessCycle legado.")
+        if _fresh_cycle_owner(cycle, now=now):
+            raise LegacyExecutionReconciliationDenied(
+                "EXECUTION_STILL_OWNED",
+                "O AccessCycle ainda possui owner ativo e heartbeat recente.",
+                active_execution_owner=cycle.worker_id,
+            )
+        if _run_has_action_evidence(session, run, item, cycle):
+            raise LegacyExecutionReconciliationDenied(
+                "ACTION_EXECUTION_EVIDENCE_PRESENT",
+                "Há evidência persistida de que a Action foi iniciada ou produziu saída.",
+            )
+        if run.status in {"success", "completed"}:
+            raise LegacyExecutionReconciliationDenied("RUN_TERMINAL_SUCCESS", "A Run já terminou com sucesso.")
+
+        previous = {
+            "batch_status": batch.status,
+            "item_status": item.status,
+            "run_status": run.status,
+            "access_cycle_status": cycle.status,
+            "access_cycle_stage": cycle.stage,
+        }
+        audit = {
+            "operation": LEGACY_RECONCILIATION_REASON,
+            "operator_override": True,
+            "automatic_pre_action_proof": False,
+            "operator_acknowledgement": True,
+            "operator": str(actor or "").strip()[:255],
+            "operator_role": str(actor_role or "").strip()[:32],
+            "operator_reason": reason,
+            "evidence_reference": reference,
+            "requested_at": now.isoformat(),
+            "previous": previous,
+            "result": {
+                "run_status": "cancelled",
+                "access_cycle_status": "superseded",
+                "item_status": ITEM_STATUS_PENDING,
+                "ready_for_claim": True,
+            },
+        }
+
+        run.status = "cancelled"
+        run.finished_at = now
+        run.result_summary = "Execução legada encerrada por reconciliação autorizada; a Action não foi marcada como executada."
+        run.error_data = {
+            **(run.error_data if isinstance(run.error_data, dict) else {}),
+            "code": LEGACY_RECONCILIATION_REASON,
+            "message": "Reconciliação administrativa explícita para nova tentativa.",
+        }
+        run.diagnostics = {
+            **(run.diagnostics if isinstance(run.diagnostics, dict) else {}),
+            "legacy_operator_reconciliation": audit,
+        }
+
+        cycle.status = "superseded"
+        cycle.stage = "legacy_reconciliation"
+        cycle.error_code = LEGACY_RECONCILIATION_REASON
+        cycle.error_message = "AccessCycle encerrado por reconciliação administrativa autorizada."
+        cycle.finished_at = now
+        cycle.heartbeat_at = now
+        cycle.events = [*(cycle.events or []), {
+            "timestamp": now.isoformat(),
+            "stage": "legacy_reconciliation",
+            "event": LEGACY_RECONCILIATION_REASON,
+            "status": "success",
+            "operator": audit["operator"],
+            "operator_role": audit["operator_role"],
+            "operator_reason": reason,
+            "evidence_reference": reference,
+            "operator_override": True,
+            "automatic_pre_action_proof": False,
+        }][-500:]
+
+        attempt_history = list(item.attempt_history or [])
+        attempt_history.append({
+            "attempt": int(item.retry_count or 0) + 1,
+            "run_id": run.id,
+            "access_cycle_id": cycle.id,
+            "status": item.status,
+            "reason": LEGACY_RECONCILIATION_REASON,
+            "operator": audit["operator"],
+            "reconciled_at": now.isoformat(),
+        })
+        item.status = ITEM_STATUS_PENDING
+        item.run_id = None
+        item.result_data = {}
+        item.error_data = {
+            "reason": LEGACY_RECONCILIATION_REASON,
+            "old_run_id": run.id,
+            "old_access_cycle_id": cycle.id,
+            "operator_override": True,
+            "automatic_pre_action_proof": False,
+            "operator": audit["operator"],
+            "operator_reason": reason,
+            "evidence_reference": reference,
+            "message": "Pronto para nova tentativa pelo worker normal.",
+        }
+        item.started_at = None
+        item.finished_at = None
+        item.retry_count = int(item.retry_count or 0) + 1
+        item.attempt_history = attempt_history
+
+        metadata = batch.metadata_json if isinstance(batch.metadata_json, dict) else {}
+        audit_entries = list(metadata.get("legacy_reconciliation_audit") or [])
+        audit_entries.append(audit)
+        batch.metadata_json = {**metadata, "legacy_reconciliation_audit": audit_entries[-100:]}
+        batch.status = BATCH_STATUS_QUEUED
+        batch.cancel_requested = False
+        batch.finished_at = None
+        batch.worker_id = None
+        batch.heartbeat_at = now
+        _recount_batch(session, batch_id)
+        return {
+            "item_id": item.id,
+            "old_run_id": run.id,
+            "old_access_cycle_id": cycle.id,
+            "new_item_status": item.status,
+            "reconciliation_reason": LEGACY_RECONCILIATION_REASON,
+            "automatic_pre_action_proof": False,
+            "operator_override": True,
+            "ready_for_claim": True,
+            "idempotent": False,
+        }
 
 
 def _batch_final_status(items: list[BatchItem], *, cancel_requested: bool = False) -> str:
@@ -796,7 +1243,9 @@ def claim_next_batch(worker_id: str) -> str | None:
 def claim_next_item(batch_id: str) -> str | None:
     now = utc_now()
     with SessionLocal.begin() as session:
-        batch = session.get(DbBatch, batch_id)
+        # Keep the lock order batch -> item aligned with administrative
+        # reconciliation so a claim cannot race a requeue transaction.
+        batch = session.query(DbBatch).filter(DbBatch.id == batch_id).with_for_update().one_or_none()
         if batch is None or batch.status not in {BATCH_STATUS_RUNNING, BATCH_STATUS_CANCEL_REQUESTED}:
             return None
         if batch.cancel_requested or batch.status == BATCH_STATUS_CANCEL_REQUESTED:

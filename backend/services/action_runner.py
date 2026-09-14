@@ -643,6 +643,15 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
             "run_start_strategy": run.run_start_strategy,
         },
     )
+
+    def emit_timeline(stage: str, event: str, status: str, **details: Any) -> dict[str, Any]:
+        payload = timeline.emit(stage, event, status, **details)
+        if event == "MAIN_GRAPH_STARTED" and not run.action_started:
+            run.action_started = True
+            run.execution_stage = "main_graph"
+            update_run(run)
+        return payload
+
     timeline.emit("run", "RUN_STARTED", "success")
     terminal_exception: Exception | None = None
     try:
@@ -691,7 +700,7 @@ async def finish_action_run(action: ActionDetail, request: ActionRunRequest, run
                 run.id,
                 batch_id=request.batch_id,
                 progress_callback=report_waiting,
-                timeline_callback=timeline.emit,
+                timeline_callback=emit_timeline,
             )
             text = str(result.get("texto") or result.get("motivo") or "").strip()
             execution_status = str(result.get("status") or "").strip().lower()

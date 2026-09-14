@@ -47,6 +47,10 @@ class RunRecord(BaseModel):
     summary_source: Literal["ai", "deterministic"] | None = None
     summary_reason: str | None = None
     error_message: str | None = None
+    # Persisted execution markers make pre-action reconciliation fail closed
+    # instead of treating missing timeline events as proof of no execution.
+    execution_stage: Literal["pre_action", "main_graph", "output", "terminal"] = "pre_action"
+    action_started: bool = False
 
 
 class ActionRunResponse(BaseModel):

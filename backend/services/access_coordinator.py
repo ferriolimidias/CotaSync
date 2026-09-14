@@ -179,6 +179,7 @@ class CanonicalAccessCoordinator:
         terminal_probe: Callable[[], Any] | None = None,
         same_logical_unit: bool = False,
         require_external_system: bool = True,
+        reobserve_current_page: bool = False,
     ) -> AccessCycleResult:
         system = external_system if isinstance(external_system, dict) else {}
         profile = access_profile if isinstance(access_profile, dict) else {}
@@ -199,6 +200,42 @@ class CanonicalAccessCoordinator:
                 code=str(context.get("code") or "access_context_invalid"),
                 stage="access_start",
             )
+        if reobserve_current_page:
+            if not identifier:
+                raise AccessCycleError("O perfil de acesso não possui login_identifier.", code="access_identifier_missing", stage="access_identity")
+            expected_host = str(system.get("expected_system_host") or config.get("expected_system_host") or "").strip()
+            latest_identity = IdentityEvidenceResult("unknown")
+            _emit(timeline, "access", "ACCESS_CYCLE_RESUME_REOBSERVATION_STARTED", "started", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
+
+            async def current_page_ready() -> bool:
+                nonlocal latest_identity
+                current_host = url_host(_safe_page_path(page))
+                if expected_host and current_host != expected_host:
+                    raise AccessCycleError(
+                        "A página atual ainda não está no sistema externo.",
+                        code="access_authentication_not_completed",
+                        stage="access",
+                    )
+                latest_identity = await _identity_evidence(page, profile, system)
+                if latest_identity.status == "mismatch":
+                    raise AccessCycleError(
+                        "A identidade externa ativa não corresponde ao perfil de acesso.",
+                        code="access_identity_mismatch",
+                        stage="access_identity",
+                    )
+                return latest_identity.status == "match"
+
+            await wait_for_runtime_state(
+                current_page_ready,
+                state_name="reobservação da página atual",
+                terminal_probe=terminal_probe,
+                cancellation_probe=cancellation_probe,
+                on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
+            )
+            _emit(timeline, "access_identity", "ACCESS_IDENTITY_VERIFIED", "success", access_profile_id=profile_id, identity_evidence=list(latest_identity.evidence))
+            _emit(timeline, "access", "EXTERNAL_SYSTEM_READY", "success", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page), resumed=True)
+            _emit(timeline, "access", "ACCESS_CYCLE_RESUMED", "success", access_profile_id=profile_id)
+            return AccessCycleResult("external_system_ready", page, entry_url, profile_selected=True, identity_evidence=latest_identity.evidence)
         if same_logical_unit and strategy == EXTERNAL_ENTRY_EACH_RUN:
             return AccessCycleResult("external_system_ready", page, entry_url, profile_selected=True)
         if strategy != EXTERNAL_ENTRY_EACH_RUN:

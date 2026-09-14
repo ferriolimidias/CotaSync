@@ -39,12 +39,22 @@ from backend.services.batch_runner import (
     resume_batch,
     resume_pending_batch,
     retry_failed_batch,
+    LegacyExecutionReconciliationDenied,
+    reconcile_legacy_execution,
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
 from backend.services.browser_observation import browser_observation_service
 from backend.services.session_guardian import classify_microsoft_auth_state, detect_microsoft_account_picker
-from backend.services.access_cycles import AccessCycleError, create_access_cycle, get_access_cycle, validate_manual_access_cycle, validate_current_profile_session
+from backend.services.access_cycles import (
+    AccessCycleError,
+    create_access_cycle,
+    get_access_cycle,
+    request_access_attention,
+    request_access_resume,
+    validate_manual_access_cycle,
+    validate_current_profile_session,
+)
 from backend.services.clients_repository import (
     ClientsRepositoryError,
     CLIENT_TEMPLATE_COLUMNS,
@@ -1621,6 +1631,29 @@ async def access_cycle_validate_manual(cycle_id: str, _user: AuthUser = Depends(
     return {"status": "ok", **result}
 
 
+@router.post("/access-cycles/{cycle_id}/attention", summary="Solicita atenção worker-owned no ciclo de acesso")
+async def access_cycle_attention(cycle_id: str, payload: dict[str, Any] | None = None, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    body = payload if isinstance(payload, dict) else {}
+    try:
+        cycle = request_access_attention(
+            cycle_id,
+            reason=str(body.get("reason") or "operator_requested"),
+            details=body.get("details") if isinstance(body.get("details"), dict) else None,
+        )
+    except AccessCycleError as exc:
+        raise _error(409, exc.code.upper(), str(exc)) from exc
+    return {"status": "ok", "access_cycle": cycle}
+
+
+@router.post("/access-cycles/{cycle_id}/resume", summary="Retoma o ciclo de acesso na página atual")
+async def access_cycle_resume(cycle_id: str, _user: AuthUser = Depends(require_user)) -> dict[str, Any]:
+    try:
+        cycle = request_access_resume(cycle_id)
+    except AccessCycleError as exc:
+        raise _error(409, exc.code.upper(), str(exc)) from exc
+    return {"status": "ok", "access_cycle": cycle}
+
+
 @router.get("/settings/learning-ai", summary="Configuração da IA de aprendizado")
 async def learning_ai_settings(_admin: AuthUser = Depends(require_admin)) -> dict[str, Any]:
     return {"status": "ok", "learning_ai": public_settings()}
@@ -1855,6 +1888,38 @@ async def batches_retry_errors(batch_id: str, _user: AuthUser = Depends(require_
     if batch is None:
         raise _error(409, "BATCH_NO_ERRORS", "Este lote não possui erros para reprocessar.")
     return {"status": "ok", "batch": batch}
+
+
+class LegacyReconciliationRequest(BaseModel):
+    operator_acknowledgement: bool = False
+    operator_reason: str = Field(min_length=1, max_length=1000)
+    evidence_reference: str | None = Field(default=None, max_length=255)
+    run_id: str | None = None
+    access_cycle_id: str | None = None
+
+
+@router.post("/batches/{batch_id}/items/{item_id}/reconcile-legacy-execution", summary="Reconcilia execução legada com autorização explícita")
+async def batches_reconcile_legacy_execution(
+    batch_id: str,
+    item_id: str,
+    payload: LegacyReconciliationRequest,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    try:
+        result = reconcile_legacy_execution(
+            batch_id,
+            item_id,
+            operator_acknowledgement=payload.operator_acknowledgement,
+            operator_reason=payload.operator_reason,
+            evidence_reference=payload.evidence_reference,
+            actor=_user.username,
+            actor_role=_user.role,
+            requested_run_id=payload.run_id,
+            requested_access_cycle_id=payload.access_cycle_id,
+        )
+    except LegacyExecutionReconciliationDenied as exc:
+        raise _error(409, exc.code, str(exc), **exc.details) from exc
+    return {"status": "ok", "reconciliation": result}
 
 
 @router.post("/batches/{batch_id}/send-google", summary="Envia somente pendências ao Google")
