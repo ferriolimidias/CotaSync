@@ -39,6 +39,8 @@ from backend.services.batch_runner import (
     resume_batch,
     resume_pending_batch,
     retry_failed_batch,
+    LegacyExecutionReconciliationDenied,
+    reconcile_legacy_execution,
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.browser_providers import configured_browser_mode, desktop_browser_health
@@ -1886,6 +1888,38 @@ async def batches_retry_errors(batch_id: str, _user: AuthUser = Depends(require_
     if batch is None:
         raise _error(409, "BATCH_NO_ERRORS", "Este lote não possui erros para reprocessar.")
     return {"status": "ok", "batch": batch}
+
+
+class LegacyReconciliationRequest(BaseModel):
+    operator_acknowledgement: bool = False
+    operator_reason: str = Field(min_length=1, max_length=1000)
+    evidence_reference: str | None = Field(default=None, max_length=255)
+    run_id: str | None = None
+    access_cycle_id: str | None = None
+
+
+@router.post("/batches/{batch_id}/items/{item_id}/reconcile-legacy-execution", summary="Reconcilia execução legada com autorização explícita")
+async def batches_reconcile_legacy_execution(
+    batch_id: str,
+    item_id: str,
+    payload: LegacyReconciliationRequest,
+    _user: AuthUser = Depends(require_user),
+) -> dict[str, Any]:
+    try:
+        result = reconcile_legacy_execution(
+            batch_id,
+            item_id,
+            operator_acknowledgement=payload.operator_acknowledgement,
+            operator_reason=payload.operator_reason,
+            evidence_reference=payload.evidence_reference,
+            actor=_user.username,
+            actor_role=_user.role,
+            requested_run_id=payload.run_id,
+            requested_access_cycle_id=payload.access_cycle_id,
+        )
+    except LegacyExecutionReconciliationDenied as exc:
+        raise _error(409, exc.code, str(exc), **exc.details) from exc
+    return {"status": "ok", "reconciliation": result}
 
 
 @router.post("/batches/{batch_id}/send-google", summary="Envia somente pendências ao Google")

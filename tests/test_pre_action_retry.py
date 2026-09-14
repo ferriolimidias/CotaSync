@@ -12,8 +12,12 @@ from backend.services.batch_runner import (
     ITEM_STATUS_ERROR,
     ITEM_STATUS_INTERRUPTED,
     ITEM_STATUS_PENDING,
+    ITEM_STATUS_RUNNING,
     ITEM_STATUS_SUCCESS,
+    LEGACY_RECONCILIATION_REASON,
+    LegacyExecutionReconciliationDenied,
     PreActionRetryDenied,
+    reconcile_legacy_execution,
     retry_pre_action_batch_item,
 )
 
@@ -143,5 +147,116 @@ def test_two_concurrent_retries_do_not_duplicate_work():
         with SessionLocal() as db:
             assert db.get(BatchItem, ids[3]).retry_count == 1
             assert db.query(Run).filter(Run.batch_id == ids[2]).count() == 1
+    finally:
+        _cleanup(ids)
+
+
+def test_legacy_missing_marker_denies_automatic_retry_but_allows_explicit_reconciliation():
+    ids = _fixture()
+    try:
+        with SessionLocal.begin() as db:
+            db.get(Run, ids[4]).diagnostics = {"_record": {}, "_result_payload": {}}
+        with pytest.raises(PreActionRetryDenied) as denied:
+            retry_pre_action_batch_item(ids[2], ids[3], requested_run_id=ids[4], requested_access_cycle_id=ids[5])
+        assert denied.value.code == "RETRY_DENIED"
+
+        result = reconcile_legacy_execution(
+            ids[2], ids[3], operator_acknowledgement=True,
+            operator_reason="Revisão operacional documentada da execução legada.",
+            evidence_reference="legacy-preaction-audit", actor="operator", actor_role="operator",
+            requested_run_id=ids[4], requested_access_cycle_id=ids[5],
+        )
+        assert result["operator_override"] is True
+        assert result["automatic_pre_action_proof"] is False
+        with SessionLocal() as db:
+            item, run, cycle, batch = (db.get(BatchItem, ids[3]), db.get(Run, ids[4]), db.get(AccessCycle, ids[5]), db.get(Batch, ids[2]))
+            assert item.status == ITEM_STATUS_PENDING and item.run_id is None
+            assert run.status == "cancelled" and run.diagnostics["legacy_operator_reconciliation"]["operator_override"] is True
+            assert run.diagnostics["legacy_operator_reconciliation"]["automatic_pre_action_proof"] is False
+            assert cycle.status == "superseded" and cycle.error_code == LEGACY_RECONCILIATION_REASON
+            assert batch.status == "queued" and batch.processed_items == 0 and batch.success_items == 0
+    finally:
+        _cleanup(ids)
+
+
+def test_legacy_reconciliation_requires_acknowledgement_and_reason():
+    ids = _fixture()
+    try:
+        with pytest.raises(LegacyExecutionReconciliationDenied) as ack_error:
+            reconcile_legacy_execution(ids[2], ids[3], operator_acknowledgement=False, operator_reason="x", actor="operator", actor_role="operator")
+        assert ack_error.value.code == "OPERATOR_ACK_REQUIRED"
+        with pytest.raises(LegacyExecutionReconciliationDenied) as reason_error:
+            reconcile_legacy_execution(ids[2], ids[3], operator_acknowledgement=True, operator_reason="", actor="operator", actor_role="operator")
+        assert reason_error.value.code == "OPERATOR_REASON_REQUIRED"
+    finally:
+        _cleanup(ids)
+
+
+def test_legacy_reconciliation_blocks_active_owner_and_action_evidence():
+    active = _fixture(item_status=ITEM_STATUS_RUNNING, batch_status="running")
+    try:
+        with SessionLocal.begin() as db:
+            batch = db.get(Batch, active[2])
+            batch.worker_id = "legacy-worker"
+            batch.heartbeat_at = datetime.now(UTC)
+            db.add(WorkerInstance(id="legacy-worker", instance_id="legacy-worker", status="running", heartbeat_at=datetime.now(UTC)))
+        with pytest.raises(LegacyExecutionReconciliationDenied) as owner_error:
+            reconcile_legacy_execution(active[2], active[3], operator_acknowledgement=True, operator_reason="owner check", actor="operator", actor_role="operator", requested_run_id=active[4], requested_access_cycle_id=active[5])
+        assert owner_error.value.code == "EXECUTION_STILL_OWNED"
+    finally:
+        with SessionLocal.begin() as db:
+            db.query(WorkerInstance).filter(WorkerInstance.id == "legacy-worker").delete()
+        _cleanup(active)
+
+    evidence = _fixture()
+    try:
+        with SessionLocal.begin() as db:
+            db.get(Run, evidence[4]).step_trace = [{"step_index": 0, "status": "started"}]
+        with pytest.raises(LegacyExecutionReconciliationDenied) as evidence_error:
+            reconcile_legacy_execution(evidence[2], evidence[3], operator_acknowledgement=True, operator_reason="evidence check", actor="operator", actor_role="operator", requested_run_id=evidence[4], requested_access_cycle_id=evidence[5])
+        assert evidence_error.value.code == "ACTION_EXECUTION_EVIDENCE_PRESENT"
+    finally:
+        _cleanup(evidence)
+
+
+def test_legacy_reconciliation_preserves_order_counters_and_does_not_create_execution():
+    ids = _fixture()
+    try:
+        with SessionLocal.begin() as db:
+            success = BatchItem(id=f"{ids[3]}-success", batch_id=ids[2], client_id=None, position=19, status=ITEM_STATUS_SUCCESS, result_data={"value": "ok"}, input_variables={})
+            db.add(success)
+            db.get(Run, ids[4]).diagnostics = {"_record": {}, "_result_payload": {}}
+        reconcile_legacy_execution(ids[2], ids[3], operator_acknowledgement=True, operator_reason="ordering check", actor="admin", actor_role="admin", requested_run_id=ids[4], requested_access_cycle_id=ids[5])
+        with SessionLocal() as db:
+            assert db.get(BatchItem, f"{ids[3]}-success").status == ITEM_STATUS_SUCCESS
+            assert db.get(Batch, ids[2]).success_items == 1
+            assert db.query(Run).filter(Run.batch_id == ids[2]).count() == 1
+            assert db.query(AccessCycle).filter(AccessCycle.id == ids[5]).count() == 1
+        from backend.services.batch_runner import claim_next_batch, claim_next_item
+        assert claim_next_batch("reconcile-worker") == ids[2]
+        assert claim_next_item(ids[2]) == ids[3]
+        assert claim_next_item(ids[2]) is None
+    finally:
+        with SessionLocal.begin() as db:
+            db.query(BatchItem).filter(BatchItem.id == f"{ids[3]}-success").delete()
+        _cleanup(ids)
+
+
+def test_legacy_reconciliation_is_idempotent_and_concurrent():
+    ids = _fixture()
+    try:
+        with SessionLocal.begin() as db:
+            db.get(Run, ids[4]).diagnostics = {"_record": {}, "_result_payload": {}}
+
+        def call():
+            return reconcile_legacy_execution(ids[2], ids[3], operator_acknowledgement=True, operator_reason="concurrency check", actor="operator", actor_role="operator", requested_run_id=ids[4], requested_access_cycle_id=ids[5])
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: call(), range(2)))
+        assert sum(1 for result in results if result["idempotent"]) == 1
+        with SessionLocal() as db:
+            assert db.get(BatchItem, ids[3]).retry_count == 1
+            assert db.query(Run).filter(Run.batch_id == ids[2]).count() == 1
+            assert db.query(AccessCycle).filter(AccessCycle.id == ids[5]).count() == 1
     finally:
         _cleanup(ids)

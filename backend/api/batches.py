@@ -19,6 +19,8 @@ from backend.services.batch_runner import (
     retry_failed_batch,
     PreActionRetryDenied,
     retry_pre_action_batch_item,
+    LegacyExecutionReconciliationDenied,
+    reconcile_legacy_execution,
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.auth import require_user
@@ -39,6 +41,14 @@ class BatchCreateRequest(BaseModel):
 
 
 class PreActionRetryRequest(BaseModel):
+    run_id: str | None = None
+    access_cycle_id: str | None = None
+
+
+class LegacyReconciliationRequest(BaseModel):
+    operator_acknowledgement: bool = False
+    operator_reason: str = Field(min_length=1, max_length=1000)
+    evidence_reference: str | None = Field(default=None, max_length=255)
     run_id: str | None = None
     access_cycle_id: str | None = None
 
@@ -156,6 +166,31 @@ async def retry_pre_action_item_endpoint(batch_id: str, item_id: str, payload: P
     except PreActionRetryDenied as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc), **exc.details}) from exc
     return {"status": "ok", "retry": result}
+
+
+@router.post("/{batch_id}/items/{item_id}/reconcile-legacy-execution")
+async def reconcile_legacy_execution_endpoint(
+    request: Request,
+    batch_id: str,
+    item_id: str,
+    payload: LegacyReconciliationRequest,
+) -> dict[str, Any]:
+    user = require_user(request)
+    try:
+        result = reconcile_legacy_execution(
+            batch_id,
+            item_id,
+            operator_acknowledgement=payload.operator_acknowledgement,
+            operator_reason=payload.operator_reason,
+            evidence_reference=payload.evidence_reference,
+            actor=user.username,
+            actor_role=user.role,
+            requested_run_id=payload.run_id,
+            requested_access_cycle_id=payload.access_cycle_id,
+        )
+    except LegacyExecutionReconciliationDenied as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc), **exc.details}) from exc
+    return {"status": "ok", "reconciliation": result}
 
 
 @router.post("/{batch_id}/send-google")
