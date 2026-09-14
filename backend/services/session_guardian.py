@@ -900,14 +900,20 @@ class SessionGuardian:
                 try:
                     locator = page.locator(selector).filter(has_text=re.compile(re.escape(text), re.I)).first
                     if await locator.count() > 0 and await locator.is_visible():
-                        await locator.click(timeout=self.config.check_timeout_seconds * 1000)
+                        # Microsoft submits the picker form immediately. Do
+                        # not make the click await a cross-document load;
+                        # the coordinator owns the subsequent state wait.
+                        await locator.click(timeout=self.config.check_timeout_seconds * 1000, no_wait_after=True)
                         return True
                 except Exception:
                     pass
             try:
                 locator = page.get_by_text(text, exact=False).first
                 if await locator.count() > 0 and await locator.is_visible():
-                    await locator.click(timeout=self.config.check_timeout_seconds * 1000)
+                    # The account selection can navigate/detach its auth
+                    # frame as part of the click. Completion is confirmed by
+                    # the coordinator after this dispatch.
+                    await locator.click(timeout=self.config.check_timeout_seconds * 1000, no_wait_after=True)
                     return True
             except Exception:
                 continue

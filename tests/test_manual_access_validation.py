@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from backend.db import AccessCycle, ExternalAccessProfile, ExternalSystem, SessionLocal
+from backend.services.access_coordinator import IdentityEvidenceResult
 from backend.services.access_cycles import validate_manual_access_cycle, _validate_owned_access_cycle, _coordinate_owned_access, touch_access_cycle
 from backend.services.access_profiles import validate_profile_from_observation
 
@@ -93,7 +94,7 @@ def test_manual_auth_validate_success() -> None:
     ids = _cycle("https://system.example.test/home")
     factory, provider = _provider(ids[3])
     try:
-        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=True)):
+        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=IdentityEvidenceResult("match", "priscila@example.test", ("priscila@example.test",)))):
             result = asyncio.run(_validate_fixture(ids))
         assert result["validated"] is True
         with SessionLocal() as db:
@@ -122,7 +123,7 @@ def test_validate_wrong_identity_does_not_complete_cycle() -> None:
     ids = _cycle("https://system.example.test/home")
     factory, provider = _provider(ids[3])
     try:
-        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=False)):
+        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=IdentityEvidenceResult("mismatch", "other@example.test", ("other@example.test",)))):
             result = asyncio.run(_validate_fixture(ids))
         assert result["code"] == "ACCESS_IDENTITY_MISMATCH"
         with SessionLocal() as db:
@@ -136,7 +137,7 @@ def test_validate_does_not_navigate_current_page() -> None:
     ids = _cycle("https://system.example.test/home")
     factory, provider = _provider(ids[3])
     try:
-        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=True)):
+        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=IdentityEvidenceResult("match", "priscila@example.test", ("priscila@example.test",)))):
             asyncio.run(_validate_fixture(ids))
         ids[3].goto.assert_not_awaited()
     finally:
@@ -147,7 +148,7 @@ def test_learning_can_use_the_same_manual_validation_operation() -> None:
     ids = _cycle("https://system.example.test/home")
     factory, provider = _provider(ids[3])
     try:
-        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=True)):
+        with patch("backend.services.access_cycles.async_playwright", return_value=factory), patch("backend.services.access_cycles.browser_provider", return_value=provider), patch("backend.services.access_cycles._identity_evidence", new=AsyncMock(return_value=IdentityEvidenceResult("match", "priscila@example.test", ("priscila@example.test",)))):
             result = asyncio.run(_validate_fixture(ids))
         assert result["access_cycle"]["stage"] == "external_system_ready"
     finally:

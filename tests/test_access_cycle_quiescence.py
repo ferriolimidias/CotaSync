@@ -125,7 +125,7 @@ def test_resume_preserves_cycle_and_reobserves_without_entry_navigation():
             resumed.set()
             return SimpleNamespace(identity_evidence=())
 
-        with patch("backend.services.access_cycles.record_profile_validation"):
+        with patch("backend.services.access_profiles.record_profile_validation"):
             task = asyncio.create_task(_coordinate_owned_access(ids[2], identity, SimpleNamespace(context=identity.context), coordinator_factory=coordinator))
             await started.wait()
             request_access_attention(ids[2], reason="operator_requested")
