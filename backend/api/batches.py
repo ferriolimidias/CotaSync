@@ -17,6 +17,8 @@ from backend.services.batch_runner import (
     resume_batch,
     resume_pending_batch,
     retry_failed_batch,
+    PreActionRetryDenied,
+    retry_pre_action_batch_item,
 )
 from backend.services.google_sync_queue import send_pending_google
 from backend.services.auth import require_user
@@ -34,6 +36,11 @@ class BatchCreateRequest(BaseModel):
     client_ids: list[str] = Field(default_factory=list)
     requested_by: str = "api"
     delay_between_rows_seconds: float = 3
+
+
+class PreActionRetryRequest(BaseModel):
+    run_id: str | None = None
+    access_cycle_id: str | None = None
 
 
 @router.post("")
@@ -135,6 +142,20 @@ async def retry_failed_batch_endpoint(batch_id: str) -> dict[str, Any]:
     if batch is None:
         raise HTTPException(status_code=409, detail="Este lote não possui erros para reprocessar.")
     return {"status": "ok", "batch": batch}
+
+
+@router.post("/{batch_id}/items/{item_id}/retry")
+async def retry_pre_action_item_endpoint(batch_id: str, item_id: str, payload: PreActionRetryRequest | None = None) -> dict[str, Any]:
+    try:
+        result = retry_pre_action_batch_item(
+            batch_id,
+            item_id,
+            requested_run_id=payload.run_id if payload else None,
+            requested_access_cycle_id=payload.access_cycle_id if payload else None,
+        )
+    except PreActionRetryDenied as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc), **exc.details}) from exc
+    return {"status": "ok", "retry": result}
 
 
 @router.post("/{batch_id}/send-google")
