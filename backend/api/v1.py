@@ -28,6 +28,7 @@ from backend.services.action_runner import missing_required_variables, run_actio
 from backend.schemas.runs import ActionRunRequest
 from backend.services.execution_preflight import preflight_action_execution
 from backend.services.auth import AuthUser, require_admin, require_user
+from backend.services.worker_reconciliation import StaleWorkerReconciliationDenied, reconcile_stale_worker_instance
 from backend.services.batch_runner import (
     BatchIdempotencyConflict,
     BatchRunnerError,
@@ -1898,6 +1899,10 @@ class LegacyReconciliationRequest(BaseModel):
     access_cycle_id: str | None = None
 
 
+class StaleWorkerReconciliationRequest(BaseModel):
+    process_absent_confirmed: bool = False
+
+
 @router.post("/batches/{batch_id}/items/{item_id}/reconcile-legacy-execution", summary="Reconcilia execução legada com autorização explícita")
 async def batches_reconcile_legacy_execution(
     batch_id: str,
@@ -1918,6 +1923,23 @@ async def batches_reconcile_legacy_execution(
             requested_access_cycle_id=payload.access_cycle_id,
         )
     except LegacyExecutionReconciliationDenied as exc:
+        raise _error(409, exc.code, str(exc), **exc.details) from exc
+    return {"status": "ok", "reconciliation": result}
+
+
+@router.post("/workers/{worker_id}/reconcile-stale", summary="Reconcilia somente metadata de worker stale")
+async def reconcile_stale_worker(
+    worker_id: str,
+    payload: StaleWorkerReconciliationRequest,
+    _admin: AuthUser = Depends(require_admin),
+) -> dict[str, Any]:
+    try:
+        result = reconcile_stale_worker_instance(
+            worker_id,
+            process_absent_confirmed=payload.process_absent_confirmed,
+            actor=_admin.username,
+        )
+    except StaleWorkerReconciliationDenied as exc:
         raise _error(409, exc.code, str(exc), **exc.details) from exc
     return {"status": "ok", "reconciliation": result}
 

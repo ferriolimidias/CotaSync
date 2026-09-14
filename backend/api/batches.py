@@ -23,7 +23,8 @@ from backend.services.batch_runner import (
     reconcile_legacy_execution,
 )
 from backend.services.google_sync_queue import send_pending_google
-from backend.services.auth import require_user
+from backend.services.auth import require_admin, require_user
+from backend.services.worker_reconciliation import StaleWorkerReconciliationDenied, reconcile_stale_worker_instance
 from backend.worker import latest_worker_status
 
 router = APIRouter(prefix="/api/batches", tags=["batches"])
@@ -51,6 +52,10 @@ class LegacyReconciliationRequest(BaseModel):
     evidence_reference: str | None = Field(default=None, max_length=255)
     run_id: str | None = None
     access_cycle_id: str | None = None
+
+
+class StaleWorkerReconciliationRequest(BaseModel):
+    process_absent_confirmed: bool = False
 
 
 @router.post("")
@@ -189,6 +194,24 @@ async def reconcile_legacy_execution_endpoint(
             requested_access_cycle_id=payload.access_cycle_id,
         )
     except LegacyExecutionReconciliationDenied as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc), **exc.details}) from exc
+    return {"status": "ok", "reconciliation": result}
+
+
+@router.post("/workers/{worker_id}/reconcile-stale")
+async def reconcile_stale_worker_endpoint(
+    request: Request,
+    worker_id: str,
+    payload: StaleWorkerReconciliationRequest,
+) -> dict[str, Any]:
+    admin = require_admin(request)
+    try:
+        result = reconcile_stale_worker_instance(
+            worker_id,
+            process_absent_confirmed=payload.process_absent_confirmed,
+            actor=admin.username,
+        )
+    except StaleWorkerReconciliationDenied as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc), **exc.details}) from exc
     return {"status": "ok", "reconciliation": result}
 
