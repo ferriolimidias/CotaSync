@@ -48,14 +48,19 @@ _MICROSOFT_HOSTS = {
 
 
 def build_microsoft_entry_url(entry_url: str) -> str:
-    """Force explicit account selection without discarding OAuth parameters."""
+    """Return the canonical Microsoft entry without forcing interaction.
+
+    The persisted entry URL may contain a historical ``prompt`` value.  A
+    logical access cycle must observe the provider's real state instead of
+    forcing account selection or consent.  All other OAuth parameters remain
+    intact.
+    """
     raw = normalize_external_entry_url(entry_url)
     parsed = urlsplit(raw)
     host = str(parsed.hostname or "").casefold()
     if host not in _MICROSOFT_HOSTS and not any(host.endswith(f".{item}") for item in _MICROSOFT_HOSTS):
         return raw
-    params = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.casefold() not in {"login_hint", "domain_hint", "prompt"}]
-    params.append(("prompt", "select_account"))
+    params = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.casefold() != "prompt"]
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(params), parsed.fragment))
 
 
@@ -278,10 +283,8 @@ class CanonicalAccessCoordinator:
             _emit(timeline, "external_entry", "EXTERNAL_ENTRY_COMPLETED", "success", host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
 
             picker = {"observed": False}
-            picker_restart_count = 0
 
             async def observe_picker() -> bool:
-                nonlocal picker_restart_count
                 if not hasattr(page, "locator"):
                     picker["observed"] = "microsoft" in _safe_page_path(page).casefold()
                     return True
@@ -295,27 +298,15 @@ class CanonicalAccessCoordinator:
                     picker["observed"] = True
                     _emit(timeline, "access", "ACCOUNT_PICKER_OBSERVED", "observed", access_profile_id=profile_id, host=url_host(_safe_page_path(page)), path=_safe_page_path(page))
                     return True
-                direct_states = {"microsoft_consent_required", "authenticated_system"}
-                direct_external = state.state in direct_states or url_host(_safe_page_path(page)) == str(system.get("expected_system_host") or "").strip()
-                if direct_external:
-                    if picker_restart_count < 1:
-                        picker_restart_count += 1
-                        _emit(timeline, "access", "ACCOUNT_PICKER_SKIPPED", "retrying", access_profile_id=profile_id)
-                        _emit(
-                            timeline,
-                            "external_entry",
-                            "CANONICAL_ENTRY_NAVIGATION_STARTED",
-                            "retrying",
-                            canonical_entry_url_source="ExternalSystem.entry_url",
-                            entry_url=entry_url,
-                        )
-                        await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
-                        return False
+                if state.state in {"microsoft_consent_required", "microsoft_password_required", "microsoft_mfa_required"}:
                     raise AccessCycleError(
-                        "A entrada Microsoft não apresentou o Account Picker para este novo ciclo.",
-                        code="account_picker_skipped",
-                        stage="account_picker",
+                        "A entrada externa exige intervenção de autenticação.",
+                        code="access_authentication_not_completed",
+                        stage="authentication",
                     )
+                direct_external = state.state == "authenticated_system" or url_host(_safe_page_path(page)) == str(system.get("expected_system_host") or "").strip()
+                if direct_external:
+                    return True
                 return False
 
             await wait_for_runtime_state(
@@ -329,13 +320,11 @@ class CanonicalAccessCoordinator:
             selected = False
             if picker["observed"]:
                 _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_STARTED", "started", access_profile_id=profile_id)
-                selection_restart_count = 0
-                picker_miss_count = 0
+                selection_attempts = 0
+                stable_picker_probes = 0
 
                 async def select_profile() -> bool:
-                    nonlocal selected, selection_restart_count, picker_miss_count
-                    if selected:
-                        return True
+                    nonlocal selected, selection_attempts, stable_picker_probes
                     state = await self.guardian.classify(
                         page,
                         {**config, "access_profile_email_or_identifier": identifier, "microsoft_saved_account_identifier": identifier},
@@ -346,33 +335,20 @@ class CanonicalAccessCoordinator:
                         _is_account_picker_scope(scope, value) for scope, value in scope_texts
                     )
                     if not picker_still_visible:
-                        # Microsoft may replace the auth iframe while the
-                        # picker is settling. One empty probe is not proof
-                        # that explicit profile selection was skipped.
-                        picker_miss_count += 1
-                        if picker_miss_count < 8:
-                            return False
-                        # A pre-existing Microsoft session must never become a
-                        # successful profile selection for this logical unit.
-                        if selection_restart_count < 1:
-                            selection_restart_count += 1
-                            _emit(timeline, "access", "ACCOUNT_PICKER_SELECTION_LOST", "retrying", access_profile_id=profile_id)
-                            _emit(
-                                timeline,
-                                "external_entry",
-                                "CANONICAL_ENTRY_NAVIGATION_STARTED",
-                                "retrying",
-                                canonical_entry_url_source="ExternalSystem.entry_url",
-                                entry_url=entry_url,
-                            )
-                            await page.goto(effective_entry_url, wait_until="domcontentloaded", timeout=5000)
-                            return False
+                        return True
+                    stable_picker_probes += 1
+                    if selection_attempts >= 2 and stable_picker_probes >= 8:
+                        _emit(timeline, "access", "ACCOUNT_SELECTION_STALLED", "attention", access_profile_id=profile_id, attempts=selection_attempts)
                         raise AccessCycleError(
-                            "O Account Picker deixou de estar disponível antes da seleção explícita do perfil.",
-                            code="account_picker_selection_lost",
+                            "O Account Picker permaneceu sem transição após tentativas controladas.",
+                            code="ACCOUNT_SELECTION_STALLED",
                             stage="account_picker",
                         )
-                    picker_miss_count = 0
+                    if selection_attempts > 0 and stable_picker_probes < 8:
+                        return False
+                    selection_attempts += 1
+                    stable_picker_probes = 0
+                    _emit(timeline, "access", "ACCOUNT_SELECTION_ATTEMPT", "started", access_profile_id=profile_id, attempt=selection_attempts)
                     selection_action = {
                         "microsoft_saved_account_identifier": identifier,
                         "access_profile_email_or_identifier": identifier,
@@ -380,7 +356,18 @@ class CanonicalAccessCoordinator:
                     }
                     selected = False
                     for scope in _page_scopes(page):
-                        if await self.guardian.click_configured_saved_account(scope, selection_action):
+                        if await self.guardian.click_configured_saved_account(
+                            scope,
+                            selection_action,
+                            on_event=lambda event, **context: _emit(
+                                timeline,
+                                "access",
+                                event,
+                                "observed" if event == "EXPECTED_TILE_FOUND" else "started",
+                                access_profile_id=profile_id,
+                                **context,
+                            ),
+                        ):
                             selected = True
                             break
                     return selected
@@ -393,27 +380,7 @@ class CanonicalAccessCoordinator:
                     on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
                 )
 
-                async def confirm_selection() -> bool:
-                    if not hasattr(page, "locator"):
-                        return True
-                    scope_texts = [(scope, await _body_text(scope)) for scope in _page_scopes(page)]
-                    text = "\n".join(value for _, value in scope_texts)
-                    state = await self.guardian.classify(page, {**config, "access_profile_email_or_identifier": identifier})
-                    picker_visible = state.state == "microsoft_pick_account" or any(
-                        _is_account_picker_scope(scope, value) for scope, value in scope_texts
-                    )
-                    return not picker_visible
-
-                await wait_for_runtime_state(
-                    confirm_selection,
-                    state_name="confirmação do perfil de acesso",
-                    terminal_probe=terminal_probe,
-                    cancellation_probe=cancellation_probe,
-                    on_waiting=lambda name: _emit(timeline, "access", "WAITING_EXTERNAL_SYSTEM", "waiting", wait_target=name),
-                )
                 _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_COMPLETED", "success", access_profile_id=profile_id)
-            else:
-                _emit(timeline, "access", "ACCESS_PROFILE_SELECTION_COMPLETED", "success", access_profile_id=profile_id, detail="entry_auto_selected")
 
             raw_bootstrap = config.get("access_bootstrap")
             bootstrap = raw_bootstrap if isinstance(raw_bootstrap, list) else []

@@ -344,7 +344,6 @@ async def _validate_owned_access_cycle(cycle_id: str, identity_session: BrowserI
             return {"status": "ready", "validated": True, "access_cycle": get_access_cycle(cycle_id)}
         allowed_failed = {
             "reauthentication_required",
-            "account_picker_skipped",
             "access_authentication_not_completed",
             "ACCESS_IDENTITY_NOT_OBSERVED",
             "access_identity_mismatch",
@@ -510,9 +509,16 @@ async def _coordinate_owned_access(
                 try:
                     await task
                 except AccessCycleError as exc:
-                    if exc.code not in {"account_picker_skipped", "account_picker_selection_lost", "reauthentication_required", "access_authentication_not_completed", "access_identity_mismatch"}:
+                    if exc.code not in {"ACCOUNT_SELECTION_STALLED", "reauthentication_required", "access_authentication_not_completed", "access_identity_mismatch"}:
                         raise
-                    if task_is_resume:
+                    if exc.code == "ACCOUNT_SELECTION_STALLED":
+                        request_access_attention(
+                            cycle_id,
+                            reason=exc.code,
+                            details={"stage": exc.stage, "operator_action_required": True},
+                        )
+                        _append_event(cycle_id, "access_attention", "ACCESS_ATTENTION_REQUESTED", "waiting", reason=exc.code)
+                    elif task_is_resume:
                         with SessionLocal.begin() as db:
                             cycle = db.get(AccessCycle, cycle_id)
                             if cycle is not None and cycle.status not in {"ready", "cancelled", "superseded"}:
